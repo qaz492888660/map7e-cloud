@@ -20,12 +20,41 @@ const folderThemes = [
   },
 ]
 
-const HOME_LABEL = '\u5bb6'
-const ROOT_LABEL = '\u6839\u76ee\u5f55'
-const ROOT_OVERVIEW_LABEL = '\u6839\u76ee\u5f55\u6982\u89c8'
-const FILE_LIST_SUFFIX = '\u6587\u4ef6\u5217\u8868'
-const EMPTY_FOLDER_MESSAGE = '\u5f53\u524d\u76ee\u5f55\u8fd8\u6ca1\u6709\u53ef\u4e0b\u8f7d\u6587\u4ef6\u3002'
-const NO_MATCH_MESSAGE = '\u5f53\u524d\u76ee\u5f55\u4e0b\u6ca1\u6709\u5339\u914d\u641c\u7d22\u6761\u4ef6\u7684\u6587\u4ef6\u3002'
+const TEXT = {
+  home: '\u5bb6',
+  root: '\u6839\u76ee\u5f55',
+  rootOverview: '\u6839\u76ee\u5f55\u6982\u89c8',
+  fileListSuffix: '\u6587\u4ef6\u5217\u8868',
+  pageType: '\u9759\u6001\u4e91\u7aef\u8d44\u6e90\u7ad9',
+  intro: '\u4fdd\u6301\u76ee\u5f55\u5207\u6362\u4e0e\u4e0b\u8f7d\u4f53\u9a8c\uff0c\u6240\u6709\u5185\u5bb9\u5747\u6765\u81ea\u9759\u6001 JSON \u4e0e /downloads \u8d44\u6e90\u76ee\u5f55\u3002',
+  searchRoot: '\u8bf7\u5148\u8fdb\u5165\u4e00\u4e2a\u76ee\u5f55\u540e\u518d\u641c\u7d22',
+  searchInPrefix: '\u5728',
+  searchInSuffix: '\u4e2d\u641c\u7d22\u6587\u4ef6',
+  brandingSubline: '\u6d77\u6d0b\u98ce\u683c\u9759\u6001\u4e91\u76d8',
+  loading: '\u52a0\u8f7d\u4e2d',
+  files: '\u6587\u4ef6',
+  folders: '\u76ee\u5f55',
+  totalFiles: '\u6587\u4ef6\u603b\u6570',
+  lastUpdated: '\u6700\u65b0\u66f4\u65b0',
+  loadingLibrary: '\u6b63\u5728\u8f7d\u5165\u76ee\u5f55\u6570\u636e',
+  fileName: '\u6587\u4ef6\u540d',
+  fileSize: '\u5927\u5c0f',
+  fileDate: '\u65e5\u671f',
+  action: '\u64cd\u4f5c',
+  download: '\u4e0b\u8f7d',
+  emptyFolder: '\u5f53\u524d\u76ee\u5f55\u6682\u65e0\u53ef\u4e0b\u8f7d\u6587\u4ef6\u3002',
+  noMatch: '\u5f53\u524d\u76ee\u5f55\u4e0b\u6ca1\u6709\u5339\u914d\u5173\u952e\u8bcd\u7684\u6587\u4ef6\u3002',
+  rootGuide: '\u70b9\u51fb\u4e0a\u65b9\u76ee\u5f55\u5361\u7247\uff0c\u5373\u53ef\u8fdb\u5165\u5bf9\u5e94\u5206\u7c7b\u67e5\u770b\u5e76\u4e0b\u8f7d\u6587\u4ef6\u3002',
+  rootFoldersHint: '\u5df2\u63d0\u4f9b 3 \u4e2a\u6839\u76ee\u5f55\uff0c\u7528\u4e8e\u5feb\u901f\u8fdb\u5165\u4e0d\u540c\u8d44\u6e90\u5206\u7c7b\u3002',
+  totalFilesHint: '\u6240\u6709\u8d44\u6e90\u90fd\u4ece /downloads/... \u76f4\u63a5\u4e0b\u8f7d\u3002',
+  lastUpdatedHintPrefix: '\u76ee\u5f55\u6e05\u5355\u66f4\u65b0\u65f6\u95f4\uff1a',
+  lastUpdatedHintFallback: '\u672a\u6807\u6ce8',
+  updatedPrefix: '\u66f4\u65b0\u4e8e',
+  itemUnit: '\u9879',
+  copyright: 'Copyright \u00a9 2026 Map7e. All rights reserved.',
+  errorFallback: '\u65e0\u6cd5\u8f7d\u5165\u9759\u6001\u76ee\u5f55\u6e05\u5355\u3002',
+  invalidManifest: '\u76ee\u5f55\u6e05\u5355\u683c\u5f0f\u4e0d\u6b63\u786e\u3002',
+}
 
 const panelVisible = ref(false)
 const search = ref('')
@@ -87,25 +116,23 @@ const allFiles = computed(() =>
 
 const totalFiles = computed(() => allFiles.value.length)
 
-const currentViewTitle = computed(() => activeFolder.value?.name || ROOT_LABEL)
-
 const currentViewDescription = computed(() =>
-  activeFolder.value?.description || 'Select a static folder to browse and download files from that directory only.',
+  activeFolder.value?.description || TEXT.rootGuide,
 )
 
 const latestDateLabel = computed(() => {
   if (allFiles.value.length === 0) {
-    return 'No entries'
+    return '--'
   }
 
   return allFiles.value
     .map((file) => file.date || '')
     .filter(Boolean)
-    .sort((left, right) => new Date(right).getTime() - new Date(left).getTime())[0] || 'No entries'
+    .sort((left, right) => new Date(right).getTime() - new Date(left).getTime())[0] || '--'
 })
 
 const breadcrumbs = computed(() => {
-  const items = [{ label: HOME_LABEL, slug: '' }]
+  const items = [{ label: TEXT.home, slug: '' }]
 
   if (activeFolder.value) {
     items.push({
@@ -124,9 +151,29 @@ const themedRootFolders = computed(() =>
     return {
       ...folder,
       ...folderThemes[index % folderThemes.length],
-      itemCountLabel: `${folderFiles.length} files`,
+      itemCountLabel: `${folderFiles.length} ${TEXT.itemUnit}`,
     }
   }),
+)
+
+const searchPlaceholder = computed(() => {
+  if (!activeFolder.value) {
+    return TEXT.searchRoot
+  }
+
+  return `${TEXT.searchInPrefix}${activeFolder.value.name}${TEXT.searchInSuffix}`
+})
+
+const currentListTitle = computed(() => {
+  if (!activeFolder.value) {
+    return TEXT.loadingLibrary
+  }
+
+  return `${activeFolder.value.name}${TEXT.fileListSuffix}`
+})
+
+const currentItemCountLabel = computed(() =>
+  loadingLibrary.value ? TEXT.loading : `${visibleFiles.value.length} ${TEXT.itemUnit}`,
 )
 
 const fileBadgeClass = (type) => {
@@ -141,18 +188,30 @@ const fileBadgeClass = (type) => {
   return styles[type] || styles.other
 }
 
+const fileTypeLabel = (type) => {
+  const labels = {
+    archive: '\u538b\u7f29\u5305',
+    document: '\u6587\u6863',
+    image: '\u56fe\u7247',
+    video: '\u89c6\u9891',
+    other: '\u5176\u4ed6',
+  }
+
+  return labels[type] || labels.other
+}
+
 const normalizeFolder = (folder, fallbackUpdatedAt) => ({
   slug: String(folder?.slug || ''),
-  name: String(folder?.name || 'Untitled Folder'),
+  name: String(folder?.name || '\u672a\u547d\u540d\u76ee\u5f55'),
   description: String(folder?.description || ''),
-  updatedLabel: String(folder?.updatedLabel || fallbackUpdatedAt || 'Recently updated'),
+  updatedLabel: String(folder?.updatedLabel || fallbackUpdatedAt || '--'),
 })
 
 const normalizeFile = (item) => ({
-  name: String(item?.name || 'Untitled file'),
+  name: String(item?.name || '\u672a\u547d\u540d\u6587\u4ef6'),
   path: String(item?.path || '#'),
-  size: String(item?.size || 'Unknown size'),
-  date: String(item?.date || 'Unknown date'),
+  size: String(item?.size || '--'),
+  date: String(item?.date || '--'),
   type: String(item?.type || 'other').toLowerCase(),
   description: String(item?.description || ''),
 })
@@ -207,11 +266,11 @@ const loadLibrary = async () => {
     const payload = await response.json()
 
     if (!response.ok) {
-      throw new Error('Unable to load the static library manifest.')
+      throw new Error(TEXT.errorFallback)
     }
 
     if (!Array.isArray(payload?.rootFolders) || typeof payload?.folders !== 'object' || payload?.folders === null) {
-      throw new Error('The library manifest format is invalid.')
+      throw new Error(TEXT.invalidManifest)
     }
 
     manifestTitle.value = typeof payload?.title === 'string' && payload.title ? payload.title : 'Map7e Cloud Resource Library'
@@ -221,7 +280,7 @@ const loadLibrary = async () => {
   } catch (error) {
     rootFolders.value = []
     folderMap.value = {}
-    errorMessage.value = error instanceof Error ? error.message : 'Unable to load the static library manifest.'
+    errorMessage.value = error instanceof Error ? error.message : TEXT.errorFallback
   } finally {
     loadingLibrary.value = false
   }
@@ -279,7 +338,7 @@ onMounted(async () => {
         <div class="pointer-events-none absolute inset-0 rounded-[20px] border border-cyan-100/[0.08]" />
         <div class="pointer-events-none absolute inset-0 rounded-[20px] shadow-[inset_0_1px_0_rgba(255,255,255,0.22),0_0_48px_rgba(56,189,248,0.08)]" />
 
-        <header class="relative z-10 flex flex-col gap-3 border-b border-white/10 px-6 py-3 md:px-8">
+        <header class="relative z-10 flex flex-col gap-3 border-b border-white/10 px-6 py-4 md:px-8">
           <nav class="flex items-center overflow-x-auto text-[0.78rem] text-white/[0.48]">
             <template v-for="(crumb, index) in breadcrumbs" :key="`${crumb.slug || 'home'}-${index}`">
               <span v-if="index > 0" class="px-2 text-white/[0.25]">/</span>
@@ -296,9 +355,7 @@ onMounted(async () => {
 
           <div class="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
             <div class="min-w-0">
-              <p class="text-xs uppercase tracking-[0.28em] text-cyan-100/60">{{ manifestTitle }}</p>
-              <h1 class="truncate font-display text-[1.4rem] font-semibold text-white/95 md:text-[1.55rem]">{{ currentViewTitle }}</h1>
-              <p class="mt-1 text-sm text-white/[0.62]">
+              <p class="text-sm leading-7 text-white/[0.62]">
                 {{ currentViewDescription }}
               </p>
             </div>
@@ -315,17 +372,23 @@ onMounted(async () => {
                   v-model="search"
                   type="text"
                   :disabled="!activeFolder"
-                  :placeholder="activeFolder ? `Search in ${activeFolder.name}` : 'Enter a directory to browse files'"
+                  :placeholder="searchPlaceholder"
                   class="w-full rounded-full border border-white/10 bg-white/10 py-3 pl-11 pr-4 text-sm text-white placeholder:text-white/[0.45] outline-none transition duration-300 focus:border-cyan-200/[0.35] focus:bg-white/[0.14] focus:shadow-[0_0_0_4px_rgba(125,211,252,0.08)] disabled:cursor-not-allowed disabled:opacity-60"
                 />
               </label>
 
-              <a
-                href="/files/library.json"
-                class="inline-flex items-center justify-center rounded-full bg-gradient-to-r from-sky-400 via-cyan-300 to-blue-400 px-5 py-3 text-sm font-semibold text-slate-950 shadow-[0_12px_30px_rgba(56,189,248,0.28)] transition duration-300 hover:-translate-y-0.5 hover:shadow-[0_16px_38px_rgba(96,165,250,0.42)] focus:outline-none"
-              >
-                View Library JSON
-              </a>
+              <div class="group flex min-w-[11.5rem] items-center gap-3 rounded-[18px] border border-white/12 bg-white/[0.09] px-4 py-3 shadow-[0_14px_30px_rgba(7,33,58,0.18)] backdrop-blur-xl">
+                <div class="relative flex h-11 w-11 items-center justify-center overflow-hidden rounded-2xl border border-white/12 bg-[radial-gradient(circle_at_30%_30%,rgba(255,255,255,0.35),transparent_42%),linear-gradient(145deg,rgba(68,180,255,0.9),rgba(17,80,150,0.95))] shadow-[inset_0_1px_0_rgba(255,255,255,0.28),0_10px_22px_rgba(18,103,176,0.28)]">
+                  <svg class="h-6 w-6 text-white/95" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                    <path d="M7.25 14.5c-1.933 0-3.5-1.455-3.5-3.25S5.317 8 7.25 8c.544 0 1.058.116 1.518.323C9.497 6.324 11.348 5 13.5 5c2.865 0 5.25 2.346 5.25 5.25l-.006.245A3.754 3.754 0 0 1 20.25 17.5h-13" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+                    <path d="M8.25 18.25h7.5M9.75 15.75h4.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+                  </svg>
+                </div>
+                <div class="min-w-0">
+                  <p class="font-display text-[1.02rem] font-semibold tracking-[0.18em] text-white/95">Map7e</p>
+                  <p class="text-[0.72rem] uppercase tracking-[0.24em] text-cyan-100/60">{{ TEXT.brandingSubline }}</p>
+                </div>
+              </div>
             </div>
           </div>
         </header>
@@ -379,7 +442,7 @@ onMounted(async () => {
                 <div class="mt-6">
                   <p class="text-[1.02rem] font-medium text-white/95">{{ folder.name }}</p>
                   <p class="mt-1.5 text-sm leading-6 text-white/[0.56]">{{ folder.description }}</p>
-                  <p class="mt-2 text-xs uppercase tracking-[0.2em] text-white/[0.4]">Updated {{ folder.updatedLabel }}</p>
+                  <p class="mt-2 text-xs uppercase tracking-[0.2em] text-white/[0.4]">{{ TEXT.updatedPrefix }} {{ folder.updatedLabel }}</p>
                   <div class="mt-4 h-1.5 overflow-hidden rounded-full bg-[#1F2E40]">
                     <div class="h-full w-4/5 rounded-full bg-gradient-to-r" :class="folder.accent" />
                   </div>
@@ -393,28 +456,28 @@ onMounted(async () => {
             class="flex min-h-0 flex-1 flex-col justify-between overflow-hidden rounded-[22px] border border-white/10 bg-slate-950/[0.18] px-5 py-5 shadow-[inset_0_1px_0_rgba(255,255,255,0.05)]"
           >
             <div>
-              <p class="text-xs uppercase tracking-[0.28em] text-cyan-100/60">Home</p>
-              <h3 class="mt-1 font-display text-lg font-semibold text-white/95">{{ ROOT_OVERVIEW_LABEL }}</h3>
+              <p class="text-xs uppercase tracking-[0.28em] text-cyan-100/60">{{ TEXT.pageType }}</p>
+              <h3 class="mt-1 font-display text-lg font-semibold text-white/95">{{ TEXT.rootOverview }}</h3>
               <p class="mt-2 max-w-3xl text-sm leading-7 text-white/[0.58]">
-                The root view keeps the directory-first interaction while all data still comes from static JSON and static files. Click any folder card above to enter that directory and open its downloads.
+                {{ TEXT.rootGuide }}
               </p>
             </div>
 
             <div class="grid gap-3 pt-6 md:grid-cols-3">
               <div class="rounded-[20px] border border-white/10 bg-white/[0.06] px-4 py-4">
-                <p class="text-xs uppercase tracking-[0.22em] text-white/[0.42]">Folders</p>
+                <p class="text-xs uppercase tracking-[0.22em] text-white/[0.42]">{{ TEXT.folders }}</p>
                 <p class="mt-2 text-2xl font-semibold text-white/90">{{ themedRootFolders.length }}</p>
-                <p class="mt-2 text-sm leading-6 text-white/[0.54]">Three static root directories are available from the home view.</p>
+                <p class="mt-2 text-sm leading-6 text-white/[0.54]">{{ TEXT.rootFoldersHint }}</p>
               </div>
               <div class="rounded-[20px] border border-white/10 bg-white/[0.06] px-4 py-4">
-                <p class="text-xs uppercase tracking-[0.22em] text-white/[0.42]">Files</p>
+                <p class="text-xs uppercase tracking-[0.22em] text-white/[0.42]">{{ TEXT.totalFiles }}</p>
                 <p class="mt-2 text-2xl font-semibold text-white/90">{{ totalFiles }}</p>
-                <p class="mt-2 text-sm leading-6 text-white/[0.54]">All downloadable files are served directly from `/downloads/...`.</p>
+                <p class="mt-2 text-sm leading-6 text-white/[0.54]">{{ TEXT.totalFilesHint }}</p>
               </div>
               <div class="rounded-[20px] border border-white/10 bg-white/[0.06] px-4 py-4">
-                <p class="text-xs uppercase tracking-[0.22em] text-white/[0.42]">Updated</p>
+                <p class="text-xs uppercase tracking-[0.22em] text-white/[0.42]">{{ TEXT.lastUpdated }}</p>
                 <p class="mt-2 text-2xl font-semibold text-white/90">{{ latestDateLabel }}</p>
-                <p class="mt-2 text-sm leading-6 text-white/[0.54]">Library manifest date: {{ manifestUpdatedAt || 'not specified' }}.</p>
+                <p class="mt-2 text-sm leading-6 text-white/[0.54]">{{ TEXT.lastUpdatedHintPrefix }}{{ manifestUpdatedAt || TEXT.lastUpdatedHintFallback }}</p>
               </div>
             </div>
           </section>
@@ -425,22 +488,22 @@ onMounted(async () => {
           >
             <div class="mb-2.5 flex items-center justify-between gap-3">
               <div>
-                <p class="text-xs uppercase tracking-[0.28em] text-cyan-100/60">{{ activeFolder ? 'Files' : 'Loading' }}</p>
+                <p class="text-xs uppercase tracking-[0.28em] text-cyan-100/60">{{ activeFolder ? TEXT.files : TEXT.loading }}</p>
                 <h3 class="mt-1 font-display text-lg font-semibold text-white/95">
-                  {{ activeFolder ? `${activeFolder.name} ${FILE_LIST_SUFFIX}` : 'Loading library' }}
+                  {{ currentListTitle }}
                 </h3>
               </div>
               <div class="rounded-full bg-white/[0.06] px-3 py-1.5 text-sm text-white/60">
-                {{ loadingLibrary ? 'Loading...' : `${visibleFiles.length} items` }}
+                {{ currentItemCountLabel }}
               </div>
             </div>
 
             <div class="file-list-scroll min-h-0 flex-1 overflow-auto pr-1">
               <div class="hidden grid-cols-[minmax(0,1.8fr)_110px_128px_120px] gap-4 px-3 pb-2 text-xs uppercase tracking-[0.24em] text-white/40 md:grid">
-                <span>Name</span>
-                <span>Size</span>
-                <span>Date</span>
-                <span class="text-right">Download</span>
+                <span>{{ TEXT.fileName }}</span>
+                <span>{{ TEXT.fileSize }}</span>
+                <span>{{ TEXT.fileDate }}</span>
+                <span class="text-right">{{ TEXT.action }}</span>
               </div>
 
               <div v-if="loadingLibrary" class="space-y-2">
@@ -475,15 +538,15 @@ onMounted(async () => {
                       <div class="flex flex-wrap items-center gap-2">
                         <p class="truncate text-[0.94rem] font-medium text-white/92">{{ file.name }}</p>
                         <span class="inline-flex rounded-full px-2.5 py-1 text-[0.7rem] font-medium uppercase tracking-[0.2em]" :class="fileBadgeClass(file.type)">
-                          {{ file.type }}
+                          {{ fileTypeLabel(file.type) }}
                         </span>
                       </div>
                       <p v-if="file.description" class="mt-1.5 text-sm leading-6 text-white/[0.56]">
                         {{ file.description }}
                       </p>
                       <div class="mt-2 flex flex-wrap gap-2 text-xs text-white/[0.5] md:hidden">
-                        <span class="rounded-full bg-white/[0.06] px-3 py-1">Size {{ file.size }}</span>
-                        <span class="rounded-full bg-white/[0.06] px-3 py-1">Date {{ file.date }}</span>
+                        <span class="rounded-full bg-white/[0.06] px-3 py-1">{{ TEXT.fileSize }} {{ file.size }}</span>
+                        <span class="rounded-full bg-white/[0.06] px-3 py-1">{{ TEXT.fileDate }} {{ file.date }}</span>
                       </div>
                     </div>
                   </div>
@@ -496,7 +559,7 @@ onMounted(async () => {
                       download
                       class="inline-flex w-full items-center justify-center rounded-full border border-cyan-200/20 bg-white/[0.08] px-4 py-2.5 text-sm font-semibold text-cyan-50 transition duration-300 hover:border-cyan-200/35 hover:bg-white/[0.14] hover:text-white md:w-auto"
                     >
-                      Download
+                      {{ TEXT.download }}
                     </a>
                   </div>
                 </article>
@@ -505,19 +568,25 @@ onMounted(async () => {
                   v-if="activeFolder.files.length === 0"
                   class="rounded-[20px] border border-white/10 bg-white/[0.05] px-6 py-10 text-center text-white/60"
                 >
-                  {{ EMPTY_FOLDER_MESSAGE }}
+                  {{ TEXT.emptyFolder }}
                 </div>
 
                 <div
                   v-else-if="visibleFiles.length === 0"
                   class="rounded-[20px] border border-white/10 bg-white/[0.05] px-6 py-10 text-center text-white/60"
                 >
-                  {{ NO_MATCH_MESSAGE }}
+                  {{ TEXT.noMatch }}
                 </div>
               </div>
             </div>
           </section>
         </div>
+
+        <footer class="relative z-10 border-t border-white/10 px-6 py-3 text-center text-xs tracking-[0.16em] text-white/[0.48] md:px-8">
+          <div class="rounded-full border border-white/8 bg-white/[0.04] px-4 py-2 shadow-[inset_0_1px_0_rgba(255,255,255,0.06)]">
+            {{ TEXT.copyright }}
+          </div>
+        </footer>
       </div>
     </div>
   </div>

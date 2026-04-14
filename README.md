@@ -1,4 +1,4 @@
-# Map7e Cloud Directory Library
+# Map7e - Cloud
 
 `map7e-cloud` is now a static directory-based download library. The interface keeps the ocean-themed glassmorphism look, restores clickable folder navigation, and does not depend on uploads or server-side APIs.
 
