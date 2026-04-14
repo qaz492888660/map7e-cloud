@@ -1,7 +1,7 @@
 <script setup>
 import { computed, onMounted, ref } from 'vue'
 
-const folderThemes = [
+const summaryThemes = [
   {
     accent: 'from-cyan-200/80 via-sky-200/65 to-blue-300/70',
     iconBg: 'bg-cyan-100/80',
@@ -22,15 +22,11 @@ const folderThemes = [
 
 const panelVisible = ref(false)
 const search = ref('')
-const rootFolders = ref([])
 const files = ref([])
-const breadcrumbs = ref([{ label: 'Home', path: '' }])
-const activePath = ref('')
-const activeLabel = ref('Home')
-const loadingListing = ref(false)
-const uploading = ref(false)
+const manifestTitle = ref('Map7e Cloud Resource Library')
+const manifestUpdatedAt = ref('')
+const loadingManifest = ref(false)
 const errorMessage = ref('')
-const fileInput = ref(null)
 
 const bubbleSpecs = [
   { id: 'b1', size: 22, left: '4%', bottom: '-10%', duration: '34s', delay: '0s', opacity: 0.13, blur: 0.3, driftA: '10px', driftB: '-14px', driftC: '8px', scaleStart: 0.76, scaleMid: 0.92, scaleEnd: 1.02 },
@@ -62,15 +58,6 @@ const backgroundStyle = {
     "linear-gradient(180deg, rgba(255,255,255,0.08), rgba(3,12,28,0.4) 48%, rgba(2,8,23,0.78) 100%), url('/assets/ocean-background.svg'), radial-gradient(circle at 20% 12%, rgba(189,242,255,0.34), transparent 26%), radial-gradient(circle at 80% 18%, rgba(120,197,255,0.2), transparent 28%), linear-gradient(180deg, #8bd6ff 0%, #2f86c6 34%, #0b3d74 72%, #04172f 100%)",
 }
 
-const currentPathKey = computed(() => activePath.value || 'home')
-
-const folderCards = computed(() =>
-  rootFolders.value.map((folder, index) => ({
-    ...folder,
-    ...folderThemes[index % folderThemes.length],
-  })),
-)
-
 const visibleFiles = computed(() => {
   const query = search.value.trim().toLowerCase()
 
@@ -80,6 +67,57 @@ const visibleFiles = computed(() => {
 
   return files.value.filter((file) => file.name.toLowerCase().includes(query))
 })
+
+const totalFiles = computed(() => files.value.length)
+
+const latestDateLabel = computed(() => {
+  if (files.value.length === 0) {
+    return 'No entries'
+  }
+
+  return files.value
+    .map((file) => file.date || '')
+    .filter(Boolean)
+    .sort((left, right) => new Date(right).getTime() - new Date(left).getTime())[0] || 'No entries'
+})
+
+const typeLabel = computed(() => {
+  const uniqueTypes = [...new Set(files.value.map((file) => file.type))]
+
+  if (uniqueTypes.length === 0) {
+    return 'Waiting'
+  }
+
+  return uniqueTypes.slice(0, 3).join(' / ')
+})
+
+const summaryCards = computed(() =>
+  [
+    {
+      title: 'Resource Library',
+      value: `${totalFiles.value} files`,
+      detail: 'Static file listings sourced from a versioned JSON manifest.',
+    },
+    {
+      title: 'Direct Downloads',
+      value: 'No upload flow',
+      detail: 'Every action is a direct static file link, ready for Vercel delivery.',
+    },
+    {
+      title: 'Latest Update',
+      value: latestDateLabel.value,
+      detail: manifestUpdatedAt.value ? `Manifest refreshed on ${manifestUpdatedAt.value}.` : 'Manifest date is optional.',
+    },
+    {
+      title: 'Primary Formats',
+      value: typeLabel.value,
+      detail: 'Use the search field to filter by file name only.',
+    },
+  ].map((card, index) => ({
+    ...card,
+    ...summaryThemes[index % summaryThemes.length],
+  })),
+)
 
 const fileBadgeClass = (type) => {
   const styles = {
@@ -93,12 +131,22 @@ const fileBadgeClass = (type) => {
   return styles[type] || styles.other
 }
 
-const fetchListing = async (targetPath = activePath.value) => {
-  loadingListing.value = true
+const normalizeFile = (item) => ({
+  name: String(item?.name || 'Untitled file'),
+  path: String(item?.path || '#'),
+  size: String(item?.size || 'Unknown size'),
+  date: String(item?.date || 'Unknown date'),
+  type: String(item?.type || 'other').toLowerCase(),
+  description: String(item?.description || ''),
+})
+
+const loadManifest = async () => {
+  loadingManifest.value = true
   errorMessage.value = ''
 
   try {
-    const response = await fetch(`/api/files.php?path=${encodeURIComponent(targetPath)}`, {
+    const response = await fetch('/files/files.json', {
+      cache: 'no-store',
       headers: {
         Accept: 'application/json',
       },
@@ -107,79 +155,23 @@ const fetchListing = async (targetPath = activePath.value) => {
     const payload = await response.json()
 
     if (!response.ok) {
-      throw new Error(payload.error || 'Unable to load local storage.')
+      throw new Error('Unable to load the static file manifest.')
     }
 
-    rootFolders.value = payload.rootFolders || []
-    files.value = payload.files || []
-    breadcrumbs.value = payload.breadcrumbs || [{ label: 'Home', path: '' }]
-    activePath.value = payload.currentPath || ''
-    activeLabel.value = payload.currentLabel || 'Home'
+    const manifestFiles = Array.isArray(payload) ? payload : payload?.files
+
+    if (!Array.isArray(manifestFiles)) {
+      throw new Error('The file manifest format is invalid.')
+    }
+
+    manifestTitle.value = typeof payload?.title === 'string' && payload.title ? payload.title : 'Map7e Cloud Resource Library'
+    manifestUpdatedAt.value = typeof payload?.updatedAt === 'string' ? payload.updatedAt : ''
+    files.value = manifestFiles.map(normalizeFile)
   } catch (error) {
     files.value = []
-    errorMessage.value = error instanceof Error ? error.message : 'Unable to load local storage.'
+    errorMessage.value = error instanceof Error ? error.message : 'Unable to load the static file manifest.'
   } finally {
-    loadingListing.value = false
-  }
-}
-
-const openFolder = async (folderPath) => {
-  if (folderPath === activePath.value) {
-    return
-  }
-
-  activePath.value = folderPath
-  await fetchListing(folderPath)
-}
-
-const openBreadcrumb = async (breadcrumbPath) => {
-  if (breadcrumbPath === activePath.value) {
-    return
-  }
-
-  activePath.value = breadcrumbPath
-  await fetchListing(breadcrumbPath)
-}
-
-const triggerUpload = () => {
-  fileInput.value?.click()
-}
-
-const handleUpload = async (event) => {
-  const selectedFiles = [...(event.target.files || [])]
-
-  if (selectedFiles.length === 0) {
-    return
-  }
-
-  const formData = new FormData()
-  formData.append('path', activePath.value)
-
-  for (const file of selectedFiles) {
-    formData.append('files[]', file)
-  }
-
-  uploading.value = true
-  errorMessage.value = ''
-
-  try {
-    const response = await fetch('/api/upload.php', {
-      method: 'POST',
-      body: formData,
-    })
-
-    const payload = await response.json()
-
-    if (!response.ok) {
-      throw new Error(payload.error || 'Upload failed.')
-    }
-
-    await fetchListing(activePath.value)
-  } catch (error) {
-    errorMessage.value = error instanceof Error ? error.message : 'Upload failed.'
-  } finally {
-    uploading.value = false
-    event.target.value = ''
+    loadingManifest.value = false
   }
 }
 
@@ -188,7 +180,7 @@ onMounted(async () => {
     panelVisible.value = true
   })
 
-  await fetchListing('')
+  await loadManifest()
 })
 </script>
 
@@ -237,22 +229,19 @@ onMounted(async () => {
 
         <header class="relative z-10 flex flex-col gap-3 border-b border-white/10 px-6 py-3 md:px-8">
           <nav class="flex items-center overflow-x-auto text-[0.78rem] text-white/[0.48]">
-            <template v-for="(crumb, index) in breadcrumbs" :key="`${crumb.path || 'home'}-${index}`">
-              <span v-if="index > 0" class="px-2 text-white/[0.25]">/</span>
-              <button
-                type="button"
-                class="rounded-full px-1 py-0.5 transition hover:text-white/[0.8]"
-                :class="index === breadcrumbs.length - 1 ? 'text-white/[0.78]' : ''"
-                @click="openBreadcrumb(crumb.path)"
-              >
-                {{ crumb.label }}
-              </button>
-            </template>
+            <span class="rounded-full bg-white/[0.06] px-3 py-1 text-white/[0.7]">Ocean Theme</span>
+            <span class="px-2 text-white/[0.25]">/</span>
+            <span class="rounded-full bg-white/[0.06] px-3 py-1 text-white/[0.7]">Static Downloads</span>
+            <span class="px-2 text-white/[0.25]">/</span>
+            <span class="rounded-full bg-white/[0.06] px-3 py-1 text-white/[0.7]">Vercel Ready</span>
           </nav>
 
           <div class="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
             <div class="min-w-0">
-              <h1 class="truncate font-display text-[1.4rem] font-semibold text-white/95 md:text-[1.55rem]">{{ activeLabel }}</h1>
+              <h1 class="truncate font-display text-[1.4rem] font-semibold text-white/95 md:text-[1.55rem]">{{ manifestTitle }}</h1>
+              <p class="mt-1 text-sm text-white/[0.62]">
+                A static download center for curated resources. Browse the manifest, search by file name, and download directly.
+              </p>
             </div>
 
             <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-end">
@@ -266,20 +255,17 @@ onMounted(async () => {
                 <input
                   v-model="search"
                   type="text"
-                  placeholder="Search current folder"
+                  placeholder="Search resources by file name"
                   class="w-full rounded-full border border-white/10 bg-white/10 py-3 pl-11 pr-4 text-sm text-white placeholder:text-white/[0.45] outline-none transition duration-300 focus:border-cyan-200/[0.35] focus:bg-white/[0.14] focus:shadow-[0_0_0_4px_rgba(125,211,252,0.08)]"
                 />
               </label>
 
-              <button
-                type="button"
-                class="rounded-full bg-gradient-to-r from-sky-400 via-cyan-300 to-blue-400 px-5 py-3 text-sm font-semibold text-slate-950 shadow-[0_12px_30px_rgba(56,189,248,0.28)] transition duration-300 hover:-translate-y-0.5 hover:shadow-[0_16px_38px_rgba(96,165,250,0.42)] focus:outline-none disabled:cursor-wait disabled:opacity-70"
-                :disabled="uploading"
-                @click="triggerUpload"
+              <a
+                href="/files/files.json"
+                class="inline-flex items-center justify-center rounded-full bg-gradient-to-r from-sky-400 via-cyan-300 to-blue-400 px-5 py-3 text-sm font-semibold text-slate-950 shadow-[0_12px_30px_rgba(56,189,248,0.28)] transition duration-300 hover:-translate-y-0.5 hover:shadow-[0_16px_38px_rgba(96,165,250,0.42)] focus:outline-none"
               >
-                {{ uploading ? 'Uploading...' : 'Upload Files' }}
-              </button>
-              <input ref="fileInput" class="hidden" type="file" multiple @change="handleUpload" />
+                View Manifest
+              </a>
             </div>
           </div>
         </header>
@@ -291,125 +277,126 @@ onMounted(async () => {
 
           <section class="mb-2.5 shrink-0">
             <div class="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-              <button
-                v-for="folder in folderCards"
-                :key="folder.path"
-                type="button"
+              <article
+                v-for="card in summaryCards"
+                :key="card.title"
                 class="group rounded-[20px] border border-white/10 bg-white/[0.08] p-4 text-left shadow-[0_12px_35px_rgba(15,23,42,0.14)] transition duration-300 hover:-translate-y-1 hover:bg-white/[0.11] hover:shadow-[0_18px_40px_rgba(14,116,144,0.16)]"
-                :class="activePath === folder.path ? 'border-cyan-100/[0.24] bg-white/[0.14] shadow-[0_18px_42px_rgba(56,189,248,0.18)]' : ''"
-                @click="openFolder(folder.path)"
               >
                 <div class="flex items-start justify-between gap-3">
                   <div
                     class="flex h-11 w-11 items-center justify-center rounded-2xl shadow-[inset_0_1px_0_rgba(255,255,255,0.55)]"
-                    :class="folder.iconBg"
+                    :class="card.iconBg"
                   >
                     <svg class="h-5.5 w-5.5 text-sky-700" viewBox="0 0 24 24" fill="none" aria-hidden="true">
                       <path
-                        d="M3.75 8.25A2.25 2.25 0 0 1 6 6h3.214a2.25 2.25 0 0 1 1.591.659l1.036 1.035c.422.422.994.66 1.591.66H18A2.25 2.25 0 0 1 20.25 10.6v5.65A2.25 2.25 0 0 1 18 18.5H6a2.25 2.25 0 0 1-2.25-2.25v-8Z"
+                        d="M6.5 5.75h6.2a1.75 1.75 0 0 1 1.24.51l3.3 3.3a1.75 1.75 0 0 1 .51 1.24v7.7a1.75 1.75 0 0 1-1.75 1.75H6.5a1.75 1.75 0 0 1-1.75-1.75V7.5A1.75 1.75 0 0 1 6.5 5.75Z"
                         fill="currentColor"
                         opacity="0.18"
                       />
-                      <path
-                        d="M3.75 9.25h16.5v7A2.25 2.25 0 0 1 18 18.5H6a2.25 2.25 0 0 1-2.25-2.25v-7Z"
-                        stroke="currentColor"
-                        stroke-width="1.4"
-                        stroke-linejoin="round"
-                      />
-                      <path
-                        d="M3.75 9.25V8.25A2.25 2.25 0 0 1 6 6h3.214a2.25 2.25 0 0 1 1.591.659l1.036 1.035c.422.422.994.66 1.591.66H18A2.25 2.25 0 0 1 20.25 10.5v-1.25"
-                        stroke="currentColor"
-                        stroke-width="1.4"
-                        stroke-linejoin="round"
-                      />
+                      <path d="M8 12.25h8" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
+                      <path d="M8 15.75h5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
                     </svg>
                   </div>
 
                   <span class="rounded-full bg-white/10 px-3 py-1 text-xs font-medium text-white/[0.65] transition group-hover:bg-white/[0.15] group-hover:text-white/80">
-                    {{ folder.itemCountLabel }}
+                    {{ card.title }}
                   </span>
                 </div>
 
                 <div class="mt-6">
-                  <p class="text-[1.02rem] font-medium text-white/95">{{ folder.name }}</p>
-                  <p class="mt-0.5 text-sm text-white/[0.52]">Updated {{ folder.updatedLabel }}</p>
-                  <div class="mt-3 h-1.5 overflow-hidden rounded-full bg-[#1F2E40]">
-                    <div class="h-full w-full rounded-full bg-[#1F2E40]" />
+                  <p class="text-[1.02rem] font-medium text-white/95">{{ card.value }}</p>
+                  <p class="mt-1.5 text-sm leading-6 text-white/[0.56]">{{ card.detail }}</p>
+                  <div class="mt-4 h-1.5 overflow-hidden rounded-full bg-[#1F2E40]">
+                    <div class="h-full w-4/5 rounded-full bg-gradient-to-r" :class="card.accent" />
                   </div>
                 </div>
-              </button>
+              </article>
             </div>
           </section>
 
-          <Transition name="listing-swap" mode="out-in">
-            <section
-              :key="currentPathKey"
-              class="flex min-h-0 flex-1 flex-col overflow-hidden rounded-[22px] border border-white/10 bg-slate-950/[0.18] px-4 py-3.5 shadow-[inset_0_1px_0_rgba(255,255,255,0.05)] md:px-5"
-            >
-              <div class="mb-2.5 flex items-center justify-between gap-3">
-                <div>
-                  <p class="text-xs uppercase tracking-[0.28em] text-cyan-100/60">Files</p>
-                  <h3 class="mt-1 font-display text-lg font-semibold text-white/95">Recent in {{ activeLabel }}</h3>
-                </div>
-                <div class="rounded-full bg-white/[0.06] px-3 py-1.5 text-sm text-white/60">
-                  {{ loadingListing ? 'Loading...' : `${visibleFiles.length} items` }}
+          <section class="flex min-h-0 flex-1 flex-col overflow-hidden rounded-[22px] border border-white/10 bg-slate-950/[0.18] px-4 py-3.5 shadow-[inset_0_1px_0_rgba(255,255,255,0.05)] md:px-5">
+            <div class="mb-2.5 flex items-center justify-between gap-3">
+              <div>
+                <p class="text-xs uppercase tracking-[0.28em] text-cyan-100/60">Downloads</p>
+                <h3 class="mt-1 font-display text-lg font-semibold text-white/95">Static file catalog</h3>
+              </div>
+              <div class="rounded-full bg-white/[0.06] px-3 py-1.5 text-sm text-white/60">
+                {{ loadingManifest ? 'Loading...' : `${visibleFiles.length} items` }}
+              </div>
+            </div>
+
+            <div class="file-list-scroll min-h-0 flex-1 overflow-auto pr-1">
+              <div class="hidden grid-cols-[minmax(0,1.8fr)_110px_128px_120px] gap-4 px-3 pb-2 text-xs uppercase tracking-[0.24em] text-white/40 md:grid">
+                <span>Name</span>
+                <span>Size</span>
+                <span>Date</span>
+                <span class="text-right">Download</span>
+              </div>
+
+              <div v-if="loadingManifest" class="space-y-2">
+                <div v-for="row in 4" :key="row" class="grid grid-cols-1 gap-4 rounded-2xl bg-white/[0.05] px-3 py-4 md:grid-cols-[minmax(0,1.8fr)_110px_128px_120px]">
+                  <div class="h-14 animate-pulse rounded-2xl bg-white/[0.08]" />
+                  <div class="h-10 animate-pulse rounded-2xl bg-white/[0.08]" />
+                  <div class="h-10 animate-pulse rounded-2xl bg-white/[0.08]" />
+                  <div class="h-10 animate-pulse rounded-2xl bg-white/[0.08]" />
                 </div>
               </div>
 
-              <div class="file-list-scroll min-h-0 flex-1 overflow-auto pr-1">
-                <div class="grid grid-cols-[minmax(0,1.4fr)_120px_140px] gap-4 px-3 pb-2 text-xs uppercase tracking-[0.24em] text-white/40">
-                  <span>Name</span>
-                  <span>Size</span>
-                  <span>Date</span>
-                </div>
+              <div v-else class="space-y-2">
+                <article
+                  v-for="file in visibleFiles"
+                  :key="file.path"
+                  class="grid grid-cols-1 gap-4 rounded-2xl border border-transparent px-3 py-3 text-sm transition duration-300 hover:-translate-y-0.5 hover:border-white/[0.08] hover:bg-white/[0.07] hover:shadow-[0_16px_30px_rgba(15,23,42,0.18)] md:grid-cols-[minmax(0,1.8fr)_110px_128px_120px] md:items-center"
+                >
+                  <div class="flex min-w-0 items-start gap-3">
+                    <div class="mt-0.5 flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl bg-white/[0.08] shadow-[inset_0_1px_0_rgba(255,255,255,0.12)]">
+                      <svg class="h-5 w-5 text-white/[0.85]" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                        <path
+                          d="M14.25 3.75H7.5A1.75 1.75 0 0 0 5.75 5.5v13A1.75 1.75 0 0 0 7.5 20.25h9A1.75 1.75 0 0 0 18.25 18.5V7.75l-4-4Z"
+                          stroke="currentColor"
+                          stroke-width="1.4"
+                          stroke-linejoin="round"
+                        />
+                        <path d="M14.25 3.75V7.5h3.75" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round" />
+                      </svg>
+                    </div>
 
-                <div v-if="loadingListing" class="space-y-2">
-                  <div v-for="row in 4" :key="row" class="grid grid-cols-[minmax(0,1.4fr)_120px_140px] gap-4 rounded-2xl bg-white/[0.05] px-3 py-3">
-                    <div class="h-10 animate-pulse rounded-2xl bg-white/[0.08]" />
-                    <div class="h-10 animate-pulse rounded-2xl bg-white/[0.08]" />
-                    <div class="h-10 animate-pulse rounded-2xl bg-white/[0.08]" />
-                  </div>
-                </div>
-
-                <div v-else class="space-y-2">
-                  <a
-                    v-for="file in visibleFiles"
-                    :key="file.path"
-                    class="grid grid-cols-[minmax(0,1.4fr)_120px_140px] items-center gap-4 rounded-2xl border border-transparent px-3 py-2.5 text-sm transition duration-300 hover:-translate-y-0.5 hover:border-white/[0.08] hover:bg-white/[0.07] hover:shadow-[0_16px_30px_rgba(15,23,42,0.18)]"
-                    :href="file.downloadUrl"
-                  >
-                    <div class="flex min-w-0 items-center gap-3">
-                      <div class="flex h-10 w-10 items-center justify-center rounded-2xl bg-white/[0.08] shadow-[inset_0_1px_0_rgba(255,255,255,0.12)]">
-                        <svg class="h-5 w-5 text-white/[0.85]" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                          <path
-                            d="M14.25 3.75H7.5A1.75 1.75 0 0 0 5.75 5.5v13A1.75 1.75 0 0 0 7.5 20.25h9A1.75 1.75 0 0 0 18.25 18.5V7.75l-4-4Z"
-                            stroke="currentColor"
-                            stroke-width="1.4"
-                            stroke-linejoin="round"
-                          />
-                          <path d="M14.25 3.75V7.5h3.75" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round" />
-                        </svg>
-                      </div>
-
-                      <div class="min-w-0">
+                    <div class="min-w-0">
+                      <div class="flex flex-wrap items-center gap-2">
                         <p class="truncate text-[0.94rem] font-medium text-white/92">{{ file.name }}</p>
-                        <span class="mt-0.5 inline-flex rounded-full px-2.5 py-1 text-[0.7rem] font-medium uppercase tracking-[0.2em]" :class="fileBadgeClass(file.type)">
+                        <span class="inline-flex rounded-full px-2.5 py-1 text-[0.7rem] font-medium uppercase tracking-[0.2em]" :class="fileBadgeClass(file.type)">
                           {{ file.type }}
                         </span>
                       </div>
+                      <p v-if="file.description" class="mt-1.5 text-sm leading-6 text-white/[0.56]">
+                        {{ file.description }}
+                      </p>
+                      <div class="mt-2 flex flex-wrap gap-2 text-xs text-white/[0.5] md:hidden">
+                        <span class="rounded-full bg-white/[0.06] px-3 py-1">Size {{ file.size }}</span>
+                        <span class="rounded-full bg-white/[0.06] px-3 py-1">Date {{ file.date }}</span>
+                      </div>
                     </div>
-
-                    <span class="text-white/[0.65]">{{ file.size }}</span>
-                    <span class="text-white/[0.55]">{{ file.date }}</span>
-                  </a>
-
-                  <div v-if="visibleFiles.length === 0" class="rounded-[20px] border border-white/10 bg-white/[0.05] px-6 py-10 text-center text-white/60">
-                    No files match the current folder search.
                   </div>
+
+                  <span class="hidden text-white/[0.65] md:block">{{ file.size }}</span>
+                  <span class="hidden text-white/[0.55] md:block">{{ file.date }}</span>
+                  <div class="flex md:justify-end">
+                    <a
+                      :href="file.path"
+                      download
+                      class="inline-flex w-full items-center justify-center rounded-full border border-cyan-200/20 bg-white/[0.08] px-4 py-2.5 text-sm font-semibold text-cyan-50 transition duration-300 hover:border-cyan-200/35 hover:bg-white/[0.14] hover:text-white md:w-auto"
+                    >
+                      Download
+                    </a>
+                  </div>
+                </article>
+
+                <div v-if="visibleFiles.length === 0" class="rounded-[20px] border border-white/10 bg-white/[0.05] px-6 py-10 text-center text-white/60">
+                  No resources match the current search.
                 </div>
               </div>
-            </section>
-          </Transition>
+            </div>
+          </section>
         </div>
       </div>
     </div>
@@ -477,23 +464,6 @@ onMounted(async () => {
 
 .file-list-scroll::-webkit-scrollbar-thumb:hover {
   background: #25384f;
-}
-
-.listing-swap-enter-active,
-.listing-swap-leave-active {
-  transition:
-    opacity 320ms ease,
-    transform 360ms ease;
-}
-
-.listing-swap-enter-from {
-  opacity: 0;
-  transform: translateX(18px);
-}
-
-.listing-swap-leave-to {
-  opacity: 0;
-  transform: translateX(-14px);
 }
 
 @keyframes bubble-rise {

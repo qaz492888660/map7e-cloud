@@ -1,68 +1,80 @@
-# Map7e Cloud Local Preview
+# Map7e Cloud Static Resource Library
 
-Project structure:
+`map7e-cloud` is now a static download edition of the project. The UI keeps the existing ocean-themed glassmorphism design, but the product behavior is now a pure resource library: visitors can browse file metadata and download files directly, without any online upload capability.
 
-- `public/index.php`: browser entrypoint
-- `public/components/CloudStoragePage.vue`: premium Vue 3 cloud storage UI
-- `public/api/files.php`: local file listing endpoint
-- `public/api/upload.php`: local upload endpoint
-- `storage/`: sample local files and folders
+## What Changed
 
-Run locally:
+- The site is now a static download center / resource library.
+- All downloadable assets belong in `public/files/`.
+- The visible file list is maintained in `public/files/files.json`.
+- The frontend reads `/files/files.json` directly with no PHP or upload API.
+- Online upload is no longer supported.
 
-```powershell
-php -S localhost:8080 -t public
+## Important Paths
+
+- `public/index.html`: static browser entrypoint
+- `public/components/CloudStoragePage.vue`: main resource library page
+- `public/files/files.json`: static manifest for the file list
+- `public/assets/ocean-background.svg`: ocean background artwork
+- `vercel.json`: static rewrites for Vercel deployment
+
+## File Library Format
+
+Maintain `public/files/files.json` with entries like:
+
+```json
+{
+  "name": "Deployment Manual",
+  "path": "/files/manual.pdf",
+  "size": "2.1 MB",
+  "date": "2026-04-13",
+  "type": "document",
+  "description": "Reference notes for managing the static download library."
+}
 ```
 
-Then open:
+Required fields:
 
-`http://localhost:8080`
+- `name`
+- `path`
+- `size`
+- `date`
+- `type`
 
-Notes:
+Optional field:
 
-- A local fallback ocean image is included at `public/assets/ocean-background.svg`.
-- If you have a specific ocean image you want to use instead, replace that asset or update the URL in `public/components/CloudStoragePage.vue`.
+- `description`
 
-## Deploy To Railway
+## Adding Download Files
 
-This project is ready to deploy on Railway with Docker.
+1. Put the real asset files inside `public/files/`.
+2. Add or update the matching entries in `public/files/files.json`.
+3. Redeploy to publish the updated catalog.
 
-### 1. Import the GitHub repository
+The download buttons on the page link directly to each file path, for example `/files/manual.pdf`.
 
-1. Push this project to GitHub.
-2. In Railway, click `New Project`.
-3. Choose `Deploy from GitHub repo`.
-4. Select the repository for this project.
-5. Railway will detect the `Dockerfile` and build the app automatically.
+## Vercel Deployment
 
-### 2. Mount a persistent Volume
+This project is designed for Vercel static deployment.
 
-The application stores uploaded files in `/app/storage`.
+1. Push the repository to GitHub.
+2. Import the repo into Vercel.
+3. Deploy it as a static site.
+4. `vercel.json` rewrites `/`, `/assets/*`, `/components/*`, and `/files/*` to the `public/` directory.
 
-1. Open your Railway project.
-2. Add a `Volume`.
-3. Mount the Volume to:
+No PHP runtime, Docker image, Railway volume, or server-side upload endpoint is required.
 
-   `/app/storage`
+## Local Preview
 
-4. Redeploy the service after the Volume is attached.
+Any simple static file server is enough. For example:
 
-This keeps uploaded files persistent across deployments.
+```powershell
+python -m http.server 8080 --directory public
+```
 
-### 3. Access the app
+Then open `http://localhost:8080`.
 
-After deployment finishes, open the Railway generated domain.
+## Notes
 
-The following features should work:
-
-- homepage loading
-- folder browsing
-- file listing
-- file upload
-- file download
-
-### 4. Redeploy after changes
-
-When you push new commits to the connected GitHub repository, Railway can rebuild and redeploy automatically.
-
-You can also trigger a manual redeploy from the Railway dashboard if needed.
+- Replace the sample `files.json` entries with your real downloadable files before production use.
+- If you want a different background illustration, replace `public/assets/ocean-background.svg` or update the URL in `public/components/CloudStoragePage.vue`.

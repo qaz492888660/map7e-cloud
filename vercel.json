@@ -1,0 +1,20 @@
+{
+  "rewrites": [
+    {
+      "source": "/",
+      "destination": "/public/index.html"
+    },
+    {
+      "source": "/assets/:path*",
+      "destination": "/public/assets/:path*"
+    },
+    {
+      "source": "/components/:path*",
+      "destination": "/public/components/:path*"
+    },
+    {
+      "source": "/files/:path*",
+      "destination": "/public/files/:path*"
+    }
+  ]
+}

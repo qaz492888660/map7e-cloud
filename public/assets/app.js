@@ -32,8 +32,8 @@ try {
     appRoot.innerHTML = `
       <div style="min-height:100%;display:grid;place-items:center;background:#04172f;color:white;font-family:Manrope,system-ui,sans-serif;padding:24px;text-align:center;">
         <div>
-          <h1 style="font-family:Sora,system-ui,sans-serif;margin:0 0 12px;font-size:28px;">Map7e Cloud</h1>
-          <p style="margin:0;color:rgba(255,255,255,0.7);">Failed to load the Vue application.</p>
+          <h1 style="font-family:Sora,system-ui,sans-serif;margin:0 0 12px;font-size:28px;">Map7e Cloud Resource Library</h1>
+          <p style="margin:0;color:rgba(255,255,255,0.7);">Failed to load the static resource library.</p>
           <p style="margin:12px 0 0;color:rgba(255,255,255,0.55);font-size:14px;">${error instanceof Error ? error.message : 'Unknown error'}</p>
         </div>
       </div>

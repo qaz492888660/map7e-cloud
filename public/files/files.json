@@ -1,0 +1,14 @@
+{
+  "title": "Map7e Cloud Resource Library",
+  "updatedAt": "2026-04-14",
+  "files": [
+    {
+      "name": "test.txt",
+      "path": "/files/test.txt",
+      "size": "1 KB",
+      "date": "2026-04-14",
+      "type": "document",
+      "description": "Test file for download functionality."
+    }
+  ]
+}
