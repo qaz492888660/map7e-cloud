@@ -1,0 +1,5 @@
+Albums directory sample files
+- ocean-postcard.svg: example image download
+- gallery-notes.txt: example text note
+
+This folder demonstrates static directory downloads with no upload support.

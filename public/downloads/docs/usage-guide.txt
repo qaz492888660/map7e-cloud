@@ -1,0 +1,6 @@
+Map7e Cloud directory guide
+
+1. Open the home page.
+2. Click a directory card.
+3. Review files inside the selected directory.
+4. Use the Download button for direct file access.

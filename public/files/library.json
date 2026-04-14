@@ -1,0 +1,92 @@
+{
+  "title": "Map7e Cloud Resource Library",
+  "updatedAt": "2026-04-14",
+  "rootFolders": [
+    {
+      "slug": "albums",
+      "name": "\u76f8\u518c\u76ee\u5f55",
+      "description": "Ocean artwork, preview images, and sample gallery assets.",
+      "updatedLabel": "2026-04-14"
+    },
+    {
+      "slug": "docs",
+      "name": "\u6587\u4ef6\u76ee\u5f55",
+      "description": "Guides, notes, and release documents.",
+      "updatedLabel": "2026-04-14"
+    },
+    {
+      "slug": "resources",
+      "name": "\u8d44\u6e90\u76ee\u5f55",
+      "description": "Sample resources, config snippets, and download tests.",
+      "updatedLabel": "2026-04-14"
+    }
+  ],
+  "folders": {
+    "albums": {
+      "name": "\u76f8\u518c\u76ee\u5f55",
+      "description": "Static images and gallery notes for direct download.",
+      "files": [
+        {
+          "name": "ocean-postcard.svg",
+          "path": "/downloads/albums/ocean-postcard.svg",
+          "size": "3 KB",
+          "date": "2026-04-14",
+          "type": "image",
+          "description": "Ocean postcard style artwork for gallery previews."
+        },
+        {
+          "name": "gallery-notes.txt",
+          "path": "/downloads/albums/gallery-notes.txt",
+          "size": "1 KB",
+          "date": "2026-04-14",
+          "type": "document",
+          "description": "Short notes describing the sample album assets."
+        }
+      ]
+    },
+    "docs": {
+      "name": "\u6587\u4ef6\u76ee\u5f55",
+      "description": "Project notes, usage instructions, and static deployment docs.",
+      "files": [
+        {
+          "name": "usage-guide.txt",
+          "path": "/downloads/docs/usage-guide.txt",
+          "size": "1 KB",
+          "date": "2026-04-14",
+          "type": "document",
+          "description": "Quick guide for browsing and downloading resources."
+        },
+        {
+          "name": "release-summary.md",
+          "path": "/downloads/docs/release-summary.md",
+          "size": "1 KB",
+          "date": "2026-04-14",
+          "type": "document",
+          "description": "Release notes for the static directory-based library."
+        }
+      ]
+    },
+    "resources": {
+      "name": "\u8d44\u6e90\u76ee\u5f55",
+      "description": "Download test files and example configuration resources.",
+      "files": [
+        {
+          "name": "test.txt",
+          "path": "/downloads/resources/test.txt",
+          "size": "1 KB",
+          "date": "2026-04-14",
+          "type": "document",
+          "description": "Test file for validating direct downloads on Vercel."
+        },
+        {
+          "name": "design-tokens.json",
+          "path": "/downloads/resources/design-tokens.json",
+          "size": "1 KB",
+          "date": "2026-04-14",
+          "type": "other",
+          "description": "Sample design token payload for static resource delivery."
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "color": {
+    "oceanDeep": "#04172f",
+    "oceanMid": "#2f86c6",
+    "foam": "#dff6ff"
+  },
+  "radius": {
+    "card": "20px"
+  }
+}

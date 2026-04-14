@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 640" role="img" aria-labelledby="title desc">
+  <title id="title">Ocean Postcard</title>
+  <desc id="desc">A simple ocean-themed poster used as a downloadable sample asset.</desc>
+  <defs>
+    <linearGradient id="sky" x1="0" x2="0" y1="0" y2="1">
+      <stop offset="0%" stop-color="#95dcff" />
+      <stop offset="55%" stop-color="#2d83c8" />
+      <stop offset="100%" stop-color="#082847" />
+    </linearGradient>
+    <linearGradient id="sea" x1="0" x2="1" y1="0" y2="1">
+      <stop offset="0%" stop-color="#1a7ac1" />
+      <stop offset="100%" stop-color="#04172f" />
+    </linearGradient>
+  </defs>
+  <rect width="960" height="640" fill="url(#sky)" />
+  <circle cx="745" cy="130" r="68" fill="#fff6bf" opacity="0.85" />
+  <path d="M0 360c110 24 159 72 266 72s164-53 263-53 131 37 212 37 132-25 219-62v286H0Z" fill="url(#sea)" />
+  <path d="M0 420c122 26 194 52 305 52 109 0 163-41 259-41 101 0 178 43 396 18v191H0Z" fill="#0a3f67" opacity="0.85" />
+  <text x="76" y="126" fill="#ffffff" font-family="Manrope, Arial, sans-serif" font-size="54" font-weight="700">Map7e Ocean Library</text>
+  <text x="76" y="184" fill="rgba(255,255,255,0.84)" font-family="Manrope, Arial, sans-serif" font-size="24">Static sample artwork for the albums directory.</text>
+</svg>
