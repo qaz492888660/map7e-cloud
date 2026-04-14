@@ -1,8 +1,10 @@
 <?php declare(strict_types=1);
 
+const STORAGE_ROOT = '/app/storage';
+
 function storage_root(): string
 {
-    $root = dirname(__DIR__, 2) . DIRECTORY_SEPARATOR . 'storage';
+    $root = rtrim(STORAGE_ROOT, '/\\');
 
     if (!is_dir($root)) {
         mkdir($root, 0777, true);
@@ -60,7 +62,7 @@ function ensure_directory(string $relativePath): string
     $absolutePath = absolute_path($relativePath);
 
     if (!is_dir($absolutePath)) {
-        throw new RuntimeException('Folder not found.');
+        mkdir($absolutePath, 0777, true);
     }
 
     return $absolutePath;
