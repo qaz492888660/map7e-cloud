@@ -1,0 +1,62 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 1000" fill="none">
+  <defs>
+    <linearGradient id="bg" x1="800" y1="0" x2="800" y2="1000" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#8AD7FF"/>
+      <stop offset="0.35" stop-color="#2A85C7"/>
+      <stop offset="0.72" stop-color="#0B3C73"/>
+      <stop offset="1" stop-color="#04172F"/>
+    </linearGradient>
+    <radialGradient id="glowLeft" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(340 160) rotate(90) scale(220 360)">
+      <stop stop-color="#D6F7FF" stop-opacity=".9"/>
+      <stop offset="1" stop-color="#D6F7FF" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="glowRight" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(1260 220) rotate(90) scale(260 420)">
+      <stop stop-color="#9DDCFF" stop-opacity=".45"/>
+      <stop offset="1" stop-color="#9DDCFF" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="floorGlow" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(810 900) rotate(90) scale(180 520)">
+      <stop stop-color="#0E3E7A" stop-opacity=".55"/>
+      <stop offset="1" stop-color="#0E3E7A" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="rayA" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#FFF" stop-opacity=".42"/>
+      <stop offset="1" stop-color="#FFF" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="rayB" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#FFF" stop-opacity=".25"/>
+      <stop offset="1" stop-color="#FFF" stop-opacity="0"/>
+    </linearGradient>
+    <filter id="blur40" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="40"/>
+    </filter>
+    <filter id="blur18" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="18"/>
+    </filter>
+  </defs>
+
+  <rect width="1600" height="1000" fill="url(#bg)"/>
+  <rect width="1600" height="1000" fill="url(#glowLeft)"/>
+  <rect width="1600" height="1000" fill="url(#glowRight)"/>
+  <rect width="1600" height="1000" fill="url(#floorGlow)"/>
+
+  <g opacity=".58" filter="url(#blur40)">
+    <path d="M210 16L612 1000H790L410 16H210Z" fill="url(#rayA)"/>
+    <path d="M520 -36L960 1000H1080L734 -36H520Z" fill="url(#rayB)"/>
+    <path d="M980 0L1280 1000H1390L1130 0H980Z" fill="url(#rayA)"/>
+  </g>
+
+  <g opacity=".18" filter="url(#blur18)">
+    <circle cx="250" cy="310" r="120" fill="#C7F2FF"/>
+    <circle cx="1330" cy="340" r="160" fill="#8CD9FF"/>
+    <circle cx="920" cy="790" r="180" fill="#13569A"/>
+  </g>
+
+  <g opacity=".08">
+    <circle cx="140" cy="820" r="10" fill="#FFF"/>
+    <circle cx="260" cy="740" r="16" fill="#FFF"/>
+    <circle cx="370" cy="870" r="22" fill="#FFF"/>
+    <circle cx="1180" cy="790" r="12" fill="#FFF"/>
+    <circle cx="1310" cy="700" r="18" fill="#FFF"/>
+    <circle cx="1450" cy="850" r="24" fill="#FFF"/>
+  </g>
+</svg>
