@@ -378,12 +378,9 @@ onMounted(async () => {
               </label>
 
               <div class="group flex min-w-[11.5rem] items-center gap-3 rounded-[18px] border border-white/12 bg-white/[0.09] px-4 py-3 shadow-[0_14px_30px_rgba(7,33,58,0.18)] backdrop-blur-xl">
-                <div class="relative flex h-11 w-11 items-center justify-center overflow-hidden rounded-2xl border border-white/12 bg-[radial-gradient(circle_at_30%_30%,rgba(255,255,255,0.35),transparent_42%),linear-gradient(145deg,rgba(68,180,255,0.9),rgba(17,80,150,0.95))] shadow-[inset_0_1px_0_rgba(255,255,255,0.28),0_10px_22px_rgba(18,103,176,0.28)]">
-                  <svg class="h-6 w-6 text-white/95" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                    <path d="M7.25 14.5c-1.933 0-3.5-1.455-3.5-3.25S5.317 8 7.25 8c.544 0 1.058.116 1.518.323C9.497 6.324 11.348 5 13.5 5c2.865 0 5.25 2.346 5.25 5.25l-.006.245A3.754 3.754 0 0 1 20.25 17.5h-13" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
-                    <path d="M8.25 18.25h7.5M9.75 15.75h4.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
-                  </svg>
-                </div>
+                <div class="relative flex h-11 w-11 overflow-hidden rounded-2xl">
+                   <img src="/assets/logo.png" class="w-full h-full object-cover" />
+                      </div>
                 <div class="min-w-0">
                   <p class="font-display text-[1.02rem] font-semibold tracking-[0.18em] text-white/95">Map7e</p>
                 </div>
