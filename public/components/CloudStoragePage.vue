@@ -386,7 +386,6 @@ onMounted(async () => {
                 </div>
                 <div class="min-w-0">
                   <p class="font-display text-[1.02rem] font-semibold tracking-[0.18em] text-white/95">Map7e</p>
-                  <p class="text-[0.72rem] uppercase tracking-[0.24em] text-cyan-100/60">{{ TEXT.brandingSubline }}</p>
                 </div>
               </div>
             </div>
