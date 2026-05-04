@@ -91,10 +91,11 @@ const bubbleSpecs = [
   { id: 'b22', size: 72, left: '64%', bottom: '-34%', duration: '48s', delay: '20s', opacity: 0.18, blur: 0.8, driftA: '-22px', driftB: '20px', driftC: '-14px', scaleStart: 0.86, scaleMid: 1.04, scaleEnd: 1.1 },
 ]
 
-const beachBackgroundImage = 'https://source.unsplash.com/1920x1080/?beach,sea'
+const beachBackgroundImage =
+  'https://images.unsplash.com/photo-1507525428034-b723cf961d3e?auto=format&fit=crop&w=1920&q=80'
 
 const backgroundStyle = {
-  backgroundImage: `url("${beachBackgroundImage}")`,
+  backgroundImage: `linear-gradient(rgba(0, 0, 0, 0.25), rgba(0, 0, 0, 0.35)), url("${beachBackgroundImage}")`,
   backgroundSize: 'cover',
   backgroundPosition: 'center',
   backgroundRepeat: 'no-repeat',
@@ -292,11 +293,13 @@ const loadLibrary = async () => {
 }
 
 onMounted(async () => {
-  document.body.style.backgroundImage = `url(${beachBackgroundImage})`
+  document.body.style.backgroundColor = '#0f172a'
+  document.body.style.backgroundImage = `linear-gradient(rgba(0, 0, 0, 0.25), rgba(0, 0, 0, 0.35)), url("${beachBackgroundImage}")`
   document.body.style.backgroundSize = 'cover'
   document.body.style.backgroundPosition = 'center'
   document.body.style.backgroundRepeat = 'no-repeat'
   document.body.style.backgroundAttachment = 'fixed'
+  document.body.style.color = '#fff'
 
   requestAnimationFrame(() => {
     panelVisible.value = true
