@@ -46,23 +46,29 @@
         right: 20px;
         bottom: 20px;
         z-index: 999;
-        padding: 10px 14px;
-        border-radius: 12px;
-        background: rgba(0, 0, 0, 0.4);
+        width: 44px;
+        height: 44px;
+        border-radius: 50%;
+        font-size: 20px;
+        background: rgba(0, 0, 0, 0.35);
         color: #fff;
         border: 1px solid rgba(255, 255, 255, 0.2);
-        backdrop-filter: blur(10px);
+        backdrop-filter: blur(12px);
         cursor: pointer;
+        display: flex;
+        align-items: center;
+        justify-content: center;
         transition: all .3s;
       }
 
       #bg-switch:hover {
+        transform: scale(1.1);
         background: rgba(255, 255, 255, 0.2);
       }
     </style>
   </head>
   <body>
-    <button id="bg-switch">切换背景</button>
+    <button id="bg-switch" title="切换背景">🌊</button>
     <div id="app"></div>
     <script type="module" src="/assets/app.js"></script>
     <script>
@@ -72,9 +78,24 @@
         "https://images.unsplash.com/photo-1470770841072-f978cf4d019e?auto=format&fit=crop&w=4096&q=100"
       ];
 
-      let index = 0;
+      function getTodayKey() {
+        const d = new Date();
+        return d.getFullYear() + "-" + (d.getMonth() + 1) + "-" + d.getDate();
+      }
+
+      let savedIndex = localStorage.getItem("bg-index");
+      let savedDate = localStorage.getItem("bg-date");
+
+      if (savedDate !== getTodayKey()) {
+        savedIndex = Math.floor(Math.random() * bgList.length);
+        localStorage.setItem("bg-index", savedIndex);
+        localStorage.setItem("bg-date", getTodayKey());
+      }
+
+      let index = savedIndex !== null ? parseInt(savedIndex) : 0;
 
       function setBg(i) {
+        document.body.style.transition = "background 0.6s ease";
         const background =
           "linear-gradient(rgba(0,0,0,0.25), rgba(0,0,0,0.35)), url(" + bgList[i] + ")";
         document.documentElement.style.setProperty("--page-background", background);
@@ -83,6 +104,7 @@
 
       document.getElementById("bg-switch").onclick = () => {
         index = (index + 1) % bgList.length;
+        localStorage.setItem("bg-index", index);
         setBg(index);
       };
 
