@@ -92,7 +92,7 @@ const bubbleSpecs = [
 ]
 
 const beachBackgroundImage =
-  'https://images.unsplash.com/photo-1507525428034-b723cf961d3e?auto=format&fit=crop&w=1920&q=80'
+  'https://images.unsplash.com/photo-1507525428034-b723cf961d3e?auto=format&fit=crop&w=3840&q=90'
 
 const backgroundStyle = {
   backgroundImage: `linear-gradient(rgba(0, 0, 0, 0.25), rgba(0, 0, 0, 0.35)), url("${beachBackgroundImage}")`,
