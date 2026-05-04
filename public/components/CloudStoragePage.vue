@@ -91,9 +91,14 @@ const bubbleSpecs = [
   { id: 'b22', size: 72, left: '64%', bottom: '-34%', duration: '48s', delay: '20s', opacity: 0.18, blur: 0.8, driftA: '-22px', driftB: '20px', driftC: '-14px', scaleStart: 0.86, scaleMid: 1.04, scaleEnd: 1.1 },
 ]
 
+const beachBackgroundImage = 'https://source.unsplash.com/1920x1080/?beach,sea'
+
 const backgroundStyle = {
-  backgroundImage:
-    "linear-gradient(180deg, rgba(255,255,255,0.08), rgba(3,12,28,0.4) 48%, rgba(2,8,23,0.78) 100%), url('/assets/ocean-background.svg'), radial-gradient(circle at 20% 12%, rgba(189,242,255,0.34), transparent 26%), radial-gradient(circle at 80% 18%, rgba(120,197,255,0.2), transparent 28%), linear-gradient(180deg, #8bd6ff 0%, #2f86c6 34%, #0b3d74 72%, #04172f 100%)",
+  backgroundImage: `url("${beachBackgroundImage}")`,
+  backgroundSize: 'cover',
+  backgroundPosition: 'center',
+  backgroundRepeat: 'no-repeat',
+  backgroundAttachment: 'fixed',
 }
 
 const activeFolder = computed(() => folderMap.value[activeFolderSlug.value] || null)
@@ -287,6 +292,12 @@ const loadLibrary = async () => {
 }
 
 onMounted(async () => {
+  document.body.style.backgroundImage = `url(${beachBackgroundImage})`
+  document.body.style.backgroundSize = 'cover'
+  document.body.style.backgroundPosition = 'center'
+  document.body.style.backgroundRepeat = 'no-repeat'
+  document.body.style.backgroundAttachment = 'fixed'
+
   requestAnimationFrame(() => {
     panelVisible.value = true
   })
@@ -296,9 +307,9 @@ onMounted(async () => {
 </script>
 
 <template>
-  <div class="relative min-h-screen overflow-hidden bg-slate-950 font-body text-white">
+  <div class="relative min-h-screen overflow-hidden bg-transparent font-body text-white">
     <div class="absolute inset-0 ocean-scene">
-      <div class="absolute inset-0 bg-cover bg-center" :style="backgroundStyle" />
+      <div class="absolute inset-0" :style="backgroundStyle" />
       <div class="absolute inset-0 bg-[linear-gradient(180deg,rgba(255,255,255,0.08),transparent_26%,rgba(3,12,28,0.62)_100%)]" />
       <div class="absolute inset-x-0 top-0 h-80 bg-[radial-gradient(circle_at_top,rgba(255,255,255,0.22),transparent_62%)] opacity-70" />
       <div class="absolute inset-0 light-rays opacity-30" />
