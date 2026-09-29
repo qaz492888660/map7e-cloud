@@ -25,7 +25,7 @@ const TEXT = {
   root: '\u6839\u76ee\u5f55',
   rootOverview: '\u6839\u76ee\u5f55\u6982\u89c8',
   fileListSuffix: '\u6587\u4ef6\u5217\u8868',
-  pageType: '\u9759\u6001\u4e91\u7aef\u8d44\u6e90\u7ad9',
+  pageType: 'PikPak \u79c1\u4eba\u4e91\u76d8',
   intro: '\u4fdd\u6301\u76ee\u5f55\u5207\u6362\u4e0e\u4e0b\u8f7d\u4f53\u9a8c\uff0c\u6240\u6709\u5185\u5bb9\u5747\u6765\u81ea\u9759\u6001 JSON \u4e0e /downloads \u8d44\u6e90\u76ee\u5f55\u3002',
   searchRoot: '\u8bf7\u5148\u8fdb\u5165\u4e00\u4e2a\u76ee\u5f55\u540e\u518d\u641c\u7d22',
   searchInPrefix: '\u5728',
@@ -34,7 +34,7 @@ const TEXT = {
   loading: '\u52a0\u8f7d\u4e2d',
   files: '\u6587\u4ef6',
   folders: '\u76ee\u5f55',
-  totalFiles: '\u6587\u4ef6\u603b\u6570',
+  totalFiles: '\u5df2\u8f7d\u5165\u9879\u76ee',
   lastUpdated: '\u6700\u65b0\u66f4\u65b0',
   loadingLibrary: '\u6b63\u5728\u8f7d\u5165\u76ee\u5f55\u6570\u636e',
   fileName: '\u6587\u4ef6\u540d',
@@ -44,15 +44,15 @@ const TEXT = {
   download: '\u4e0b\u8f7d',
   emptyFolder: '\u5f53\u524d\u76ee\u5f55\u6682\u65e0\u53ef\u4e0b\u8f7d\u6587\u4ef6\u3002',
   noMatch: '\u5f53\u524d\u76ee\u5f55\u4e0b\u6ca1\u6709\u5339\u914d\u5173\u952e\u8bcd\u7684\u6587\u4ef6\u3002',
-  rootGuide: '\u70b9\u51fb\u4e0a\u65b9\u76ee\u5f55\u5361\u7247\uff0c\u5373\u53ef\u8fdb\u5165\u5bf9\u5e94\u5206\u7c7b\u67e5\u770b\u5e76\u4e0b\u8f7d\u6587\u4ef6\u3002',
-  rootFoldersHint: '\u5df2\u63d0\u4f9b 3 \u4e2a\u6839\u76ee\u5f55\uff0c\u7528\u4e8e\u5feb\u901f\u8fdb\u5165\u4e0d\u540c\u8d44\u6e90\u5206\u7c7b\u3002',
-  totalFilesHint: '\u6240\u6709\u8d44\u6e90\u90fd\u4ece /downloads/... \u76f4\u63a5\u4e0b\u8f7d\u3002',
-  lastUpdatedHintPrefix: '\u76ee\u5f55\u6e05\u5355\u66f4\u65b0\u65f6\u95f4\uff1a',
+  rootGuide: '\u76ee\u5f55\u4e0e\u6587\u4ef6\u76f4\u63a5\u6765\u81ea PikPak\uff0c\u5237\u65b0\u5373\u53ef\u540c\u6b65\u6700\u65b0\u5185\u5bb9\u3002',
+  rootFoldersHint: '\u76f4\u63a5\u8bfb\u53d6 PikPak \u6839\u76ee\u5f55\u4e2d\u7684\u771f\u5b9e\u6587\u4ef6\u5939\u3002',
+  totalFilesHint: '\u7edf\u8ba1\u5f53\u524d\u5df2\u8bfb\u53d6\u76ee\u5f55\u4e2d\u7684\u771f\u5b9e\u9879\u76ee\uff0c\u4e0d\u4f7f\u7528\u9759\u6001\u6e05\u5355\u3002',
+  lastUpdatedHintPrefix: '\u5df2\u8bfb\u53d6\u5185\u5bb9\u6700\u8fd1\u66f4\u65b0\uff1a',
   lastUpdatedHintFallback: '\u672a\u6807\u6ce8',
   updatedPrefix: '\u66f4\u65b0\u4e8e',
   itemUnit: '\u9879',
   copyright: 'Copyright \u00a9 2026 Map7e. All rights reserved.',
-  errorFallback: '\u65e0\u6cd5\u8f7d\u5165\u9759\u6001\u76ee\u5f55\u6e05\u5355\u3002',
+  errorFallback: '\u65e0\u6cd5\u8bfb\u53d6 PikPak \u4e91\u76d8\u3002',
   invalidManifest: '\u76ee\u5f55\u6e05\u5355\u683c\u5f0f\u4e0d\u6b63\u786e\u3002',
 }
 
@@ -65,6 +65,13 @@ const folderMap = ref({})
 const activeFolderSlug = ref('')
 const loadingLibrary = ref(false)
 const errorMessage = ref('')
+const authRequired = ref(false)
+const authPassword = ref('')
+const authenticating = ref(false)
+const folderTrail = ref([])
+const uploadInput = ref(null)
+const uploading = ref(false)
+const uploadStatus = ref('')
 
 const bubbleSpecs = [
   { id: 'b1', size: 22, left: '4%', bottom: '-10%', duration: '34s', delay: '0s', opacity: 0.13, blur: 0.3, driftA: '10px', driftB: '-14px', driftC: '8px', scaleStart: 0.76, scaleMid: 0.92, scaleEnd: 1.02 },
@@ -108,52 +115,44 @@ const currentFiles = computed(() => activeFolder.value?.files || [])
 
 const visibleFiles = computed(() => {
   const query = search.value.trim().toLowerCase()
-
-  if (!query) {
-    return currentFiles.value
-  }
-
+  if (!query) return currentFiles.value
   return currentFiles.value.filter((file) => file.name.toLowerCase().includes(query))
 })
 
-const allFiles = computed(() =>
-  Object.values(folderMap.value).flatMap((folder) => folder.files || []),
-)
+const allFiles = computed(() => {
+  const unique = new Map()
+  Object.values(folderMap.value).forEach((folder) => {
+    ;(folder.files || []).forEach((item) => {
+      if (item.id) unique.set(item.id, item)
+    })
+  })
+  return [...unique.values()]
+})
 
 const totalFiles = computed(() => allFiles.value.length)
 
 const currentViewDescription = computed(() =>
-  activeFolder.value?.description || TEXT.rootGuide,
+  activeFolder.value
+    ? `PikPak / ${activeFolder.value.name}`
+    : TEXT.rootGuide,
 )
 
 const latestDateLabel = computed(() => {
-  if (allFiles.value.length === 0) {
-    return '--'
-  }
-
-  return allFiles.value
+  const dates = allFiles.value
     .map((file) => file.date || '')
     .filter(Boolean)
-    .sort((left, right) => new Date(right).getTime() - new Date(left).getTime())[0] || '--'
+    .sort((left, right) => right.localeCompare(left))
+  return dates[0] || '--'
 })
 
-const breadcrumbs = computed(() => {
-  const items = [{ label: TEXT.home, slug: '' }]
-
-  if (activeFolder.value) {
-    items.push({
-      label: activeFolder.value.name,
-      slug: activeFolderSlug.value,
-    })
-  }
-
-  return items
-})
+const breadcrumbs = computed(() => [
+  { label: TEXT.home, slug: '' },
+  ...folderTrail.value,
+])
 
 const themedRootFolders = computed(() =>
   rootFolders.value.map((folder, index) => {
     const folderFiles = folderMap.value[folder.slug]?.files || []
-
     return {
       ...folder,
       ...folderThemes[index % folderThemes.length],
@@ -163,18 +162,12 @@ const themedRootFolders = computed(() =>
 )
 
 const searchPlaceholder = computed(() => {
-  if (!activeFolder.value) {
-    return TEXT.searchRoot
-  }
-
+  if (!activeFolder.value) return TEXT.searchRoot
   return `${TEXT.searchInPrefix}${activeFolder.value.name}${TEXT.searchInSuffix}`
 })
 
 const currentListTitle = computed(() => {
-  if (!activeFolder.value) {
-    return TEXT.loadingLibrary
-  }
-
+  if (!activeFolder.value) return TEXT.loadingLibrary
   return `${activeFolder.value.name}${TEXT.fileListSuffix}`
 })
 
@@ -184,111 +177,353 @@ const currentItemCountLabel = computed(() =>
 
 const fileBadgeClass = (type) => {
   const styles = {
+    folder: 'bg-sky-200/[0.18] text-sky-50',
     archive: 'bg-white/10 text-blue-100',
     document: 'bg-cyan-200/[0.15] text-cyan-50',
     image: 'bg-emerald-200/[0.15] text-emerald-50',
     video: 'bg-indigo-200/20 text-indigo-50',
     other: 'bg-slate-200/[0.14] text-slate-50',
   }
-
   return styles[type] || styles.other
 }
 
 const fileTypeLabel = (type) => {
   const labels = {
-    archive: '\u538b\u7f29\u5305',
-    document: '\u6587\u6863',
-    image: '\u56fe\u7247',
-    video: '\u89c6\u9891',
-    other: '\u5176\u4ed6',
+    folder: '目录',
+    archive: '压缩包',
+    document: '文档',
+    image: '图片',
+    video: '视频',
+    other: '其他',
   }
-
   return labels[type] || labels.other
 }
 
-const normalizeFolder = (folder, fallbackUpdatedAt) => ({
-  slug: String(folder?.slug || ''),
-  name: String(folder?.name || '\u672a\u547d\u540d\u76ee\u5f55'),
-  description: String(folder?.description || ''),
-  updatedLabel: String(folder?.updatedLabel || fallbackUpdatedAt || '--'),
+const formatBytes = (value) => {
+  const size = Number(value || 0)
+  if (!Number.isFinite(size) || size < 0) return '--'
+  if (size === 0) return '0 B'
+  const units = ['B', 'KB', 'MB', 'GB', 'TB']
+  const index = Math.min(Math.floor(Math.log(size) / Math.log(1024)), units.length - 1)
+  const amount = size / 1024 ** index
+  return `${amount >= 10 || index === 0 ? amount.toFixed(0) : amount.toFixed(1)} ${units[index]}`
+}
+
+const formatDate = (value) => {
+  if (!value) return '--'
+  const text = String(value)
+  return /^\\d{4}-\\d{2}-\\d{2}/.test(text) ? text.slice(0, 10) : text
+}
+
+const classifyType = (item) => {
+  if (item?.isFolder) return 'folder'
+  const mime = String(item?.mimeType || '').toLowerCase()
+  const ext = String(item?.extension || item?.name?.split('.').pop() || '').toLowerCase()
+  if (mime.startsWith('image/')) return 'image'
+  if (mime.startsWith('video/')) return 'video'
+  if (['zip', 'rar', '7z', 'tar', 'gz', 'bz2', 'xz'].includes(ext)) return 'archive'
+  if (
+    mime.startsWith('text/') ||
+    ['pdf', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'txt', 'md', 'json', 'csv'].includes(ext)
+  ) return 'document'
+  return 'other'
+}
+
+const normalizePikPakItem = (item) => ({
+  id: String(item?.id || ''),
+  parentId: String(item?.parentId || ''),
+  name: String(item?.name || '未命名'),
+  isFolder: Boolean(item?.isFolder),
+  size: item?.isFolder ? '--' : formatBytes(item?.size),
+  rawSize: Number(item?.size || 0),
+  date: formatDate(item?.modifiedAt || item?.createdAt),
+  modifiedAt: item?.modifiedAt || item?.createdAt || '',
+  type: classifyType(item),
+  description: '',
+  path: item?.isFolder ? '' : `/api/pikpak-download?id=${encodeURIComponent(item?.id || '')}`,
+  thumbnail: item?.thumbnail || null,
 })
 
-const normalizeFile = (item) => ({
-  name: String(item?.name || '\u672a\u547d\u540d\u6587\u4ef6'),
-  path: String(item?.path || '#'),
-  size: String(item?.size || '--'),
-  date: String(item?.date || '--'),
-  type: String(item?.type || 'other').toLowerCase(),
-  description: String(item?.description || ''),
+const normalizeRootFolder = (item) => ({
+  slug: String(item?.id || ''),
+  name: String(item?.name || '未命名目录'),
+  description: 'PikPak 实时目录',
+  updatedLabel: formatDate(item?.modifiedAt || item?.createdAt),
 })
 
-const normalizeFolderMap = (folders) =>
-  Object.fromEntries(
-    Object.entries(folders || {}).map(([slug, folder]) => [
-      slug,
-      {
-        name: String(folder?.name || slug),
-        description: String(folder?.description || ''),
-        files: Array.isArray(folder?.files) ? folder.files.map(normalizeFile) : [],
-      },
-    ]),
-  )
-
-const openFolder = (slug) => {
-  if (!folderMap.value[slug]) {
-    return
+const apiJson = async (url, options) => {
+  const response = await fetch(url, {
+    cache: 'no-store',
+    headers: {
+      Accept: 'application/json',
+      ...(options?.headers || {}),
+    },
+    ...options,
+  })
+  const payload = await response.json().catch(() => ({}))
+  if (response.status === 401) {
+    const error = new Error('authentication_required')
+    error.code = 'authentication_required'
+    throw error
   }
+  if (!response.ok || payload?.ok === false) {
+    throw new Error(payload?.error || `HTTP ${response.status}`)
+  }
+  return payload
+}
 
-  activeFolderSlug.value = slug
-  search.value = ''
+const loadFolder = async (id, name = '') => {
+  const payload = await apiJson(`/api/pikpak-files?parentId=${encodeURIComponent(id)}`)
+  const existing = folderMap.value[id]
+  const files = Array.isArray(payload?.items) ? payload.items.map(normalizePikPakItem) : []
+  folderMap.value = {
+    ...folderMap.value,
+    [id]: {
+      id,
+      name: name || existing?.name || rootFolders.value.find((folder) => folder.slug === id)?.name || '目录',
+      description: 'PikPak 实时目录',
+      files,
+    },
+  }
+  return folderMap.value[id]
+}
+
+const openFolder = async (slug, name = '') => {
+  if (!slug) return
+  loadingLibrary.value = true
+  errorMessage.value = ''
+  uploadStatus.value = ''
+  try {
+    const folder = await loadFolder(slug, name)
+    activeFolderSlug.value = slug
+    search.value = ''
+
+    const existingIndex = folderTrail.value.findIndex((item) => item.slug === slug)
+    if (existingIndex >= 0) {
+      folderTrail.value = folderTrail.value.slice(0, existingIndex + 1)
+    } else {
+      const root = rootFolders.value.find((item) => item.slug === slug)
+      folderTrail.value = root
+        ? [{ label: root.name, slug }]
+        : [...folderTrail.value, { label: folder.name, slug }]
+    }
+  } catch (error) {
+    if (error?.code === 'authentication_required') {
+      authRequired.value = true
+    } else {
+      errorMessage.value = error instanceof Error ? error.message : TEXT.errorFallback
+    }
+  } finally {
+    loadingLibrary.value = false
+  }
 }
 
 const goHome = () => {
   activeFolderSlug.value = ''
+  folderTrail.value = []
   search.value = ''
+  uploadStatus.value = ''
 }
 
-const openBreadcrumb = (slug) => {
+const openBreadcrumb = async (slug) => {
   if (!slug) {
     goHome()
     return
   }
+  const crumb = folderTrail.value.find((item) => item.slug === slug)
+  await openFolder(slug, crumb?.label || '')
+}
 
-  openFolder(slug)
+const refreshManifestDate = () => {
+  const dates = [
+    ...rootFolders.value.map((folder) => folder.updatedLabel),
+    ...allFiles.value.map((item) => item.date),
+  ]
+    .filter((value) => /^\\d{4}-\\d{2}-\\d{2}$/.test(value || ''))
+    .sort((a, b) => b.localeCompare(a))
+  manifestUpdatedAt.value = dates[0] || ''
 }
 
 const loadLibrary = async () => {
   loadingLibrary.value = true
   errorMessage.value = ''
+  uploadStatus.value = ''
 
   try {
-    const response = await fetch('/files/library.json', {
-      cache: 'no-store',
-      headers: {
-        Accept: 'application/json',
-      },
-    })
+    const payload = await apiJson('/api/pikpak-files')
+    authRequired.value = false
+    manifestTitle.value = 'Map7e Cloud · PikPak'
+    const items = Array.isArray(payload?.items) ? payload.items : []
+    const folders = items.filter((item) => item?.isFolder)
 
-    const payload = await response.json()
+    rootFolders.value = folders.map(normalizeRootFolder)
+    folderMap.value = {}
 
-    if (!response.ok) {
-      throw new Error(TEXT.errorFallback)
-    }
+    await Promise.all(
+      rootFolders.value.map(async (folder) => {
+        try {
+          await loadFolder(folder.slug, folder.name)
+        } catch {
+          // A single unreadable child folder should not block the root view.
+        }
+      }),
+    )
 
-    if (!Array.isArray(payload?.rootFolders) || typeof payload?.folders !== 'object' || payload?.folders === null) {
-      throw new Error(TEXT.invalidManifest)
-    }
-
-    manifestTitle.value = typeof payload?.title === 'string' && payload.title ? payload.title : 'Map7e Cloud Resource Library'
-    manifestUpdatedAt.value = typeof payload?.updatedAt === 'string' ? payload.updatedAt : ''
-    rootFolders.value = payload.rootFolders.map((folder) => normalizeFolder(folder, payload?.updatedAt))
-    folderMap.value = normalizeFolderMap(payload.folders)
+    refreshManifestDate()
   } catch (error) {
     rootFolders.value = []
     folderMap.value = {}
-    errorMessage.value = error instanceof Error ? error.message : TEXT.errorFallback
+    if (error?.code === 'authentication_required') {
+      authRequired.value = true
+    } else {
+      errorMessage.value = error instanceof Error ? error.message : TEXT.errorFallback
+    }
   } finally {
     loadingLibrary.value = false
+  }
+}
+
+const loginCloud = async () => {
+  const password = authPassword.value
+  if (!password || authenticating.value) return
+  authenticating.value = true
+  errorMessage.value = ''
+  try {
+    await apiJson('/api/cloud-login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password }),
+    })
+    authPassword.value = ''
+    authRequired.value = false
+    await loadLibrary()
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : '登录失败'
+  } finally {
+    authenticating.value = false
+  }
+}
+
+const selectUploadFile = () => {
+  if (!activeFolder.value || uploading.value) return
+  uploadInput.value?.click()
+}
+
+const sha1 = async (bytes) =>
+  new Uint8Array(await crypto.subtle.digest('SHA-1', bytes))
+
+const hex = (bytes) =>
+  Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('').toUpperCase()
+
+const calcGcid = async (file) => {
+  let blockSize = 0x40000
+  while (file.size / blockSize > 0x200 && blockSize < 0x200000) blockSize <<= 1
+
+  const hashes = []
+  for (let offset = 0; offset < file.size; offset += blockSize) {
+    const chunk = await file.slice(offset, Math.min(file.size, offset + blockSize)).arrayBuffer()
+    hashes.push(await sha1(chunk))
+  }
+
+  const merged = new Uint8Array(hashes.length * 20)
+  hashes.forEach((hash, index) => merged.set(hash, index * 20))
+  return hex(await sha1(merged))
+}
+
+const waitForUploadedFile = async (parentId, fileId, fileName) => {
+  for (let attempt = 0; attempt < 15; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 2000))
+    const payload = await apiJson(`/api/pikpak-files?parentId=${encodeURIComponent(parentId)}`)
+    const items = Array.isArray(payload?.items) ? payload.items : []
+    const hit = items.find((item) => item?.id === fileId || item?.name === fileName)
+    if (hit) return normalizePikPakItem(hit)
+  }
+  return null
+}
+
+const handleUpload = async (event) => {
+  const input = event?.target
+  const file = input?.files?.[0]
+  const parentId = activeFolderSlug.value
+  if (!file || !parentId || uploading.value) return
+
+  uploading.value = true
+  errorMessage.value = ''
+  uploadStatus.value = '正在计算文件指纹…'
+
+  let placeholder = null
+  let form = null
+  let iframe = null
+
+  try {
+    const hash = await calcGcid(file)
+    uploadStatus.value = '正在申请 PikPak 上传凭证…'
+
+    const ticket = await apiJson('/api/pikpak-upload-ticket', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: file.name,
+        size: file.size,
+        hash,
+        parentId,
+      }),
+    })
+
+    if (!ticket.instant) {
+      uploadStatus.value = '正在直接上传到 PikPak…'
+      iframe = document.createElement('iframe')
+      iframe.name = `pikpak-upload-${Date.now()}`
+      iframe.style.display = 'none'
+      document.body.appendChild(iframe)
+
+      form = document.createElement('form')
+      form.method = ticket.upload?.method || 'POST'
+      form.action = ticket.upload?.url || ''
+      form.enctype = 'multipart/form-data'
+      form.target = iframe.name
+      form.style.display = 'none'
+
+      for (const [key, value] of Object.entries(ticket.upload?.fields || {})) {
+        const hidden = document.createElement('input')
+        hidden.type = 'hidden'
+        hidden.name = key
+        hidden.value = String(value)
+        form.appendChild(hidden)
+      }
+
+      placeholder = document.createComment('pikpak-upload-input')
+      input.parentNode?.insertBefore(placeholder, input)
+      input.name = 'file'
+      form.appendChild(input)
+      document.body.appendChild(form)
+      form.submit()
+    }
+
+    uploadStatus.value = '已提交，正在重新读取确认…'
+    const uploaded = await waitForUploadedFile(parentId, ticket.file?.id || '', file.name)
+    if (!uploaded) {
+      throw new Error('上传已提交，但暂时没有在 PikPak 中确认到文件')
+    }
+
+    await loadFolder(parentId, activeFolder.value?.name || '')
+    refreshManifestDate()
+    uploadStatus.value = `上传成功：${uploaded.name} · ${uploaded.size}`
+  } catch (error) {
+    if (error?.code === 'authentication_required') {
+      authRequired.value = true
+      uploadStatus.value = ''
+      errorMessage.value = '登录已失效，请重新输入云盘密码。'
+    } else {
+      uploadStatus.value = ''
+      errorMessage.value = error instanceof Error ? error.message : '上传失败'
+    }
+  } finally {
+    if (placeholder?.parentNode) placeholder.replaceWith(input)
+    form?.remove()
+    iframe?.remove()
+    if (input) input.value = ''
+    uploading.value = false
   }
 }
 
@@ -391,6 +626,21 @@ onMounted(async () => {
                 />
               </label>
 
+              <input
+                ref="uploadInput"
+                type="file"
+                class="hidden"
+                @change="handleUpload"
+              />
+              <button
+                type="button"
+                class="inline-flex items-center justify-center rounded-full border border-cyan-100/20 bg-white/[0.1] px-5 py-3 text-sm font-semibold text-white transition hover:bg-white/[0.16] disabled:cursor-not-allowed disabled:opacity-45"
+                :disabled="!activeFolder || uploading || authRequired"
+                @click="selectUploadFile"
+              >
+                {{ uploading ? '上传中…' : '上传文件' }}
+              </button>
+
               <div class="group flex min-w-[11.5rem] items-center gap-3 rounded-[18px] border border-white/12 bg-white/[0.09] px-4 py-3 shadow-[0_14px_30px_rgba(7,33,58,0.18)] backdrop-blur-xl">
                 <div class="relative flex h-11 w-11 overflow-hidden rounded-2xl">
                    <img src="/assets/logo.png" class="w-full h-full object-cover" />
@@ -401,6 +651,7 @@ onMounted(async () => {
               </div>
             </div>
           </div>
+          <p v-if="uploadStatus" class="text-xs text-cyan-50/75">{{ uploadStatus }}</p>
         </header>
 
         <div class="relative z-10 flex min-h-0 flex-1 flex-col px-6 pb-5 pt-2.5 md:px-8 md:pb-6">
@@ -408,7 +659,32 @@ onMounted(async () => {
             {{ errorMessage }}
           </div>
 
-          <section class="mb-2.5 shrink-0">
+          <section
+            v-if="authRequired"
+            class="mx-auto my-auto w-full max-w-md rounded-[24px] border border-white/12 bg-slate-950/[0.28] p-6 shadow-[0_24px_70px_rgba(2,12,27,0.3)]"
+          >
+            <p class="text-xs uppercase tracking-[0.28em] text-cyan-100/60">Private Cloud</p>
+            <h3 class="mt-2 font-display text-xl font-semibold text-white/95">登录 Map7e Cloud</h3>
+            <p class="mt-2 text-sm leading-6 text-white/[0.58]">输入你设置的 CLOUD_PASSWORD 后读取 PikPak 内容。</p>
+            <input
+              v-model="authPassword"
+              type="password"
+              autocomplete="current-password"
+              placeholder="云盘密码"
+              class="mt-5 w-full rounded-2xl border border-white/12 bg-white/[0.08] px-4 py-3.5 text-white outline-none placeholder:text-white/35 focus:border-cyan-200/35"
+              @keyup.enter="loginCloud"
+            />
+            <button
+              type="button"
+              class="mt-3 w-full rounded-2xl bg-white px-4 py-3.5 font-semibold text-slate-950 transition hover:bg-cyan-50 disabled:opacity-60"
+              :disabled="authenticating || !authPassword"
+              @click="loginCloud"
+            >
+              {{ authenticating ? '登录中…' : '登录' }}
+            </button>
+          </section>
+
+          <section v-if="!authRequired" class="mb-2.5 shrink-0">
             <div class="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
               <button
                 v-for="folder in themedRootFolders"
@@ -416,7 +692,7 @@ onMounted(async () => {
                 type="button"
                 class="group rounded-[20px] border border-white/10 bg-white/[0.08] p-4 text-left shadow-[0_12px_35px_rgba(15,23,42,0.14)] transition duration-300 hover:-translate-y-1 hover:bg-white/[0.11] hover:shadow-[0_18px_40px_rgba(14,116,144,0.16)]"
                 :class="activeFolderSlug === folder.slug ? 'border-cyan-100/[0.24] bg-white/[0.14] shadow-[0_18px_42px_rgba(56,189,248,0.18)]' : ''"
-                @click="openFolder(folder.slug)"
+                @click="openFolder(folder.slug, folder.name)"
               >
                 <div class="flex items-start justify-between gap-3">
                   <div
@@ -462,7 +738,7 @@ onMounted(async () => {
           </section>
 
           <section
-            v-if="!activeFolder && !loadingLibrary"
+            v-if="!authRequired && !activeFolder && !loadingLibrary"
             class="flex min-h-0 flex-1 flex-col justify-between overflow-hidden rounded-[22px] border border-white/10 bg-slate-950/[0.18] px-5 py-5 shadow-[inset_0_1px_0_rgba(255,255,255,0.05)]"
           >
             <div>
@@ -493,7 +769,7 @@ onMounted(async () => {
           </section>
 
           <section
-            v-else
+            v-else-if="!authRequired"
             class="flex min-h-0 flex-1 flex-col overflow-hidden rounded-[22px] border border-white/10 bg-slate-950/[0.18] px-4 py-3.5 shadow-[inset_0_1px_0_rgba(255,255,255,0.05)] md:px-5"
           >
             <div class="mb-2.5 flex items-center justify-between gap-3">
@@ -528,8 +804,10 @@ onMounted(async () => {
               <div v-else-if="activeFolder" class="space-y-2">
                 <article
                   v-for="file in visibleFiles"
-                  :key="file.path"
+                  :key="file.id || file.path"
                   class="grid grid-cols-1 gap-4 rounded-2xl border border-transparent px-3 py-3 text-sm transition duration-300 hover:-translate-y-0.5 hover:border-white/[0.08] hover:bg-white/[0.07] hover:shadow-[0_16px_30px_rgba(15,23,42,0.18)] md:grid-cols-[minmax(0,1.8fr)_110px_128px_120px] md:items-center"
+                  :class="file.isFolder ? 'cursor-pointer' : ''"
+                  @click="file.isFolder && openFolder(file.id, file.name)"
                 >
                   <div class="flex min-w-0 items-start gap-3">
                     <div class="mt-0.5 flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl bg-white/[0.08] shadow-[inset_0_1px_0_rgba(255,255,255,0.12)]">
@@ -564,10 +842,20 @@ onMounted(async () => {
                   <span class="hidden text-white/[0.65] md:block">{{ file.size }}</span>
                   <span class="hidden text-white/[0.55] md:block">{{ file.date }}</span>
                   <div class="flex md:justify-end">
+                    <button
+                      v-if="file.isFolder"
+                      type="button"
+                      class="inline-flex w-full items-center justify-center rounded-full border border-sky-200/20 bg-white/[0.08] px-4 py-2.5 text-sm font-semibold text-sky-50 transition duration-300 hover:bg-white/[0.14] md:w-auto"
+                      @click.stop="openFolder(file.id, file.name)"
+                    >
+                      打开
+                    </button>
                     <a
+                      v-else
                       :href="file.path"
                       download
                       class="inline-flex w-full items-center justify-center rounded-full border border-cyan-200/20 bg-white/[0.08] px-4 py-2.5 text-sm font-semibold text-cyan-50 transition duration-300 hover:border-cyan-200/35 hover:bg-white/[0.14] hover:text-white md:w-auto"
+                      @click.stop
                     >
                       {{ TEXT.download }}
                     </a>
