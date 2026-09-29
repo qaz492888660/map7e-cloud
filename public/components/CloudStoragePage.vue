@@ -30,6 +30,16 @@ const previewMode = ref('')
 const previewText = ref('')
 const previewLoading = ref(false)
 const previewError = ref('')
+const selectedAction = ref(null)
+const managementDialog = ref('')
+const managementItem = ref(null)
+const managementParentId = ref('')
+const managementWritable = ref(true)
+const managementName = ref('')
+const managementError = ref('')
+const managementBusy = ref(false)
+const managementStatus = ref('')
+const fileNameInput = ref(null)
 let touchOrigin = null
 
 const activeFolder = computed(() => folderMap.value[activeFileFolder.value] || null)
@@ -48,7 +58,7 @@ const photoCount = computed(() => allPhotos.value.length)
 const fileCount = computed(() => allDocuments.value.length)
 const contentCount = computed(() => photoCount.value + fileCount.value)
 const photoRatio = computed(() => contentCount.value ? (photoCount.value / contentCount.value) * 100 : 0)
-const modalOpen = computed(() => viewerIndex.value >= 0 || Boolean(previewFile.value))
+const modalOpen = computed(() => viewerIndex.value >= 0 || Boolean(previewFile.value) || Boolean(selectedAction.value) || Boolean(managementDialog.value))
 const viewerImage = computed(() => viewerItems.value[viewerIndex.value] || null)
 const visiblePhotos = computed(() => {
   const query = searchQuery.value.trim().toLocaleLowerCase()
@@ -58,16 +68,23 @@ const visiblePhotos = computed(() => {
 const albumUpdatedAt = computed(() => latestDate(albumPhotos.value))
 const latestFileDate = computed(() => latestDate(allDocuments.value))
 const fileFolders = computed(() => {
-  return rootFolders.value
-    .filter((folder) => !isAlbumFolder(folder))
-    .map((folder) => ({
-      ...folder,
-      files: folderMap.value[folder.slug]?.files || [],
-      fileCount: (folderMap.value[folder.slug]?.files || []).filter((file) => !file.isFolder).length,
-    }))
+  return rootFolders.value.map((folder) => ({
+    ...folder,
+    files: folderMap.value[folder.slug]?.files || [],
+    fileCount: (folderMap.value[folder.slug]?.files || []).filter((file) => !file.isFolder).length,
+  }))
 })
 const rootLooseFiles = computed(() => rootFiles.value.filter((item) => !item.isFolder))
 const activeFileFolderData = computed(() => activeFolder.value)
+const activeDirectoryWritable = computed(() => activeFileFolderData.value?.writable !== false)
+const managementSubmitDisabled = computed(() => {
+  if (managementBusy.value) return true
+  if (managementDialog.value === 'trash') return false
+  const name = managementDialog.value === 'rename'
+    ? renamedFileName(managementName.value, managementItem.value)
+    : managementName.value
+  return !managementNameIsValid(name)
+})
 const currentFileItems = computed(() => activeFileFolderData.value?.files || [])
 const visibleCurrentFiles = computed(() => {
   const query = searchQuery.value.trim().toLocaleLowerCase()
@@ -104,10 +121,6 @@ const photoCounter = computed(() => viewerItems.value.length > 1 ? (viewerIndex.
 function isImageFile(file) {
   if (file?.type === 'image') return true
   return IMAGE_EXTENSIONS.includes(file?.extension || extensionOf(file?.name))
-}
-
-function isAlbumFolder(folder) {
-  return /相册|照片|图片|album|photo/i.test(String(folder?.name || ''))
 }
 
 function extensionOf(name) {
@@ -151,6 +164,7 @@ function normalizePikPakItem(file) {
     description: '',
     extension: extension.toLocaleLowerCase(),
     isFolder,
+    writable: file?.writable !== false,
     thumbnail: file?.thumbnail || null,
   }
 }
@@ -215,7 +229,7 @@ async function apiJson(url, options = {}) {
     error.code = 'authentication_required'
     throw error
   }
-  if (!response.ok || payload?.ok === false) throw new Error(payload?.error || ('HTTP ' + response.status))
+  if (!response.ok || payload?.ok === false) throw new Error(payload?.message || payload?.error || ('HTTP ' + response.status))
   return payload
 }
 
@@ -237,7 +251,7 @@ async function listPikPakItems(parentId = '') {
   return items
 }
 
-async function loadFolder(id, name = '') {
+async function loadFolder(id, name = '', writable, parentId) {
   const files = await listPikPakItems(id)
   const known = folderMap.value[id]
   const root = rootFolders.value.find((folder) => folder.slug === id)
@@ -249,10 +263,27 @@ async function loadFolder(id, name = '') {
       name: name || known?.name || root?.name || '文件夹',
       description: 'PikPak 实时目录',
       updatedAt: root?.updatedLabel || '',
+      parentId: parentId ?? root?.parentId ?? known?.parentId ?? '',
+      writable: writable ?? root?.writable ?? known?.writable ?? true,
       files,
     },
   }
   return folderMap.value[id]
+}
+
+async function readLibraryDirectory(strictFolderReads = false) {
+  const items = await listPikPakItems()
+  rootFiles.value = items.filter((item) => !item.isFolder)
+  rootFolders.value = items.filter((item) => item.isFolder).map(normalizeRootFolder)
+  folderMap.value = {}
+  await Promise.all(rootFolders.value.map(async (folder) => {
+    try {
+      await loadFolder(folder.slug, folder.name, folder.writable, '')
+    } catch (error) {
+      if (strictFolderReads || error?.code === 'authentication_required') throw error
+    }
+  }))
+  return items
 }
 
 async function loadLibrary() {
@@ -260,18 +291,8 @@ async function loadLibrary() {
   errorMessage.value = ''
   uploadStatus.value = ''
   try {
-    const items = await listPikPakItems()
+    await readLibraryDirectory()
     authRequired.value = false
-    rootFiles.value = items.filter((item) => !item.isFolder)
-    rootFolders.value = items.filter((item) => item.isFolder).map(normalizeRootFolder)
-    folderMap.value = {}
-    await Promise.all(rootFolders.value.map(async (folder) => {
-      try {
-        await loadFolder(folder.slug, folder.name)
-      } catch (error) {
-        if (error?.code === 'authentication_required') throw error
-      }
-    }))
   } catch (error) {
     rootFiles.value = []
     rootFolders.value = []
@@ -284,6 +305,23 @@ async function loadLibrary() {
   } finally {
     loadingLibrary.value = false
   }
+}
+
+async function refreshDirectory(parentId = '') {
+  if (!parentId) {
+    loadingLibrary.value = true
+    try {
+      const items = await readLibraryDirectory(true)
+      authRequired.value = false
+      return items
+    } finally {
+      loadingLibrary.value = false
+    }
+  }
+
+  const known = folderMap.value[parentId] || rootFolders.value.find((folder) => folder.slug === parentId)
+  const folder = await loadFolder(parentId, known?.name || '', known?.writable, known?.parentId)
+  return folder.files
 }
 
 function goHome() {
@@ -312,7 +350,7 @@ async function openFileFolder(folder) {
   loadingLibrary.value = true
   errorMessage.value = ''
   try {
-    const data = await loadFolder(folder.slug, folder.name)
+    const data = await loadFolder(folder.slug, folder.name, folder.writable, folder.parentId)
     const actualDate = formatDate(folder.updatedAt || folder.date)
     if (actualDate && !data.updatedAt) {
       folderMap.value = { ...folderMap.value, [folder.slug]: { ...data, updatedAt: actualDate } }
@@ -335,7 +373,7 @@ async function openFileFolder(folder) {
 }
 
 async function openNestedFolder(item) {
-  await openFileFolder({ slug: item.id, name: item.name, date: item.date })
+  await openFileFolder({ slug: item.id, name: item.name, date: item.date, writable: item.writable, parentId: item.parentId })
 }
 
 function goParentFolder() {
@@ -354,7 +392,7 @@ function goBack() {
 }
 
 function selectUploadFile() {
-  if (!activeFileFolder.value || uploading.value) return
+  if (!activeFileFolder.value || !activeDirectoryWritable.value || uploading.value || managementBusy.value) return
   uploadInput.value?.click()
 }
 
@@ -393,7 +431,7 @@ async function handleUpload(event) {
   const input = event?.target
   const file = input?.files?.[0]
   const parentId = activeFileFolder.value
-  if (!file || !parentId || uploading.value) return
+  if (!file || !parentId || !activeDirectoryWritable.value || uploading.value || managementBusy.value) return
   uploading.value = true
   errorMessage.value = ''
   uploadStatus.value = '正在计算文件指纹…'
@@ -454,6 +492,224 @@ async function handleUpload(event) {
     iframe?.remove()
     if (input) input.value = ''
     uploading.value = false
+  }
+}
+
+function openItemActions(item, source = 'files') {
+  if (!item?.id || managementBusy.value || uploading.value) return
+  const isRootItem = rootFiles.value.some((file) => file.id === item.id) || rootFolders.value.some((folder) => folder.id === item.id)
+  const parentId = source === 'albums'
+    ? (isRootItem ? '' : String(item.parentId || ''))
+    : activeFileFolder.value
+  const parentWritable = source === 'albums'
+    ? (isRootItem || folderMap.value[parentId]?.writable !== false)
+    : activeDirectoryWritable.value
+  selectedAction.value = { item, source, parentId, writable: item.writable !== false && parentWritable }
+}
+
+function closeItemActions() {
+  selectedAction.value = null
+}
+
+function chooseItemAction(action) {
+  const selection = selectedAction.value
+  if (!selection) return
+  closeItemActions()
+
+  if (action === 'open') {
+    if (selection.item.isFolder) {
+      if (selection.item.slug) openFileFolder(selection.item)
+      else openNestedFolder(selection.item)
+    } else if (selection.source === 'albums') {
+      openPhotoViewer(selection.item, visiblePhotos.value)
+    } else {
+      openFile(selection.item)
+    }
+    return
+  }
+
+  if (action === 'rename' && selection.writable) {
+    openManagementDialog('rename', selection.item, selection.parentId, selection.writable)
+  } else if (action === 'trash' && selection.writable) {
+    openManagementDialog('trash', selection.item, selection.parentId, selection.writable)
+  }
+}
+
+function openManagementDialog(mode, item = null, parentId = '', writable = item?.writable !== false) {
+  if (managementBusy.value) return
+  managementError.value = ''
+  managementName.value = item?.name || ''
+  managementItem.value = item
+  managementParentId.value = parentId
+  managementWritable.value = writable
+  managementDialog.value = mode
+}
+
+function openCreateFolderDialog() {
+  if (!activeDirectoryWritable.value || managementBusy.value) return
+  managementStatus.value = ''
+  openManagementDialog('create-folder')
+}
+
+function closeManagementDialog(force = false) {
+  if (managementBusy.value && !force) return
+  managementDialog.value = ''
+  managementItem.value = null
+  managementParentId.value = ''
+  managementWritable.value = true
+  managementName.value = ''
+  managementError.value = ''
+}
+
+function fileExtensionSuffix(file) {
+  const name = String(file?.name || '')
+  const dot = name.lastIndexOf('.')
+  return dot > 0 && dot < name.length - 1 ? name.slice(dot) : ''
+}
+
+function renamedFileName(value, file) {
+  const name = String(value || '').trim()
+  if (!name || file?.isFolder) return name
+  const suffix = fileExtensionSuffix(file)
+  return suffix && !name.toLocaleLowerCase().endsWith(suffix.toLocaleLowerCase()) ? name + suffix : name
+}
+
+function clearCachedFolderTree(folderId) {
+  const removed = new Set([folderId])
+  let changed = true
+  while (changed) {
+    changed = false
+    for (const [id, folder] of Object.entries(folderMap.value)) {
+      if (!removed.has(id) && removed.has(folder.parentId)) {
+        removed.add(id)
+        changed = true
+      }
+    }
+  }
+  const next = { ...folderMap.value }
+  for (const id of removed) delete next[id]
+  folderMap.value = next
+}
+
+function managementNameIsValid(value) {
+  const name = String(value || '').trim()
+  return Boolean(name) && [...name].length <= 255 && !/[\u0000-\u001f\u007f]/.test(name)
+}
+
+async function submitManagementDialog() {
+  if (managementBusy.value || !managementDialog.value) return
+
+  const mode = managementDialog.value
+  const item = managementItem.value
+  const parentId = mode === 'create-folder' ? activeFileFolder.value : managementParentId.value
+  let requestedName = ''
+  if (mode === 'create-folder') {
+    requestedName = String(managementName.value || '').trim()
+  } else if (mode === 'rename') {
+    requestedName = renamedFileName(managementName.value, item)
+  }
+
+  if (mode !== 'trash' && !managementNameIsValid(requestedName)) {
+    managementError.value = '名称不能为空，且不能超过 255 个字符。'
+    return
+  }
+  if (mode === 'create-folder' && !activeDirectoryWritable.value) {
+    managementError.value = '此目录为只读，无法新建文件夹。'
+    return
+  }
+  if (mode !== 'create-folder' && !managementWritable.value) {
+    managementError.value = 'PikPak 标记此项目或所在目录为只读，无法修改。'
+    return
+  }
+
+  managementBusy.value = true
+  managementError.value = ''
+  managementStatus.value = ''
+  errorMessage.value = ''
+  let requestAccepted = false
+
+  try {
+    if (mode === 'create-folder') {
+      const before = parentId
+        ? (folderMap.value[parentId]?.files || [])
+        : [...rootFolders.value, ...rootFiles.value]
+      const previousIds = new Set(before.map((entry) => entry.id))
+      const result = await apiJson('/api/pikpak-create-folder', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: requestedName, parentId }),
+      })
+      requestAccepted = true
+      const items = await refreshDirectory(parentId)
+      const createdId = String(result?.item?.id || '')
+      const created = items.find((entry) => entry.isFolder && (
+        createdId ? entry.id === createdId : entry.name === requestedName && !previousIds.has(entry.id)
+      ))
+      if (!created || created.name !== requestedName) {
+        throw new Error('PikPak 已接受创建请求，但重新读取目录后未能确认新文件夹。')
+      }
+      managementStatus.value = '文件夹已创建：' + created.name
+      closeManagementDialog(true)
+      return
+    }
+
+    if (!item?.id) throw new Error('缺少 PikPak 项目 ID，无法执行操作。')
+
+    if (mode === 'rename') {
+      await apiJson('/api/pikpak-rename', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: item.id, parentId, name: requestedName }),
+      })
+      requestAccepted = true
+      const items = await refreshDirectory(parentId)
+      const renamed = items.find((entry) => entry.id === item.id)
+      if (!renamed || renamed.name !== requestedName) {
+        throw new Error('PikPak 已接受改名请求，但重新读取目录后名称未能确认。')
+      }
+      if (renamed.isFolder && folderMap.value[renamed.id]) {
+        folderMap.value = { ...folderMap.value, [renamed.id]: { ...folderMap.value[renamed.id], name: requestedName } }
+      }
+      managementStatus.value = '已重命名为：' + renamed.name
+      closeManagementDialog(true)
+      return
+    }
+
+    await apiJson('/api/pikpak-trash', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: item.id, parentId }),
+    })
+    requestAccepted = true
+    const items = await refreshDirectory(parentId)
+    if (items.some((entry) => entry.id === item.id)) {
+      throw new Error('PikPak 已接受移入回收站请求，但重新读取目录后仍能看到该项目。')
+    }
+    if (item.isFolder) clearCachedFolderTree(item.id)
+    managementStatus.value = '已移到回收站：' + item.name
+    closeManagementDialog(true)
+  } catch (error) {
+    if (error?.code === 'authentication_required') {
+      authRequired.value = true
+      errorMessage.value = '登录已失效，请重新输入云盘密码。'
+      managementDialog.value = ''
+      managementItem.value = null
+      managementParentId.value = ''
+      managementWritable.value = true
+      return
+    }
+    const message = error instanceof Error ? error.message : 'PikPak 文件操作失败。'
+    if (requestAccepted) {
+      errorMessage.value = message + ' 最终状态尚未确认，请刷新目录后再检查，暂时不要重复操作。'
+      managementDialog.value = ''
+      managementItem.value = null
+      managementParentId.value = ''
+      managementWritable.value = true
+    } else {
+      managementError.value = message
+    }
+  } finally {
+    managementBusy.value = false
   }
 }
 
@@ -604,6 +860,14 @@ function closePreview() {
 }
 
 function handleKeydown(event) {
+  if (managementDialog.value) {
+    if (event.key === 'Escape') closeManagementDialog()
+    return
+  }
+  if (selectedAction.value) {
+    if (event.key === 'Escape') closeItemActions()
+    return
+  }
   if (viewerImage.value) {
     if (event.key === 'Escape') closePhotoViewer()
     if (event.key === 'ArrowLeft') movePhoto(-1)
@@ -676,6 +940,7 @@ onBeforeUnmount(() => {
 
         <main>
           <div v-if="errorMessage" class="error-banner" role="alert">{{ errorMessage }}</div>
+          <div v-if="managementStatus" class="operation-status" role="status">{{ managementStatus }}</div>
 
           <section v-if="authRequired" class="auth-gate" aria-labelledby="auth-title">
             <div class="auth-mark"><img src="/assets/logo.png" alt="" /></div>
@@ -778,17 +1043,17 @@ onBeforeUnmount(() => {
 
             <div v-if="loadingLibrary" class="loading-state">正在加载相册…</div>
             <div v-else-if="visiblePhotos.length" class="photo-grid">
-              <button
-                v-for="(photo, index) in visiblePhotos"
+              <article
+                v-for="photo in visiblePhotos"
                 :key="photo.id || photo.path"
                 class="photo-tile"
-                type="button"
-                :aria-label="'查看图片 ' + photo.name"
-                @click="openPhotoViewer(photo, visiblePhotos)"
               >
-                <span class="photo-thumb"><img :src="photo.thumbnail || photo.path" :alt="photo.name" loading="lazy" decoding="async" /></span>
-                <span class="photo-name">{{ photo.name }}</span>
-              </button>
+                <button class="photo-open" type="button" :aria-label="'查看图片 ' + photo.name" @click="openPhotoViewer(photo, visiblePhotos)">
+                  <span class="photo-thumb"><img :src="photo.thumbnail || photo.path" :alt="photo.name" loading="lazy" decoding="async" /></span>
+                  <span class="photo-name">{{ photo.name }}</span>
+                </button>
+                <button class="photo-more" type="button" :aria-label="'图片操作：' + photo.name" @click.stop="openItemActions(photo, 'albums')">···</button>
+              </article>
             </div>
             <div v-else class="empty-state">
               <span class="empty-icon" aria-hidden="true">
@@ -832,27 +1097,37 @@ onBeforeUnmount(() => {
               </template>
             </div>
 
-            <div v-if="activeFileFolderData" class="upload-toolbar">
-              <input ref="uploadInput" class="visually-hidden" type="file" @change="handleUpload" />
-              <button class="upload-button" type="button" :disabled="uploading" @click="selectUploadFile">
-                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15V4m0 0L8 8m4-4 4 4M5 14v5h14v-5" /></svg>
-                <span>{{ uploading ? '上传中…' : '上传文件' }}</span>
+            <div v-if="activeDirectoryWritable" class="upload-toolbar manage-toolbar">
+              <button class="upload-button" type="button" :disabled="managementBusy || uploading" @click="openCreateFolderDialog">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>
+                <span>新建文件夹</span>
               </button>
+              <template v-if="activeFileFolderData">
+                <input ref="uploadInput" class="visually-hidden" type="file" @change="handleUpload" />
+                <button class="upload-button" type="button" :disabled="uploading || managementBusy" @click="selectUploadFile">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15V4m0 0L8 8m4-4 4 4M5 14v5h14v-5" /></svg>
+                  <span>{{ uploading ? '上传中…' : '上传文件' }}</span>
+                </button>
+              </template>
               <span v-if="uploadStatus" class="upload-status" role="status">{{ uploadStatus }}</span>
             </div>
+            <div v-else class="read-only-note">此目录为只读，不能新建文件夹或上传文件。</div>
 
             <div v-if="loadingLibrary" class="loading-state">正在加载文件…</div>
             <div v-else-if="!activeFileFolderData" class="file-list">
-              <button v-for="folder in visibleFileFolders" :key="folder.slug" class="folder-row" type="button" @click="openFileFolder(folder)">
-                <span class="folder-row-icon" aria-hidden="true">
-                  <svg viewBox="0 0 24 24"><path d="M3.5 7.5A1.5 1.5 0 0 1 5 6h5l2 2h7A1.5 1.5 0 0 1 20.5 9.5v8A1.5 1.5 0 0 1 19 19H5a1.5 1.5 0 0 1-1.5-1.5Z" /><path d="M3.5 10h17" /></svg>
-                </span>
-                <span class="row-copy">
-                  <span class="row-title">{{ folder.name }}</span>
-                  <span class="row-meta">文件夹 · {{ folder.fileCount }} 个文件<span v-if="dateLabel(folder.updatedAt)"> · {{ folder.updatedAt }}</span></span>
-                </span>
-                <svg class="row-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6" /></svg>
-              </button>
+              <article v-for="folder in visibleFileFolders" :key="folder.slug" class="folder-row">
+                <button class="folder-open" type="button" @click="openFileFolder(folder)">
+                  <span class="folder-row-icon" aria-hidden="true">
+                    <svg viewBox="0 0 24 24"><path d="M3.5 7.5A1.5 1.5 0 0 1 5 6h5l2 2h7A1.5 1.5 0 0 1 20.5 9.5v8A1.5 1.5 0 0 1 19 19H5a1.5 1.5 0 0 1-1.5-1.5Z" /><path d="M3.5 10h17" /></svg>
+                  </span>
+                  <span class="row-copy">
+                    <span class="row-title">{{ folder.name }}</span>
+                    <span class="row-meta">文件夹 · {{ folder.fileCount }} 个文件<span v-if="dateLabel(folder.updatedAt)"> · {{ folder.updatedAt }}</span></span>
+                  </span>
+                  <svg class="row-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6" /></svg>
+                </button>
+                <button class="item-more" type="button" :aria-label="'文件夹操作：' + folder.name" @click.stop="openItemActions(folder)">···</button>
+              </article>
 
               <article v-for="file in rootFileSearchResults" :key="'root-' + file.id" class="file-row">
                 <button class="file-open" type="button" :aria-label="'预览 ' + file.name" @click="openFile(file)">
@@ -862,9 +1137,7 @@ onBeforeUnmount(() => {
                     <span class="row-meta">{{ fileTypeLabel(file) }} · {{ fileSizeLabel(file) }}<span v-if="dateLabel(file.date)"> · {{ file.date }}</span></span>
                   </span>
                 </button>
-                <a class="download-button" :href="file.path" :download="file.name" :aria-label="'下载 ' + file.name" @click.stop>
-                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.5v11m0 0 4-4m-4 4-4-4M5 17v3h14v-3" /></svg>
-                </a>
+                <button class="item-more" type="button" :aria-label="'文件操作：' + file.name" @click.stop="openItemActions(file)">···</button>
               </article>
 
               <div v-if="searchQuery && !visibleFileFolders.length && !rootFileSearchResults.length" class="empty-state empty-state--compact">
@@ -876,16 +1149,19 @@ onBeforeUnmount(() => {
             </div>
 
             <div v-else class="file-list">
-              <button v-for="folder in visibleCurrentFolders" :key="folder.id" class="folder-row" type="button" @click="openNestedFolder(folder)">
-                <span class="folder-row-icon" aria-hidden="true">
-                  <svg viewBox="0 0 24 24"><path d="M3.5 7.5A1.5 1.5 0 0 1 5 6h5l2 2h7A1.5 1.5 0 0 1 20.5 9.5v8A1.5 1.5 0 0 1 19 19H5a1.5 1.5 0 0 1-1.5-1.5Z" /><path d="M3.5 10h17" /></svg>
-                </span>
-                <span class="row-copy">
-                  <span class="row-title">{{ folder.name }}</span>
-                  <span class="row-meta">文件夹<span v-if="dateLabel(folder.date)"> · {{ folder.date }}</span></span>
-                </span>
-                <svg class="row-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6" /></svg>
-              </button>
+              <article v-for="folder in visibleCurrentFolders" :key="folder.id" class="folder-row">
+                <button class="folder-open" type="button" @click="openNestedFolder(folder)">
+                  <span class="folder-row-icon" aria-hidden="true">
+                    <svg viewBox="0 0 24 24"><path d="M3.5 7.5A1.5 1.5 0 0 1 5 6h5l2 2h7A1.5 1.5 0 0 1 20.5 9.5v8A1.5 1.5 0 0 1 19 19H5a1.5 1.5 0 0 1-1.5-1.5Z" /><path d="M3.5 10h17" /></svg>
+                  </span>
+                  <span class="row-copy">
+                    <span class="row-title">{{ folder.name }}</span>
+                    <span class="row-meta">文件夹<span v-if="dateLabel(folder.date)"> · {{ folder.date }}</span></span>
+                  </span>
+                  <svg class="row-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6" /></svg>
+                </button>
+                <button class="item-more" type="button" :aria-label="'文件夹操作：' + folder.name" @click.stop="openItemActions(folder)">···</button>
+              </article>
               <article v-for="file in visibleCurrentFiles" :key="file.id" class="file-row">
                 <button class="file-open" type="button" :aria-label="'预览 ' + file.name" @click="openFile(file)">
                   <span class="file-type-icon" :class="fileIconClass(file)"><span>{{ fileTypeLabel(file) }}</span></span>
@@ -894,9 +1170,7 @@ onBeforeUnmount(() => {
                     <span class="row-meta">{{ fileTypeLabel(file) }} · {{ fileSizeLabel(file) }}<span v-if="dateLabel(file.date)"> · {{ file.date }}</span></span>
                   </span>
                 </button>
-                <a class="download-button" :href="file.path" :download="file.name" :aria-label="'下载 ' + file.name" @click.stop>
-                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.5v11m0 0 4-4m-4 4-4-4M5 17v3h14v-3" /></svg>
-                </a>
+                <button class="item-more" type="button" :aria-label="'文件操作：' + file.name" @click.stop="openItemActions(file)">···</button>
               </article>
               <div v-if="searchQuery && !visibleCurrentFiles.length && !visibleCurrentFolders.length" class="empty-state empty-state--compact">
                 <strong>没有找到匹配的文件</strong><span>试试其他文件名。</span>
@@ -985,6 +1259,59 @@ onBeforeUnmount(() => {
             <a class="primary-download" :href="previewFile.path" :download="previewFile.name">下载原文件</a>
           </div>
         </div>
+      </div>
+    </Transition>
+
+    <Transition name="sheet">
+      <div v-if="selectedAction" class="action-sheet-backdrop" @click.self="closeItemActions">
+        <section class="action-sheet" role="dialog" aria-modal="true" :aria-label="'操作：' + selectedAction.item.name">
+          <span class="sheet-grabber" aria-hidden="true" />
+          <p class="sheet-eyebrow">{{ selectedAction.item.isFolder ? '文件夹' : '文件' }}</p>
+          <strong class="sheet-title">{{ selectedAction.item.name }}</strong>
+          <button class="sheet-action" type="button" @click="chooseItemAction('open')">
+            {{ selectedAction.item.isFolder ? '打开' : (selectedAction.source === 'albums' ? '查看' : '预览') }}
+          </button>
+          <a v-if="!selectedAction.item.isFolder" class="sheet-action" :href="selectedAction.item.path" :download="selectedAction.item.name" @click="closeItemActions">下载</a>
+          <button v-if="selectedAction.writable" class="sheet-action" type="button" @click="chooseItemAction('rename')">重命名</button>
+          <button v-if="selectedAction.writable" class="sheet-action sheet-action--danger" type="button" @click="chooseItemAction('trash')">删除</button>
+          <button class="sheet-cancel" type="button" @click="closeItemActions">取消</button>
+        </section>
+      </div>
+    </Transition>
+
+    <Transition name="viewer-fade">
+      <div v-if="managementDialog" class="management-backdrop" @click.self="closeManagementDialog">
+        <form class="management-panel" role="dialog" aria-modal="true" :aria-label="managementDialog === 'trash' ? '确认移到回收站' : (managementDialog === 'rename' ? '重命名' : '新建文件夹')" @submit.prevent="submitManagementDialog">
+          <span class="sheet-grabber" aria-hidden="true" />
+          <p class="sheet-eyebrow">云端文件管理</p>
+          <h2>
+            {{ managementDialog === 'trash' ? '确认删除' : (managementDialog === 'rename' ? '重命名' : '新建文件夹') }}
+          </h2>
+          <p v-if="managementDialog === 'trash'" class="management-confirm-copy">
+            确定将「{{ managementItem?.name }}」移到回收站吗？
+          </p>
+          <template v-else>
+            <label class="management-label" for="management-name-input">{{ managementDialog === 'rename' ? '新名称' : '文件夹名称' }}</label>
+            <input
+              id="management-name-input"
+              ref="fileNameInput"
+              v-model="managementName"
+              class="management-input"
+              type="text"
+              maxlength="255"
+              autocomplete="off"
+              :placeholder="managementDialog === 'rename' ? '输入新名称' : '输入文件夹名称'"
+            />
+            <p v-if="managementDialog === 'rename' && !managementItem?.isFolder && fileExtensionSuffix(managementItem)" class="management-hint">文件扩展名会自动保留。</p>
+          </template>
+          <p v-if="managementError" class="management-error" role="alert">{{ managementError }}</p>
+          <div class="management-buttons">
+            <button class="dialog-button dialog-button--quiet" type="button" :disabled="managementBusy" @click="closeManagementDialog">取消</button>
+            <button class="dialog-button" :class="{ 'dialog-button--danger': managementDialog === 'trash' }" type="submit" :disabled="managementSubmitDisabled">
+              {{ managementBusy ? '处理中…' : (managementDialog === 'trash' ? '移到回收站' : (managementDialog === 'rename' ? '保存' : '创建')) }}
+            </button>
+          </div>
+        </form>
       </div>
     </Transition>
   </div>
@@ -1657,6 +1984,11 @@ main {
   margin: 0 0 10px;
 }
 
+.manage-toolbar {
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 .upload-button {
   min-height: 40px;
   border-radius: 12px;
@@ -1679,6 +2011,23 @@ main {
   overflow-wrap: anywhere;
 }
 
+.read-only-note,
+.operation-status {
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  border: 1px solid rgba(221, 236, 249, 0.12);
+  border-radius: 12px;
+  background: rgba(8, 20, 32, 0.72);
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.operation-status {
+  border-color: rgba(134, 200, 243, 0.22);
+  color: #c8eafa;
+}
+
 .meta-divider {
   color: rgba(220, 232, 244, 0.34);
 }
@@ -1691,10 +2040,17 @@ main {
 }
 
 .photo-tile {
+  position: relative;
   min-width: 0;
+}
+
+.photo-open {
+  display: block;
+  width: 100%;
   padding: 0;
   border: 0;
   background: transparent;
+  color: inherit;
   text-align: left;
   cursor: pointer;
 }
@@ -1716,8 +2072,28 @@ main {
   transition: transform 220ms ease;
 }
 
-.photo-tile:hover .photo-thumb img {
+.photo-open:hover .photo-thumb img {
   transform: scale(1.035);
+}
+
+.photo-more {
+  position: absolute;
+  top: 7px;
+  right: 7px;
+  z-index: 2;
+  display: grid;
+  width: 32px;
+  height: 32px;
+  place-items: center;
+  padding: 0 0 6px;
+  border: 1px solid rgba(241, 248, 252, 0.23);
+  border-radius: 11px;
+  background: rgba(4, 13, 21, 0.68);
+  color: #fff;
+  font-size: 19px;
+  line-height: 1;
+  cursor: pointer;
+  backdrop-filter: blur(10px);
 }
 
 .photo-name {
@@ -1741,7 +2117,7 @@ main {
   display: grid;
   width: 100%;
   min-height: 72px;
-  grid-template-columns: 44px minmax(0, 1fr) 40px;
+  grid-template-columns: minmax(0, 1fr) 40px;
   align-items: center;
   gap: 12px;
   padding: 10px 12px;
@@ -1756,7 +2132,7 @@ main {
 .folder-row {
   border-color: rgba(131, 190, 225, 0.16);
   background: linear-gradient(100deg, rgba(20, 45, 65, 0.89), rgba(10, 25, 39, 0.85));
-  cursor: pointer;
+  padding: 0 10px 0 12px;
 }
 
 .folder-row:hover,
@@ -1821,9 +2197,47 @@ main {
   color: rgba(217, 233, 247, 0.52);
 }
 
+.folder-open {
+  display: grid;
+  min-width: 0;
+  min-height: 70px;
+  grid-template-columns: 42px minmax(0, 1fr) 18px;
+  align-items: center;
+  gap: 12px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
 .file-row {
   grid-template-columns: minmax(0, 1fr) 40px;
   padding: 0 10px 0 12px;
+}
+
+.item-more {
+  display: grid;
+  width: 40px;
+  height: 40px;
+  place-items: center;
+  padding: 0 0 7px;
+  border: 1px solid rgba(221, 237, 250, 0.12);
+  border-radius: 13px;
+  background: rgba(220, 235, 247, 0.06);
+  color: rgba(232, 242, 250, 0.82);
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+  transition: border-color 160ms ease, background 160ms ease, color 160ms ease;
+}
+
+.item-more:hover,
+.item-more:focus-visible {
+  border-color: rgba(147, 207, 240, 0.35);
+  background: rgba(144, 199, 232, 0.14);
+  color: #fff;
 }
 
 .file-open {
@@ -1975,6 +2389,203 @@ main {
   padding: 24px 8px;
   color: var(--muted);
   font-size: 13px;
+}
+
+.action-sheet-backdrop,
+.management-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  padding: 12px 12px 0;
+  background: rgba(1, 6, 11, 0.72);
+  backdrop-filter: blur(8px);
+  overscroll-behavior: contain;
+}
+
+.action-sheet,
+.management-panel {
+  width: min(100%, 560px);
+  padding: 12px 18px calc(18px + env(safe-area-inset-bottom, 0px));
+  border: 1px solid rgba(214, 231, 248, 0.16);
+  border-radius: 24px 24px 0 0;
+  background: rgba(8, 19, 31, 0.97);
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.45);
+  color: var(--text);
+}
+
+.sheet-grabber {
+  display: block;
+  width: 38px;
+  height: 4px;
+  margin: 0 auto 16px;
+  border-radius: 99px;
+  background: rgba(235, 244, 251, 0.32);
+}
+
+.sheet-eyebrow {
+  margin: 0 0 5px;
+  color: #9fcce6;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+}
+
+.sheet-title {
+  display: block;
+  overflow: hidden;
+  margin: 0 0 12px;
+  color: #f6f9fc;
+  font-size: 14px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sheet-action,
+.sheet-cancel {
+  display: flex;
+  width: 100%;
+  min-height: 48px;
+  align-items: center;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 13px;
+  background: transparent;
+  color: #edf5fb;
+  font: inherit;
+  font-size: 14px;
+  text-align: left;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.sheet-action:hover,
+.sheet-action:focus-visible,
+.sheet-cancel:hover,
+.sheet-cancel:focus-visible {
+  background: rgba(156, 202, 231, 0.12);
+}
+
+.sheet-action--danger {
+  color: #ffb9b7;
+}
+
+.sheet-cancel {
+  justify-content: center;
+  margin-top: 7px;
+  border: 1px solid rgba(221, 237, 250, 0.12);
+  background: rgba(221, 237, 250, 0.05);
+}
+
+.management-panel h2 {
+  margin: 0 0 14px;
+  color: #f6f9fc;
+  font-size: 19px;
+}
+
+.management-confirm-copy {
+  margin: 0;
+  color: rgba(235, 243, 250, 0.84);
+  font-size: 14px;
+  line-height: 1.7;
+  overflow-wrap: anywhere;
+}
+
+.management-label {
+  display: block;
+  margin: 0 0 7px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.management-input {
+  width: 100%;
+  min-height: 48px;
+  padding: 0 13px;
+  border: 1px solid rgba(222, 237, 250, 0.17);
+  border-radius: 13px;
+  outline: none;
+  background: rgba(3, 12, 20, 0.8);
+  color: var(--text);
+  font: inherit;
+  font-size: 14px;
+}
+
+.management-input:focus {
+  border-color: rgba(134, 200, 243, 0.62);
+  box-shadow: 0 0 0 3px rgba(134, 200, 243, 0.12);
+}
+
+.management-hint {
+  margin: 7px 0 0;
+  color: var(--subtle);
+  font-size: 11px;
+}
+
+.management-error {
+  margin: 10px 0 0;
+  color: #ffb9b7;
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.management-buttons {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin-top: 18px;
+}
+
+.dialog-button {
+  min-height: 44px;
+  padding: 0 14px;
+  border: 1px solid rgba(148, 206, 239, 0.25);
+  border-radius: 13px;
+  background: rgba(77, 143, 183, 0.25);
+  color: #e9f6fd;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.dialog-button--quiet {
+  border-color: rgba(221, 237, 250, 0.12);
+  background: rgba(221, 237, 250, 0.05);
+  color: var(--muted);
+}
+
+.dialog-button--danger {
+  border-color: rgba(231, 111, 111, 0.4);
+  background: rgba(142, 53, 58, 0.4);
+  color: #ffe5e3;
+}
+
+.dialog-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.sheet-enter-active,
+.sheet-leave-active {
+  transition: opacity 160ms ease, transform 160ms ease;
+}
+
+.sheet-enter-from,
+.sheet-leave-to {
+  opacity: 0;
+}
+
+.sheet-enter-from .action-sheet,
+.sheet-leave-to .action-sheet {
+  transform: translateY(18px);
+}
+
+.action-sheet,
+.management-panel {
+  transition: transform 160ms ease;
 }
 
 .photo-viewer,
@@ -2230,6 +2841,16 @@ main {
 }
 
 @media (min-width: 700px) {
+  .action-sheet-backdrop,
+  .management-backdrop {
+    align-items: center;
+  }
+
+  .action-sheet,
+  .management-panel {
+    border-radius: 24px;
+  }
+
   .app-shell {
     padding-top: calc(env(safe-area-inset-top, 0px) + 28px);
     padding-bottom: calc(env(safe-area-inset-bottom, 0px) + 34px);
