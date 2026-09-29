@@ -1,3 +1,5 @@
+import { hasValidSession } from '../lib/cloud-auth.js'
+
 const DRIVE_API = 'https://api-drive.mypikpak.com/drive/v1/files'
 
 function normalize(item) {
@@ -29,6 +31,14 @@ export default async function handler(req, res) {
   const token = process.env.PIKPAK_PAT
   if (!token) {
     return res.status(500).json({ ok: false, error: 'missing_pikpak_pat' })
+  }
+
+  if (!process.env.CLOUD_PASSWORD) {
+    return res.status(503).json({ ok: false, error: 'cloud_login_not_configured' })
+  }
+
+  if (!hasValidSession(req, token)) {
+    return res.status(401).json({ ok: false, error: 'authentication_required' })
   }
 
   const parentId = typeof req.query?.parentId === 'string' ? req.query.parentId : ''
