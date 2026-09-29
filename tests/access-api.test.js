@@ -4,6 +4,7 @@ import filesHandler from '../api/pikpak-files.js'
 import downloadHandler from '../api/pikpak-download.js'
 import createFolderHandler from '../api/pikpak-create-folder.js'
 import adminLoginHandler from '../api/admin-login.js'
+import adminChangePasswordHandler from '../api/admin-change-password.js'
 import adminConfigHandler from '../api/admin-config.js'
 import adminFoldersHandler from '../api/admin-folders.js'
 import adminFolderMetadataHandler from '../api/admin-folder-metadata.js'
@@ -18,6 +19,7 @@ const redis = new Map()
 const pikpakItems = new Map()
 const directories = new Map()
 const requestedDownloadLinks = []
+const ADMIN_AUTH_KEY = 'map7e-cloud:admin-auth:v1'
 let createdFolderRequests = 0
 
 function folderKey(folderId) {
@@ -54,6 +56,25 @@ function redisResponse(commands) {
     if (name === 'SET') {
       redis.set(key, String(value))
       return { result: 'OK' }
+    }
+    if (name === 'EVAL') {
+      const script = String(command[1])
+      const recordKey = String(command[3])
+      if (script.includes('map7e-bootstrap-admin-auth')) {
+        if (redis.has(recordKey)) return { result: 0 }
+        redis.set(recordKey, String(command[4]))
+        return { result: 1 }
+      }
+      if (script.includes('map7e-change-admin-password')) {
+        const raw = redis.get(recordKey)
+        if (!raw) return { error: 'admin_auth_record_missing' }
+        const record = JSON.parse(raw)
+        if (record.passwordHash !== String(command[4])) return { result: 0 }
+        record.passwordHash = String(command[5])
+        record.sessionVersion = Number(record.sessionVersion) + 1
+        redis.set(recordKey, JSON.stringify(record))
+        return { result: record.sessionVersion }
+      }
     }
     return { error: `unsupported command ${name}` }
   })
@@ -284,6 +305,105 @@ test('admin writes require the separate administrator cookie and persist metadat
   assert.equal(storedMetadata.type, 'album')
   assert.equal(storedMetadata.access, 'locked')
   assert.match(storedMetadata.updatedAt, /^\d{4}-\d{2}-\d{2}T/)
+})
+
+test('bootstrap password is hashed, changed password takes precedence, and old admin sessions expire', async () => {
+  process.env.PIKPAK_PAT = 'test-pikpak-token-signing-key'
+  process.env.ADMIN_PASSWORD = 'initial-bootstrap-admin-password'
+  process.env.UPSTASH_REDIS_REST_URL = 'https://redis.test'
+  process.env.UPSTASH_REDIS_REST_TOKEN = 'test-redis-token'
+  resetFixtures()
+
+  let response = await invoke(adminLoginHandler, { method: 'POST', body: { password: 'wrong-bootstrap-password' } })
+  assert.equal(response.statusCode, 401)
+  assert.equal(redis.has(ADMIN_AUTH_KEY), false)
+
+  response = await invoke(adminLoginHandler, { method: 'POST', body: { password: 'initial-bootstrap-admin-password' } })
+  assert.equal(response.statusCode, 200)
+  assert.equal(Object.hasOwn(response.body, 'passwordHash'), false)
+  assert.equal(Object.hasOwn(response.body, 'password'), false)
+  const firstCookie = response.headers['Set-Cookie'].split(';')[0]
+  const initialRecord = JSON.parse(redis.get(ADMIN_AUTH_KEY))
+  assert.match(initialRecord.passwordHash, /^scrypt\$16384\$8\$1\$/)
+  assert.equal(initialRecord.sessionVersion, 0)
+  assert.equal(redis.get(ADMIN_AUTH_KEY).includes('initial-bootstrap-admin-password'), false)
+
+  const visitorCookie = `map7e_cloud_session=${createSessionToken(process.env.PIKPAK_PAT).token}`
+  response = await invoke(adminChangePasswordHandler, {
+    method: 'POST',
+    cookie: visitorCookie,
+    body: {
+      currentPassword: 'initial-bootstrap-admin-password',
+      newPassword: 'a-new-admin-password-long-enough',
+      confirmPassword: 'a-new-admin-password-long-enough',
+    },
+  })
+  assert.equal(response.statusCode, 401, 'a visitor session cannot change the administrator password')
+
+  process.env.ADMIN_PASSWORD = 'rotated-environment-bootstrap-password'
+  response = await invoke(adminLoginHandler, {
+    method: 'POST',
+    body: { password: 'rotated-environment-bootstrap-password' },
+  })
+  assert.equal(response.statusCode, 401, 'a stored password hash takes precedence over a changed deployment secret')
+
+  response = await invoke(adminChangePasswordHandler, {
+    method: 'POST',
+    cookie: firstCookie,
+    body: {
+      currentPassword: 'incorrect-current-password',
+      newPassword: 'a-new-admin-password-long-enough',
+      confirmPassword: 'a-new-admin-password-long-enough',
+    },
+  })
+  assert.equal(response.statusCode, 401, 'changing the password requires the current password')
+
+  response = await invoke(adminChangePasswordHandler, {
+    method: 'POST',
+    cookie: firstCookie,
+    body: {
+      currentPassword: 'initial-bootstrap-admin-password',
+      newPassword: 'a-new-admin-password-long-enough',
+      confirmPassword: 'a-different-password-long-enough',
+    },
+  })
+  assert.equal(response.statusCode, 400, 'new password confirmation must match')
+
+  response = await invoke(adminChangePasswordHandler, {
+    method: 'POST',
+    cookie: firstCookie,
+    body: {
+      currentPassword: 'initial-bootstrap-admin-password',
+      newPassword: 'a-new-admin-password-long-enough',
+      confirmPassword: 'a-new-admin-password-long-enough',
+    },
+  })
+  assert.equal(response.statusCode, 200)
+  assert.equal(response.body.passwordHash, undefined)
+  assert.match(response.headers['Set-Cookie'], /Max-Age=0/)
+  const changedRecord = JSON.parse(redis.get(ADMIN_AUTH_KEY))
+  assert.equal(changedRecord.sessionVersion, 1)
+  assert.notEqual(changedRecord.passwordHash, initialRecord.passwordHash)
+  assert.equal(redis.get(ADMIN_AUTH_KEY).includes('a-new-admin-password-long-enough'), false)
+
+  response = await invoke(adminConfigHandler, { cookie: firstCookie })
+  assert.equal(response.statusCode, 401, 'old signed administrator sessions are invalid after a password change')
+
+  response = await invoke(adminLoginHandler, {
+    method: 'POST',
+    body: { password: 'initial-bootstrap-admin-password' },
+  })
+  assert.equal(response.statusCode, 401)
+
+  response = await invoke(adminLoginHandler, {
+    method: 'POST',
+    body: { password: 'a-new-admin-password-long-enough' },
+  })
+  assert.equal(response.statusCode, 200)
+  assert.equal(Object.hasOwn(response.body, 'passwordHash'), false)
+  const newCookie = response.headers['Set-Cookie'].split(';')[0]
+  response = await invoke(adminConfigHandler, { cookie: newCookie })
+  assert.equal(response.statusCode, 200, 'the newly stored password can create a valid admin session')
 })
 
 test('admin folder listing reads PikPak folders and returns default metadata for old folders', async () => {

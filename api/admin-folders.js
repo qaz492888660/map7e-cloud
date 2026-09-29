@@ -63,7 +63,7 @@ export default async function handler(req, res) {
     res.setHeader('Allow', 'GET')
     return res.status(405).json({ ok: false, error: 'method_not_allowed' })
   }
-  if (!requireAdmin(req, res)) return
+  if (!await requireAdmin(req, res)) return
 
   const token = process.env.PIKPAK_PAT
   if (!token) return res.status(503).json({ ok: false, error: 'missing_pikpak_pat' })

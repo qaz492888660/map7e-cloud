@@ -87,6 +87,12 @@ button:disabled { cursor: not-allowed; opacity: .45; }
 .global-control select { width: min(100%, 220px); }
 .global-control .primary-button { margin-left: auto; }
 .global-panel > .muted { margin-bottom: 0; }
+.settings-panel { margin-top: 16px; }
+.password-settings { max-width: 520px; }
+.password-settings h3 { margin: 2px 0 6px; font-size: 15px; }
+.password-settings .muted { margin-bottom: 0; }
+.password-settings .stack { gap: 9px; }
+.password-settings .primary-button { justify-self: start; margin-top: 5px; }
 .folder-section { margin-top: 28px; }
 .folder-heading { align-items: flex-end; }
 .folder-heading h2 { margin-bottom: 4px; }
@@ -125,6 +131,8 @@ button:disabled { cursor: not-allowed; opacity: .45; }
   .global-control { display: grid; grid-template-columns: minmax(0, 1fr); align-items: stretch; gap: 8px; }
   .global-control label { min-width: 0; }
   .global-control select, .global-control .primary-button { width: 100%; margin-left: 0; }
+  .password-settings { max-width: none; }
+  .password-settings .primary-button { width: 100%; }
   .folder-fields { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
   .folder-save { grid-column: 1 / -1; width: 100%; }
   .folder-card { padding: 14px; }

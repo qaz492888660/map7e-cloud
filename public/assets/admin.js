@@ -229,6 +229,34 @@ document.querySelector('#login-form').addEventListener('submit', async (event) =
   }
 })
 
+document.querySelector('#admin-password-form').addEventListener('submit', async (event) => {
+  event.preventDefault()
+  const form = event.currentTarget
+  const button = form.querySelector('button[type="submit"]')
+  const currentPassword = document.querySelector('#current-admin-password').value
+  const newPassword = document.querySelector('#new-admin-password').value
+  const confirmPassword = document.querySelector('#confirm-admin-password').value
+  button.disabled = true
+  button.textContent = '正在更新…'
+
+  try {
+    await apiJson('/api/admin-change-password', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ currentPassword, newPassword, confirmPassword }),
+    })
+    dashboard.hidden = true
+    loginPanel.hidden = false
+    showNotice('管理员密码已更新。旧的管理员会话已失效，请使用新密码重新登录。', 'success')
+  } catch (error) {
+    showNotice(error.message, 'error')
+  } finally {
+    form.reset()
+    button.textContent = '更新管理员密码'
+    button.disabled = false
+  }
+})
+
 document.querySelector('#logout-button').addEventListener('click', async () => {
   try {
     await apiJson('/api/admin-logout', { method: 'POST' })

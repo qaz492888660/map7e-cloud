@@ -42,7 +42,7 @@ export default async function handler(req, res) {
 
   const saveMetadata = type !== 'folder' || access !== 'inherit'
   if (saveMetadata) {
-    if (!requireAdmin(req, res)) return
+    if (!await requireAdmin(req, res)) return
     try {
       const state = await getGlobalAccessState()
       if (!state.storageReady) {

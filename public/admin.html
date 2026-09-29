@@ -50,6 +50,28 @@
           <p class="muted">上锁后，继承权限的目录和文件需要使用现有云盘密码登录。公开目录可以覆盖上级锁定。</p>
         </section>
 
+        <section class="panel settings-panel" aria-labelledby="settings-heading">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">SECURITY</p>
+              <h2 id="settings-heading">设置</h2>
+            </div>
+          </div>
+          <div class="password-settings">
+            <h3>修改管理员密码</h3>
+            <p class="muted">修改前需要再次验证当前密码。更新后，其他已登录的管理会话也会失效。</p>
+            <form id="admin-password-form" class="stack">
+              <label for="current-admin-password">当前管理员密码</label>
+              <input id="current-admin-password" name="currentPassword" type="password" autocomplete="current-password" required />
+              <label for="new-admin-password">新密码（至少 12 个字符）</label>
+              <input id="new-admin-password" name="newPassword" type="password" autocomplete="new-password" minlength="12" required />
+              <label for="confirm-admin-password">确认新密码</label>
+              <input id="confirm-admin-password" name="confirmPassword" type="password" autocomplete="new-password" minlength="12" required />
+              <button class="primary-button" type="submit">更新管理员密码</button>
+            </form>
+          </div>
+        </section>
+
         <section class="folder-section" aria-labelledby="folders-heading">
           <div class="section-heading folder-heading">
             <div>

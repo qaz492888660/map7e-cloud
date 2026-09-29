@@ -1,4 +1,4 @@
-import { hasValidAdminSession, requireAdmin } from '../lib/admin-auth.js'
+import { requireAdmin } from '../lib/admin-auth.js'
 
 export default async function handler(req, res) {
   res.setHeader('Cache-Control', 'no-store')
@@ -6,9 +6,6 @@ export default async function handler(req, res) {
     res.setHeader('Allow', 'GET')
     return res.status(405).json({ ok: false, error: 'method_not_allowed' })
   }
-  if (!hasValidAdminSession(req)) {
-    requireAdmin(req, res)
-    return
-  }
+  if (!await requireAdmin(req, res)) return
   return res.status(200).json({ ok: true, role: 'admin' })
 }
