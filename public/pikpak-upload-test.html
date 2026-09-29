@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+  <title>PikPak Upload Test</title>
+  <style>
+    body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;margin:0;background:#0b1220;color:#fff}
+    main{max-width:560px;margin:auto;padding:24px}
+    .card{background:#151f31;border:1px solid #2b3950;border-radius:18px;padding:18px;margin:14px 0}
+    input,select,button{box-sizing:border-box;width:100%;padding:13px 14px;margin:8px 0;border-radius:12px;border:1px solid #3a4961;background:#0e1727;color:#fff;font-size:16px}
+    button{background:#fff;color:#111;font-weight:700}
+    button:disabled{opacity:.5}
+    #status{white-space:pre-wrap;line-height:1.5;color:#cbd5e1}
+    small{color:#94a3b8}
+  </style>
+</head>
+<body>
+<main>
+  <h1>PikPak 上传测试</h1>
+  <div class="card">
+    <strong>1. 登录上传权限</strong>
+    <input id="password" type="password" placeholder="CLOUD_PASSWORD" autocomplete="current-password" />
+    <button id="login">登录</button>
+  </div>
+
+  <div class="card">
+    <strong>2. 选择目标与文件</strong>
+    <select id="folder"><option value="">根目录</option></select>
+    <input id="file" name="file" type="file" />
+    <button id="upload" disabled>上传并验证</button>
+    <small>文件会直接上传到 PikPak，不经过 Vercel 文件转发。</small>
+  </div>
+
+  <div class="card">
+    <strong>状态</strong>
+    <div id="status">正在读取 PikPak 根目录…</div>
+  </div>
+
+  <iframe name="upload-frame" style="display:none"></iframe>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id)
+const status = (text) => $('status').textContent = text
+let loggedIn = false
+
+async function jsonFetch(url, options) {
+  const res = await fetch(url, options)
+  const data = await res.json().catch(() => ({}))
+  if (!res.ok || data.ok === false) {
+    throw new Error(data.error || ('HTTP ' + res.status))
+  }
+  return data
+}
+
+async function loadFolders() {
+  try {
+    const data = await jsonFetch('/api/pikpak-files')
+    const folders = (data.items || []).filter(x => x.isFolder)
+    $('folder').innerHTML = '<option value="">根目录</option>' +
+      folders.map(x => '<option value="' + escapeHtml(x.id) + '">' + escapeHtml(x.name) + '</option>').join('')
+    status('PikPak 已连接。根目录读取到 ' + data.items.length + ' 个项目。')
+  } catch (e) {
+    status('读取失败：' + e.message)
+  }
+}
+
+function escapeHtml(text) {
+  return String(text).replace(/[&<>"']/g, ch => ({
+    '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
+  })[ch])
+}
+
+async function sha1(bytes) {
+  return new Uint8Array(await crypto.subtle.digest('SHA-1', bytes))
+}
+
+function hex(bytes) {
+  return Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('').toUpperCase()
+}
+
+async function calcGcid(file) {
+  let blockSize = 0x40000
+  while (file.size / blockSize > 0x200 && blockSize < 0x200000) blockSize <<= 1
+
+  const hashes = []
+  for (let offset = 0; offset < file.size; offset += blockSize) {
+    const chunk = await file.slice(offset, Math.min(file.size, offset + blockSize)).arrayBuffer()
+    hashes.push(await sha1(chunk))
+  }
+
+  const merged = new Uint8Array(hashes.length * 20)
+  hashes.forEach((h, i) => merged.set(h, i * 20))
+  return hex(await sha1(merged))
+}
+
+$('login').onclick = async () => {
+  const password = $('password').value
+  if (!password) return status('请输入 CLOUD_PASSWORD。')
+  try {
+    status('正在登录…')
+    await jsonFetch('/api/cloud-login', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({password})
+    })
+    loggedIn = true
+    $('upload').disabled = false
+    $('password').value = ''
+    status('登录成功。现在可以选择文件上传。')
+  } catch (e) {
+    status('登录失败：' + e.message)
+  }
+}
+
+async function waitForFile(parentId, fileId, fileName) {
+  for (let i = 0; i < 12; i++) {
+    await new Promise(r => setTimeout(r, 2000))
+    const q = parentId ? '?parentId=' + encodeURIComponent(parentId) : ''
+    const data = await jsonFetch('/api/pikpak-files' + q)
+    const hit = (data.items || []).find(x => x.id === fileId || x.name === fileName)
+    if (hit) return hit
+  }
+  return null
+}
+
+$('upload').onclick = async () => {
+  if (!loggedIn) return status('请先登录。')
+  const input = $('file')
+  const file = input.files && input.files[0]
+  if (!file) return status('请先选择一个文件。')
+
+  const parentId = $('folder').value
+
+  try {
+    $('upload').disabled = true
+    status('正在计算文件指纹…')
+    const hash = await calcGcid(file)
+
+    status('正在向 PikPak 申请上传凭证…')
+    const ticket = await jsonFetch('/api/pikpak-upload-ticket', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({name:file.name,size:file.size,hash,parentId})
+    })
+
+    if (ticket.instant) {
+      status('PikPak 已秒传成功：' + file.name)
+      return
+    }
+
+    status('正在直接上传到 PikPak…')
+    const form = document.createElement('form')
+    form.method = ticket.upload.method || 'POST'
+    form.action = ticket.upload.url
+    form.enctype = 'multipart/form-data'
+    form.target = 'upload-frame'
+    form.style.display = 'none'
+
+    for (const [key, value] of Object.entries(ticket.upload.fields || {})) {
+      const hidden = document.createElement('input')
+      hidden.type = 'hidden'
+      hidden.name = key
+      hidden.value = value
+      form.appendChild(hidden)
+    }
+
+    input.name = 'file'
+    const placeholder = document.createElement('div')
+    input.parentNode.insertBefore(placeholder, input)
+    form.appendChild(input)
+    document.body.appendChild(form)
+    form.submit()
+
+    status('数据已提交，正在等待 PikPak 确认…')
+    const uploaded = await waitForFile(parentId, ticket.file.id, file.name)
+
+    placeholder.replaceWith(input)
+    form.remove()
+
+    if (!uploaded) {
+      throw new Error('已提交上传，但 24 秒内未在目标目录确认到文件')
+    }
+
+    status('上传成功并已重新读取确认：\n' + uploaded.name + '\n' + uploaded.size + ' bytes')
+  } catch (e) {
+    status('上传失败：' + e.message)
+  } finally {
+    $('upload').disabled = !loggedIn
+  }
+}
+
+loadFolders()
+</script>
+</body>
+</html>
