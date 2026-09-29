@@ -1,13 +1,14 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import filesHandler from '../api/pikpak-files.js'
-import downloadHandler from '../api/pikpak-download.js'
-import createFolderHandler from '../api/pikpak-create-folder.js'
-import adminLoginHandler from '../api/admin-login.js'
-import adminChangePasswordHandler from '../api/admin-change-password.js'
-import adminConfigHandler from '../api/admin-config.js'
-import adminFoldersHandler from '../api/admin-folders.js'
-import adminFolderMetadataHandler from '../api/admin-folder-metadata.js'
+import dispatchHandler from '../api/dispatcher.js'
+import filesHandler from '../lib/api-handlers/pikpak-files.js'
+import downloadHandler from '../lib/api-handlers/pikpak-download.js'
+import createFolderHandler from '../lib/api-handlers/pikpak-create-folder.js'
+import adminLoginHandler from '../lib/api-handlers/admin-login.js'
+import adminChangePasswordHandler from '../lib/api-handlers/admin-change-password.js'
+import adminConfigHandler from '../lib/api-handlers/admin-config.js'
+import adminFoldersHandler from '../lib/api-handlers/admin-folders.js'
+import adminFolderMetadataHandler from '../lib/api-handlers/admin-folder-metadata.js'
 import { createSessionToken } from '../lib/cloud-auth.js'
 import { createAdminSessionToken } from '../lib/admin-auth.js'
 import { getGlobalAccessState } from '../lib/admin-store.js'
@@ -209,6 +210,21 @@ test('API enforces global and folder access before returning file listings', asy
   response = await invoke(filesHandler)
   assert.equal(response.statusCode, 200, 'public folders on later root pages remain discoverable')
   assert.deepEqual(response.body.items.map((item) => item.id), ['public-folder'])
+})
+
+test('dispatcher maps API paths to handlers and rejects unknown or unauthenticated admin routes', async () => {
+  process.env.PIKPAK_PAT = 'test-pikpak-token-signing-key'
+  process.env.CLOUD_PASSWORD = 'visitor-password'
+  process.env.ADMIN_PASSWORD = 'separate-admin-password'
+  process.env.UPSTASH_REDIS_REST_URL = 'https://redis.test'
+  process.env.UPSTASH_REDIS_REST_TOKEN = 'test-redis-token'
+  resetFixtures()
+
+  const protectedRoute = await invoke(dispatchHandler, { query: { route: 'admin-config' } })
+  assert.equal(protectedRoute.statusCode, 401, 'the routed admin API still requires an admin session')
+
+  const unknownRoute = await invoke(dispatchHandler, { query: { route: 'not-a-route' } })
+  assert.equal(unknownRoute.statusCode, 404)
 })
 
 test('direct downloads check the actual parent path and do not disclose a URL when locked', async () => {
