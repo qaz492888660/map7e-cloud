@@ -11,20 +11,23 @@ import adminFoldersHandler from '../lib/api-handlers/admin-folders.js'
 import adminFolderMetadataHandler from '../lib/api-handlers/admin-folder-metadata.js'
 import { createSessionToken } from '../lib/cloud-auth.js'
 import { createAdminSessionToken } from '../lib/admin-auth.js'
-import { getGlobalAccessState } from '../lib/admin-store.js'
+import { getGlobalAccessState, isPersistentStoreConfigured, setFolderMetadata, setGlobalAccess } from '../lib/admin-store.js'
 
 const originalFetch = globalThis.fetch
-const envKeys = ['PIKPAK_PAT', 'CLOUD_PASSWORD', 'ADMIN_PASSWORD', 'UPSTASH_REDIS_REST_URL', 'UPSTASH_REDIS_REST_TOKEN']
+const envKeys = ['PIKPAK_PAT', 'CLOUD_PASSWORD', 'ADMIN_PASSWORD', 'UPSTASH_REDIS_REST_URL', 'UPSTASH_REDIS_REST_TOKEN', 'KV_REST_API_URL', 'KV_REST_API_TOKEN', 'VERCEL_ENV']
 const originalEnv = Object.fromEntries(envKeys.map((key) => [key, process.env[key]]))
+process.env.VERCEL_ENV = 'production'
 const redis = new Map()
 const pikpakItems = new Map()
 const directories = new Map()
 const requestedDownloadLinks = []
+const redisAuthHeaders = []
 const ADMIN_AUTH_KEY = 'map7e-cloud:admin-auth:v1'
 let createdFolderRequests = 0
 
 function folderKey(folderId) {
-  return `map7e-cloud:folder:v1:${Buffer.from(folderId).toString('base64url')}`
+  const prefix = process.env.VERCEL_ENV === 'preview' ? 'map7e-cloud:preview:' : 'map7e-cloud:'
+  return `${prefix}folder:v1:${Buffer.from(folderId).toString('base64url')}`
 }
 
 function resetFixtures() {
@@ -32,6 +35,7 @@ function resetFixtures() {
   pikpakItems.clear()
   directories.clear()
   requestedDownloadLinks.length = 0
+  redisAuthHeaders.length = 0
   createdFolderRequests = 0
   directories.set('', [
     { id: 'root-file', name: 'root.txt', kind: 'drive#file', parent_id: '', links: { 'application/octet-stream': { url: 'https://cdn.example/root.txt' } } },
@@ -84,6 +88,7 @@ function redisResponse(commands) {
 globalThis.fetch = async (input, options = {}) => {
   const url = new URL(input)
   if (url.hostname === 'redis.test') {
+    redisAuthHeaders.push(options.headers?.Authorization)
     const commands = JSON.parse(options.body)
     return new Response(JSON.stringify(redisResponse(commands)), { status: 200, headers: { 'Content-Type': 'application/json' } })
   }
@@ -149,7 +154,8 @@ async function invoke(handler, { method = 'GET', query = {}, body = {}, cookie =
 }
 
 function setGlobal(access) {
-  redis.set('map7e-cloud:global-access:v1', access)
+  const prefix = process.env.VERCEL_ENV === 'preview' ? 'map7e-cloud:preview:' : 'map7e-cloud:'
+  redis.set(`${prefix}global-access:v1`, access)
 }
 
 function setFolder(folderId, access, type = 'folder') {
@@ -497,6 +503,30 @@ test('missing persistent storage preserves locked legacy access and refuses conf
   })
   assert.equal(response.statusCode, 503)
   assert.equal(response.body.error, 'persistent_storage_not_configured')
+})
+
+test('Vercel Upstash variables work and Preview settings are isolated from Production', async () => {
+  delete process.env.UPSTASH_REDIS_REST_URL
+  delete process.env.UPSTASH_REDIS_REST_TOKEN
+  process.env.KV_REST_API_URL = 'https://redis.test'
+  process.env.KV_REST_API_TOKEN = 'test-kv-token'
+  resetFixtures()
+
+  process.env.VERCEL_ENV = 'production'
+  await setGlobalAccess('locked')
+  await setFolderMetadata('shared-folder', { type: 'folder', access: 'inherit' })
+  assert.equal(redis.get('map7e-cloud:global-access:v1'), 'locked')
+  assert.equal(redis.has(`map7e-cloud:folder:v1:${Buffer.from('shared-folder').toString('base64url')}`), true)
+
+  process.env.VERCEL_ENV = 'preview'
+  assert.equal(isPersistentStoreConfigured(), true, 'the Upstash integration REST variables enable persistent storage')
+  assert.deepEqual(await getGlobalAccessState(), { globalAccess: 'locked', storageReady: true }, 'Preview defaults independently when it has no saved global setting')
+  assert.equal(redisAuthHeaders.at(-1), 'Bearer test-kv-token')
+  await setGlobalAccess('public')
+  await setFolderMetadata('shared-folder', { type: 'album', access: 'locked' })
+  assert.equal(redis.get('map7e-cloud:preview:global-access:v1'), 'public')
+  assert.equal(redis.get(`map7e-cloud:preview:folder:v1:${Buffer.from('shared-folder').toString('base64url')}`) !== redis.get(`map7e-cloud:folder:v1:${Buffer.from('shared-folder').toString('base64url')}`), true)
+  assert.equal(redis.get('map7e-cloud:global-access:v1'), 'locked', 'Preview writes leave Production settings unchanged')
 })
 
 test.after(() => {

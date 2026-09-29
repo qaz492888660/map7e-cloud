@@ -34,13 +34,12 @@ The **设置 → 修改管理员密码** form requires the current admin session
 
 Folder metadata is stored by PikPak folder ID in Upstash Redis through its REST API. It is map7e-cloud metadata and does not change PikPak folder names or contents. Folders without a saved record default to `type: folder` and `access: inherit`. Global access defaults to `locked`, preserving the existing password gate.
 
-To enable persistent settings and admin password changes, create or connect an Upstash Redis database and configure these server-only environment variables in Vercel for Preview and Production:
+To enable persistent settings and admin password changes, create or connect an Upstash Redis database in Vercel. The server requires the bootstrap password plus one complete Redis REST variable pair:
 
 - `ADMIN_PASSWORD`
-- `UPSTASH_REDIS_REST_URL`
-- `UPSTASH_REDIS_REST_TOKEN`
+- Either `UPSTASH_REDIS_REST_URL` + `UPSTASH_REDIS_REST_TOKEN`, or Vercel Upstash integration's `KV_REST_API_URL` + `KV_REST_API_TOKEN`.
 
-Use the `ADMIN_PASSWORD` value only for first-time initialization. Keep the Upstash REST URL and token secret. Separate Preview and Production databases are recommended so Preview tests cannot change live settings.
+Use the `ADMIN_PASSWORD` value only for first-time initialization. Keep the Upstash REST URL and token secret. When the same Upstash database is attached to Preview and Production, Preview uses a separate `map7e-cloud:preview:` keyspace; Production keeps the existing `map7e-cloud:` keys so the two environments cannot overwrite each other's settings.
 
 Keep the existing `PIKPAK_PAT` and `CLOUD_PASSWORD` configured as before. Deploy once after adding the variables. After that, changes made at `/admin` are persisted immediately and do not require another build or deployment. The management page remains read-only for settings while the Redis variables are missing or unavailable; it never falls back to process memory.
 
