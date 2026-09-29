@@ -1,114 +1,74 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Map7e - Cloud</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#07131f" />
+    <meta name="description" content="Map7e 私人云端空间" />
+    <title>Map7e · Cloud Storage</title>
     <link rel="icon" href="/favicon.ico" />
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link
-      href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=Sora:wght@500;600;700&display=swap"
-      rel="stylesheet"
-    />
-    <script src="/assets/tailwind.config.js"></script>
-    <script src="https://cdn.tailwindcss.com"></script>
     <style>
-      html,
-      body,
-      #app {
-        height: 100%;
-        margin: 0;
+      :root {
+        color-scheme: dark;
+        font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
+        font-synthesis: none;
+        text-rendering: optimizeLegibility;
+        -webkit-font-smoothing: antialiased;
+        background: #07131f;
       }
 
-      :root {
-        --page-background:
-          linear-gradient(rgba(0, 0, 0, 0.25), rgba(0, 0, 0, 0.35)),
-          url("https://images.unsplash.com/photo-1507525428034-b723cf961d3e?auto=format&fit=crop&w=4096&q=100");
+      *,
+      *::before,
+      *::after {
+        box-sizing: border-box;
+      }
+
+      html {
+        min-height: 100%;
+        background: #07131f;
+        scroll-behavior: smooth;
       }
 
       body {
-        background-color: #0f172a;
-        background-image: var(--page-background);
-        background-size: cover;
-        background-position: center;
-        background-repeat: no-repeat;
-        background-attachment: fixed;
-        color: #fff;
+        min-width: 320px;
+        min-height: 100vh;
+        min-height: 100dvh;
+        margin: 0;
+        overflow-x: hidden;
+        background: #07131f;
+        color: #f5f8fc;
+        -webkit-tap-highlight-color: transparent;
       }
 
-      .ocean-scene > div:first-child {
-        background-image: var(--page-background) !important;
+      #app {
+        min-height: 100vh;
+        min-height: 100dvh;
       }
 
-      #bg-switch {
-        position: fixed;
-        right: 20px;
-        bottom: 20px;
-        z-index: 999;
-        width: 44px;
-        height: 44px;
-        border-radius: 50%;
-        font-size: 20px;
-        background: rgba(0, 0, 0, 0.35);
-        color: #fff;
-        border: 1px solid rgba(255, 255, 255, 0.2);
-        backdrop-filter: blur(12px);
-        cursor: pointer;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        transition: all .3s;
+      button,
+      input,
+      a {
+        font: inherit;
       }
 
-      #bg-switch:hover {
-        transform: scale(1.1);
-        background: rgba(255, 255, 255, 0.2);
+      button {
+        color: inherit;
+      }
+
+      body.modal-open {
+        overflow: hidden;
+        overscroll-behavior: none;
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        html {
+          scroll-behavior: auto;
+        }
       }
     </style>
   </head>
   <body>
-    <button id="bg-switch" title="切换背景">🌊</button>
     <div id="app"></div>
     <script type="module" src="/assets/app.js"></script>
-    <script>
-      const bgList = [
-        "https://images.unsplash.com/photo-1507525428034-b723cf961d3e?auto=format&fit=crop&w=4096&q=100",
-        "https://images.unsplash.com/photo-1500375592092-40eb2168fd21?auto=format&fit=crop&w=4096&q=100",
-        "https://images.unsplash.com/photo-1470770841072-f978cf4d019e?auto=format&fit=crop&w=4096&q=100"
-      ];
-
-      function getTodayKey() {
-        const d = new Date();
-        return d.getFullYear() + "-" + (d.getMonth() + 1) + "-" + d.getDate();
-      }
-
-      let savedIndex = localStorage.getItem("bg-index");
-      let savedDate = localStorage.getItem("bg-date");
-
-      if (savedDate !== getTodayKey()) {
-        savedIndex = Math.floor(Math.random() * bgList.length);
-        localStorage.setItem("bg-index", savedIndex);
-        localStorage.setItem("bg-date", getTodayKey());
-      }
-
-      let index = savedIndex !== null ? parseInt(savedIndex) : 0;
-
-      function setBg(i) {
-        document.body.style.transition = "background 0.6s ease";
-        const background =
-          "linear-gradient(rgba(0,0,0,0.25), rgba(0,0,0,0.35)), url(" + bgList[i] + ")";
-        document.documentElement.style.setProperty("--page-background", background);
-        document.body.style.backgroundImage = background;
-      }
-
-      document.getElementById("bg-switch").onclick = () => {
-        index = (index + 1) % bgList.length;
-        localStorage.setItem("bg-index", index);
-        setBg(index);
-      };
-
-      setBg(index);
-    </script>
   </body>
-  </html>
+</html>

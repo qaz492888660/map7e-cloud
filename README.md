@@ -1,109 +1,35 @@
-# Map7e - Cloud
+# Map7e Cloud
 
-`map7e-cloud` is now a static directory-based download library. The interface keeps the ocean-themed glassmorphism look, restores clickable folder navigation, and does not depend on uploads or server-side APIs.
+Map7e Cloud is a mobile-first web interface for browsing a protected PikPak drive. Static files under public/ provide the app shell and underwater background; routes under api/ handle authenticated directory, download, and upload requests.
 
-## What It Does
+## Interface
 
-- The homepage opens at the root directory.
-- Three clickable root folders are provided by default:
-  - `albums`
-  - `docs`
-  - `resources`
-- In the UI, those folders are labeled as the Chinese directory names required by the product.
-- Clicking a folder enters that directory and shows only that folder's files.
-- The breadcrumb path at the top is clickable. Selecting the home item returns to the root directory.
-- The search box filters only the file names inside the current directory.
-- Every file is downloaded directly from a static `/downloads/...` path.
-- Upload is not supported.
+- The home screen has a non-clickable Map7e space overview and real image/file counts from directory entries the app has loaded. Counts do not include unopened nested folders.
+- Albums are searchable in a three-column mobile grid. Images open in an in-page viewer with swipe navigation, zoom, available metadata, and an original-download action.
+- Files appear as folder and file rows. Folders open the next directory level; current-directory search filters its files and folders.
+- File rows support downloads and browser previews for image, PDF, text, and video types when the browser and PikPak download response allow them.
+- Uploads use the protected direct-upload ticket API and submit file content to PikPak.
+- The video background is the same source clip served by https://blog.map7e.com/videos/underwater.mp4. A 1080p H.264 copy converted from that clip is loaded first; the blog's original HEVC video is the fallback source.
+- Scrolling stays in document flow. The layout uses dynamic viewport sizing and iOS safe-area insets.
 
-## Important Paths
+## Key Paths
 
-- `public/index.html`: static browser entrypoint
-- `public/components/CloudStoragePage.vue`: main Vue component for folder navigation
-- `public/files/library.json`: static directory manifest
-- `public/downloads/albums/`: sample files for the albums directory
-- `public/downloads/docs/`: sample files for the docs directory
-- `public/downloads/resources/`: sample files for the resources directory
-- `vercel.json`: static rewrites for Vercel deployment
+- public/index.html: browser entrypoint and mobile viewport settings
+- public/components/CloudStoragePage.vue: home, albums, file browser, viewer, previews, login, and upload interface
+- api/cloud-login.js, api/cloud-logout.js, lib/cloud-auth.js: protected cloud session
+- api/pikpak-files.js, api/pikpak-download.js, api/pikpak-upload-ticket.js: authenticated PikPak operations
+- public/assets/underwater-h264.mp4: browser-compatible copy of the blog video
+- public/files/library.json: retained static sample manifest; the live interface reads PikPak through the API
+- vercel.json: static path rewrites; Vercel also serves the API functions
 
-## Library Manifest Format
+## Configuration
 
-The app reads `/files/library.json` directly. The manifest must contain:
-
-- `title`
-- `rootFolders`
-- `folders`
-
-Example structure:
-
-```json
-{
-  "title": "Map7e Cloud Resource Library",
-  "updatedAt": "2026-04-14",
-  "rootFolders": [
-    {
-      "slug": "albums",
-      "name": "Album Directory",
-      "description": "Ocean artwork, preview images, and sample gallery assets.",
-      "updatedLabel": "2026-04-14"
-    }
-  ],
-  "folders": {
-    "albums": {
-      "name": "Album Directory",
-      "description": "Static images and gallery notes for direct download.",
-      "files": [
-        {
-          "name": "ocean-postcard.svg",
-          "path": "/downloads/albums/ocean-postcard.svg",
-          "size": "3 KB",
-          "date": "2026-04-14",
-          "type": "image",
-          "description": "Ocean postcard style artwork for gallery previews."
-        }
-      ]
-    }
-  }
-}
-```
-
-## Adding Files
-
-1. Put real downloadable files inside one of these folders:
-   - `public/downloads/albums/`
-   - `public/downloads/docs/`
-   - `public/downloads/resources/`
-2. Add the matching file records to `public/files/library.json`.
-3. Keep each file `path` pointed at the real static file, for example `/downloads/resources/test.txt`.
-4. Redeploy the site.
-
-## Vercel Deployment
-
-This project is designed for Vercel static deployment.
-
-1. Push the repository to GitHub.
-2. Import the repository into Vercel.
-3. Deploy as a static site.
-4. `vercel.json` rewrites these routes to the `public/` directory:
-   - `/`
-   - `/assets/*`
-   - `/components/*`
-   - `/files/*`
-   - `/downloads/*`
-
-No PHP runtime, upload endpoint, Docker image, Railway volume, or database is required.
+The Vercel project needs PIKPAK_PAT and CLOUD_PASSWORD. Configure both for each environment in which the protected APIs should work. The session cookie is signed with PIKPAK_PAT.
 
 ## Local Preview
 
-Any simple static file server is enough. For example:
+The UI assets can be served with any static server, but live directory, login, download, and upload actions require the Vercel API runtime and environment variables.
 
-```powershell
-python -m http.server 8080 --directory public
-```
+Run:
 
-Then open `http://localhost:8080`.
-
-## Notes
-
-- Replace the sample downloads with your real files before production use.
-- If you want a different background illustration, replace `public/assets/ocean-background.svg` or update the URL in `public/components/CloudStoragePage.vue`.
+    python3 -m http.server 8080 --directory public

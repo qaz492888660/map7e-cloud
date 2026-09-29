@@ -1,69 +1,15 @@
 <script setup>
-import { computed, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
-const folderThemes = [
-  {
-    accent: 'from-cyan-200/80 via-sky-200/65 to-blue-300/70',
-    iconBg: 'bg-cyan-100/80',
-  },
-  {
-    accent: 'from-sky-200/80 via-blue-200/65 to-indigo-300/70',
-    iconBg: 'bg-sky-100/80',
-  },
-  {
-    accent: 'from-blue-200/80 via-indigo-200/65 to-violet-300/70',
-    iconBg: 'bg-blue-100/80',
-  },
-  {
-    accent: 'from-teal-200/80 via-cyan-200/65 to-sky-300/70',
-    iconBg: 'bg-teal-100/80',
-  },
-]
-
-const TEXT = {
-  home: '\u5bb6',
-  root: '\u6839\u76ee\u5f55',
-  rootOverview: '\u6839\u76ee\u5f55\u6982\u89c8',
-  fileListSuffix: '\u6587\u4ef6\u5217\u8868',
-  pageType: 'PikPak \u79c1\u4eba\u4e91\u76d8',
-  intro: '\u4fdd\u6301\u76ee\u5f55\u5207\u6362\u4e0e\u4e0b\u8f7d\u4f53\u9a8c\uff0c\u6240\u6709\u5185\u5bb9\u5747\u6765\u81ea\u9759\u6001 JSON \u4e0e /downloads \u8d44\u6e90\u76ee\u5f55\u3002',
-  searchRoot: '\u8bf7\u5148\u8fdb\u5165\u4e00\u4e2a\u76ee\u5f55\u540e\u518d\u641c\u7d22',
-  searchInPrefix: '\u5728',
-  searchInSuffix: '\u4e2d\u641c\u7d22\u6587\u4ef6',
-  brandingSubline: '\u6d77\u6d0b\u98ce\u683c\u9759\u6001\u4e91\u76d8',
-  loading: '\u52a0\u8f7d\u4e2d',
-  files: '\u6587\u4ef6',
-  folders: '\u76ee\u5f55',
-  totalFiles: '\u5df2\u8f7d\u5165\u9879\u76ee',
-  lastUpdated: '\u6700\u65b0\u66f4\u65b0',
-  loadingLibrary: '\u6b63\u5728\u8f7d\u5165\u76ee\u5f55\u6570\u636e',
-  fileName: '\u6587\u4ef6\u540d',
-  fileSize: '\u5927\u5c0f',
-  fileDate: '\u65e5\u671f',
-  action: '\u64cd\u4f5c',
-  download: '\u4e0b\u8f7d',
-  emptyFolder: '\u5f53\u524d\u76ee\u5f55\u6682\u65e0\u53ef\u4e0b\u8f7d\u6587\u4ef6\u3002',
-  noMatch: '\u5f53\u524d\u76ee\u5f55\u4e0b\u6ca1\u6709\u5339\u914d\u5173\u952e\u8bcd\u7684\u6587\u4ef6\u3002',
-  rootGuide: '\u76ee\u5f55\u4e0e\u6587\u4ef6\u76f4\u63a5\u6765\u81ea PikPak\uff0c\u5237\u65b0\u5373\u53ef\u540c\u6b65\u6700\u65b0\u5185\u5bb9\u3002',
-  rootFoldersHint: '\u76f4\u63a5\u8bfb\u53d6 PikPak \u6839\u76ee\u5f55\u4e2d\u7684\u771f\u5b9e\u6587\u4ef6\u5939\u3002',
-  totalFilesHint: '\u7edf\u8ba1\u5f53\u524d\u5df2\u8bfb\u53d6\u76ee\u5f55\u4e2d\u7684\u771f\u5b9e\u9879\u76ee\uff0c\u4e0d\u4f7f\u7528\u9759\u6001\u6e05\u5355\u3002',
-  lastUpdatedHintPrefix: '\u5df2\u8bfb\u53d6\u5185\u5bb9\u6700\u8fd1\u66f4\u65b0\uff1a',
-  lastUpdatedHintFallback: '\u672a\u6807\u6ce8',
-  updatedPrefix: '\u66f4\u65b0\u4e8e',
-  itemUnit: '\u9879',
-  copyright: 'Copyright \u00a9 2026 Map7e. All rights reserved.',
-  errorFallback: '\u65e0\u6cd5\u8bfb\u53d6 PikPak \u4e91\u76d8\u3002',
-  invalidManifest: '\u76ee\u5f55\u6e05\u5355\u683c\u5f0f\u4e0d\u6b63\u786e\u3002',
-}
-
-const panelVisible = ref(false)
-const search = ref('')
-const manifestTitle = ref('Map7e Cloud Resource Library')
-const manifestUpdatedAt = ref('')
+const BLOG_VIDEO_URL = 'https://blog.map7e.com/videos/underwater.mp4'
+const TEXT_EXTENSIONS = ['txt', 'md', 'markdown', 'json', 'csv', 'xml', 'yaml', 'yml', 'log', 'ini']
+const IMAGE_EXTENSIONS = ['jpg', 'jpeg', 'png', 'webp', 'gif', 'avif', 'svg']
+const VIDEO_EXTENSIONS = ['mp4', 'webm', 'mov', 'm4v']
 const rootFolders = ref([])
 const folderMap = ref({})
-const activeFolderSlug = ref('')
-const loadingLibrary = ref(false)
+const rootFiles = ref([])
+const manifestUpdatedAt = ref('')
+const loadingLibrary = ref(true)
 const errorMessage = ref('')
 const authRequired = ref(false)
 const authPassword = ref('')
@@ -72,418 +18,408 @@ const folderTrail = ref([])
 const uploadInput = ref(null)
 const uploading = ref(false)
 const uploadStatus = ref('')
+const currentView = ref('home')
+const activeFileFolder = ref('')
+const searchQuery = ref('')
+const viewerItems = ref([])
+const viewerIndex = ref(-1)
+const viewerScale = ref(1)
+const viewerDimensions = ref('')
+const previewFile = ref(null)
+const previewMode = ref('')
+const previewText = ref('')
+const previewLoading = ref(false)
+const previewError = ref('')
+let touchOrigin = null
 
-const bubbleSpecs = [
-  { id: 'b1', size: 22, left: '4%', bottom: '-10%', duration: '34s', delay: '0s', opacity: 0.13, blur: 0.3, driftA: '10px', driftB: '-14px', driftC: '8px', scaleStart: 0.76, scaleMid: 0.92, scaleEnd: 1.02 },
-  { id: 'b2', size: 30, left: '9%', bottom: '-18%', duration: '39s', delay: '4s', opacity: 0.16, blur: 0.4, driftA: '16px', driftB: '-10px', driftC: '14px', scaleStart: 0.8, scaleMid: 0.98, scaleEnd: 1.04 },
-  { id: 'b3', size: 44, left: '15%', bottom: '-12%', duration: '36s', delay: '2s', opacity: 0.15, blur: 0.2, driftA: '-12px', driftB: '18px', driftC: '-8px', scaleStart: 0.82, scaleMid: 1, scaleEnd: 1.06 },
-  { id: 'b4', size: 64, left: '20%', bottom: '-24%', duration: '43s', delay: '7s', opacity: 0.18, blur: 0.5, driftA: '18px', driftB: '-22px', driftC: '10px', scaleStart: 0.84, scaleMid: 1.02, scaleEnd: 1.08 },
-  { id: 'b5', size: 26, left: '24%', bottom: '-15%', duration: '31s', delay: '1.5s', opacity: 0.14, blur: 0.1, driftA: '-8px', driftB: '12px', driftC: '-14px', scaleStart: 0.78, scaleMid: 0.94, scaleEnd: 1.01 },
-  { id: 'b6', size: 52, left: '29%', bottom: '-20%', duration: '41s', delay: '10s', opacity: 0.17, blur: 0.6, driftA: '20px', driftB: '-12px', driftC: '16px', scaleStart: 0.83, scaleMid: 1.01, scaleEnd: 1.07 },
-  { id: 'b7', size: 34, left: '34%', bottom: '-8%', duration: '33s', delay: '5s', opacity: 0.16, blur: 0.2, driftA: '12px', driftB: '-16px', driftC: '6px', scaleStart: 0.8, scaleMid: 0.98, scaleEnd: 1.03 },
-  { id: 'b8', size: 78, left: '39%', bottom: '-26%', duration: '46s', delay: '12s', opacity: 0.19, blur: 0.8, driftA: '-18px', driftB: '24px', driftC: '-12px', scaleStart: 0.86, scaleMid: 1.04, scaleEnd: 1.1 },
-  { id: 'b9', size: 24, left: '44%', bottom: '-14%', duration: '30s', delay: '3s', opacity: 0.12, blur: 0.1, driftA: '8px', driftB: '-10px', driftC: '12px', scaleStart: 0.77, scaleMid: 0.93, scaleEnd: 1 },
-  { id: 'b10', size: 58, left: '49%', bottom: '-22%', duration: '42s', delay: '8s', opacity: 0.18, blur: 0.5, driftA: '22px', driftB: '-18px', driftC: '10px', scaleStart: 0.84, scaleMid: 1.02, scaleEnd: 1.08 },
-  { id: 'b11', size: 38, left: '53%', bottom: '-11%', duration: '35s', delay: '11s', opacity: 0.15, blur: 0.3, driftA: '-10px', driftB: '14px', driftC: '-6px', scaleStart: 0.81, scaleMid: 0.97, scaleEnd: 1.04 },
-  { id: 'b12', size: 90, left: '58%', bottom: '-28%', duration: '49s', delay: '6s', opacity: 0.2, blur: 0.9, driftA: '24px', driftB: '-26px', driftC: '14px', scaleStart: 0.88, scaleMid: 1.06, scaleEnd: 1.12 },
-  { id: 'b13', size: 28, left: '62%', bottom: '-16%', duration: '32s', delay: '14s', opacity: 0.13, blur: 0.2, driftA: '10px', driftB: '-8px', driftC: '5px', scaleStart: 0.79, scaleMid: 0.95, scaleEnd: 1.02 },
-  { id: 'b14', size: 46, left: '67%', bottom: '-12%', duration: '38s', delay: '9s', opacity: 0.17, blur: 0.4, driftA: '-14px', driftB: '18px', driftC: '-10px', scaleStart: 0.82, scaleMid: 1, scaleEnd: 1.05 },
-  { id: 'b15', size: 70, left: '72%', bottom: '-24%', duration: '44s', delay: '13s', opacity: 0.18, blur: 0.7, driftA: '18px', driftB: '-20px', driftC: '15px', scaleStart: 0.85, scaleMid: 1.03, scaleEnd: 1.09 },
-  { id: 'b16', size: 24, left: '76%', bottom: '-10%', duration: '29s', delay: '2.5s', opacity: 0.12, blur: 0.1, driftA: '-6px', driftB: '12px', driftC: '-8px', scaleStart: 0.76, scaleMid: 0.92, scaleEnd: 0.99 },
-  { id: 'b17', size: 56, left: '81%', bottom: '-18%', duration: '40s', delay: '15s', opacity: 0.17, blur: 0.5, driftA: '20px', driftB: '-14px', driftC: '9px', scaleStart: 0.83, scaleMid: 1.01, scaleEnd: 1.07 },
-  { id: 'b18', size: 82, left: '86%', bottom: '-30%', duration: '47s', delay: '5.5s', opacity: 0.19, blur: 0.8, driftA: '-20px', driftB: '26px', driftC: '-12px', scaleStart: 0.87, scaleMid: 1.05, scaleEnd: 1.11 },
-  { id: 'b19', size: 32, left: '90%', bottom: '-13%', duration: '34s', delay: '17s', opacity: 0.15, blur: 0.3, driftA: '12px', driftB: '-12px', driftC: '7px', scaleStart: 0.8, scaleMid: 0.96, scaleEnd: 1.03 },
-  { id: 'b20', size: 48, left: '94%', bottom: '-19%', duration: '37s', delay: '1s', opacity: 0.16, blur: 0.4, driftA: '-16px', driftB: '14px', driftC: '-10px', scaleStart: 0.82, scaleMid: 0.99, scaleEnd: 1.05 },
-  { id: 'b21', size: 60, left: '12%', bottom: '-32%', duration: '45s', delay: '18s', opacity: 0.17, blur: 0.7, driftA: '16px', driftB: '-18px', driftC: '11px', scaleStart: 0.85, scaleMid: 1.03, scaleEnd: 1.08 },
-  { id: 'b22', size: 72, left: '64%', bottom: '-34%', duration: '48s', delay: '20s', opacity: 0.18, blur: 0.8, driftA: '-22px', driftB: '20px', driftC: '-14px', scaleStart: 0.86, scaleMid: 1.04, scaleEnd: 1.1 },
-]
-
-const beachBackgroundImage =
-  'https://images.unsplash.com/photo-1507525428034-b723cf961d3e?auto=format&fit=crop&w=3840&q=90'
-
-const backgroundStyle = {
-  backgroundImage: `linear-gradient(rgba(0, 0, 0, 0.25), rgba(0, 0, 0, 0.35)), url("${beachBackgroundImage}")`,
-  backgroundSize: 'cover',
-  backgroundPosition: 'center',
-  backgroundRepeat: 'no-repeat',
-  backgroundAttachment: 'fixed',
-}
-
-const activeFolder = computed(() => folderMap.value[activeFolderSlug.value] || null)
-
-const currentFiles = computed(() => activeFolder.value?.files || [])
-
-const visibleFiles = computed(() => {
-  const query = search.value.trim().toLowerCase()
-  if (!query) return currentFiles.value
-  return currentFiles.value.filter((file) => file.name.toLowerCase().includes(query))
-})
-
+const activeFolder = computed(() => folderMap.value[activeFileFolder.value] || null)
 const allFiles = computed(() => {
   const unique = new Map()
-  Object.values(folderMap.value).forEach((folder) => {
-    ;(folder.files || []).forEach((item) => {
-      if (item.id) unique.set(item.id, item)
-    })
-  })
+  ;[...rootFiles.value, ...Object.values(folderMap.value).flatMap((folder) => folder.files || [])]
+    .filter((item) => !item.isFolder)
+    .forEach((item) => unique.set(item.id || item.path, item))
   return [...unique.values()]
 })
-
-const totalFiles = computed(() => allFiles.value.length)
-
-const currentViewDescription = computed(() =>
-  activeFolder.value
-    ? `PikPak / ${activeFolder.value.name}`
-    : TEXT.rootGuide,
-)
-
-const latestDateLabel = computed(() => {
-  const dates = allFiles.value
-    .map((file) => file.date || '')
-    .filter(Boolean)
-    .sort((left, right) => right.localeCompare(left))
-  return dates[0] || '--'
+const albumFiles = computed(() => allFiles.value)
+const albumPhotos = computed(() => albumFiles.value.filter(isImageFile))
+const allPhotos = computed(() => albumPhotos.value)
+const allDocuments = computed(() => allFiles.value.filter((file) => !isImageFile(file)))
+const photoCount = computed(() => allPhotos.value.length)
+const fileCount = computed(() => allDocuments.value.length)
+const contentCount = computed(() => photoCount.value + fileCount.value)
+const photoRatio = computed(() => contentCount.value ? (photoCount.value / contentCount.value) * 100 : 0)
+const modalOpen = computed(() => viewerIndex.value >= 0 || Boolean(previewFile.value))
+const viewerImage = computed(() => viewerItems.value[viewerIndex.value] || null)
+const visiblePhotos = computed(() => {
+  const query = searchQuery.value.trim().toLocaleLowerCase()
+  if (!query) return albumPhotos.value
+  return albumPhotos.value.filter((file) => file.name.toLocaleLowerCase().includes(query))
 })
-
-const breadcrumbs = computed(() => [
-  { label: TEXT.home, slug: '' },
-  ...folderTrail.value,
-])
-
-const themedRootFolders = computed(() =>
-  rootFolders.value.map((folder, index) => {
-    const folderFiles = folderMap.value[folder.slug]?.files || []
-    return {
+const albumUpdatedAt = computed(() => latestDate(albumPhotos.value))
+const latestFileDate = computed(() => latestDate(allDocuments.value))
+const fileFolders = computed(() => {
+  return rootFolders.value
+    .filter((folder) => !isAlbumFolder(folder))
+    .map((folder) => ({
       ...folder,
-      ...folderThemes[index % folderThemes.length],
-      itemCountLabel: `${folderFiles.length} ${TEXT.itemUnit}`,
-    }
-  }),
-)
-
-const searchPlaceholder = computed(() => {
-  if (!activeFolder.value) return TEXT.searchRoot
-  return `${TEXT.searchInPrefix}${activeFolder.value.name}${TEXT.searchInSuffix}`
+      files: folderMap.value[folder.slug]?.files || [],
+      fileCount: (folderMap.value[folder.slug]?.files || []).filter((file) => !file.isFolder).length,
+    }))
 })
-
-const currentListTitle = computed(() => {
-  if (!activeFolder.value) return TEXT.loadingLibrary
-  return `${activeFolder.value.name}${TEXT.fileListSuffix}`
+const rootLooseFiles = computed(() => rootFiles.value.filter((item) => !item.isFolder))
+const activeFileFolderData = computed(() => activeFolder.value)
+const currentFileItems = computed(() => activeFileFolderData.value?.files || [])
+const visibleCurrentFiles = computed(() => {
+  const query = searchQuery.value.trim().toLocaleLowerCase()
+  return currentFileItems.value.filter((file) => !file.isFolder && (!query || file.name.toLocaleLowerCase().includes(query)))
 })
+const visibleCurrentFolders = computed(() => {
+  const query = searchQuery.value.trim().toLocaleLowerCase()
+  return currentFileItems.value.filter((file) => file.isFolder && (!query || file.name.toLocaleLowerCase().includes(query)))
+})
+const visibleFileFolders = computed(() => {
+  const query = searchQuery.value.trim().toLocaleLowerCase()
+  if (!query) return fileFolders.value
+  return fileFolders.value.filter((folder) => folder.name.toLocaleLowerCase().includes(query))
+})
+const rootFileSearchResults = computed(() => {
+  const query = searchQuery.value.trim().toLocaleLowerCase()
+  if (!query) return rootLooseFiles.value
+  return rootLooseFiles.value.filter((file) => file.name.toLocaleLowerCase().includes(query))
+})
+const locationLabel = computed(() => {
+  if (currentView.value === 'home') return '家 / Map7e'
+  if (currentView.value === 'albums') return '家 / 相册目录'
+  return activeFileFolderData.value ? '家 / 文件目录 / ' + activeFileFolderData.value.name : '家 / 文件目录'
+})
+const backLabel = computed(() => currentView.value === 'files' && activeFileFolder.value ? '文件目录' : 'Map7e')
+const currentHeading = computed(() => {
+  if (currentView.value === 'albums') return '相册目录'
+  if (activeFileFolderData.value) return activeFileFolderData.value.name
+  return '文件目录'
+})
+const currentFileCount = computed(() => activeFileFolderData.value ? activeFileFolderData.value.files.filter((file) => !file.isFolder).length : rootLooseFiles.value.length)
+const photoCounter = computed(() => viewerItems.value.length > 1 ? (viewerIndex.value + 1) + ' / ' + viewerItems.value.length : '图片预览')
 
-const currentItemCountLabel = computed(() =>
-  loadingLibrary.value ? TEXT.loading : `${visibleFiles.value.length} ${TEXT.itemUnit}`,
-)
-
-const fileBadgeClass = (type) => {
-  const styles = {
-    folder: 'bg-sky-200/[0.18] text-sky-50',
-    archive: 'bg-white/10 text-blue-100',
-    document: 'bg-cyan-200/[0.15] text-cyan-50',
-    image: 'bg-emerald-200/[0.15] text-emerald-50',
-    video: 'bg-indigo-200/20 text-indigo-50',
-    other: 'bg-slate-200/[0.14] text-slate-50',
-  }
-  return styles[type] || styles.other
+function isImageFile(file) {
+  if (file?.type === 'image') return true
+  return IMAGE_EXTENSIONS.includes(file?.extension || extensionOf(file?.name))
 }
 
-const fileTypeLabel = (type) => {
-  const labels = {
-    folder: '目录',
-    archive: '压缩包',
-    document: '文档',
-    image: '图片',
-    video: '视频',
-    other: '其他',
-  }
-  return labels[type] || labels.other
+function isAlbumFolder(folder) {
+  return /相册|照片|图片|album|photo/i.test(String(folder?.name || ''))
 }
 
-const formatBytes = (value) => {
-  const size = Number(value || 0)
-  if (!Number.isFinite(size) || size < 0) return '--'
-  if (size === 0) return '0 B'
-  const units = ['B', 'KB', 'MB', 'GB', 'TB']
-  const index = Math.min(Math.floor(Math.log(size) / Math.log(1024)), units.length - 1)
-  const amount = size / 1024 ** index
-  return `${amount >= 10 || index === 0 ? amount.toFixed(0) : amount.toFixed(1)} ${units[index]}`
+function extensionOf(name) {
+  const parts = String(name || '').split('.')
+  return parts.length > 1 ? parts.pop().toLocaleLowerCase() : ''
 }
 
-const formatDate = (value) => {
-  if (!value) return '--'
-  const text = String(value)
-  return /^\\d{4}-\\d{2}-\\d{2}/.test(text) ? text.slice(0, 10) : text
-}
-
-const classifyType = (item) => {
+function classifyType(item) {
   if (item?.isFolder) return 'folder'
   const mime = String(item?.mimeType || '').toLowerCase()
-  const ext = String(item?.extension || item?.name?.split('.').pop() || '').toLowerCase()
+  const ext = String(item?.extension || extensionOf(item?.name)).toLowerCase()
   if (mime.startsWith('image/')) return 'image'
   if (mime.startsWith('video/')) return 'video'
   if (['zip', 'rar', '7z', 'tar', 'gz', 'bz2', 'xz'].includes(ext)) return 'archive'
-  if (
-    mime.startsWith('text/') ||
-    ['pdf', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'txt', 'md', 'json', 'csv'].includes(ext)
-  ) return 'document'
+  if (mime.startsWith('text/') || ['pdf', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'txt', 'md', 'json', 'csv'].includes(ext)) return 'document'
   return 'other'
 }
 
-const normalizePikPakItem = (item) => ({
-  id: String(item?.id || ''),
-  parentId: String(item?.parentId || ''),
-  name: String(item?.name || '未命名'),
-  isFolder: Boolean(item?.isFolder),
-  size: item?.isFolder ? '--' : formatBytes(item?.size),
-  rawSize: Number(item?.size || 0),
-  date: formatDate(item?.modifiedAt || item?.createdAt),
-  modifiedAt: item?.modifiedAt || item?.createdAt || '',
-  type: classifyType(item),
-  description: '',
-  path: item?.isFolder ? '' : `/api/pikpak-download?id=${encodeURIComponent(item?.id || '')}`,
-  thumbnail: item?.thumbnail || null,
-})
+function formatDate(value) {
+  if (!value) return ''
+  const text = String(value)
+  return /^\d{4}-\d{2}-\d{2}/.test(text) ? text.slice(0, 10) : ''
+}
 
-const normalizeRootFolder = (item) => ({
-  slug: String(item?.id || ''),
-  name: String(item?.name || '未命名目录'),
-  description: 'PikPak 实时目录',
-  updatedLabel: formatDate(item?.modifiedAt || item?.createdAt),
-})
+function normalizePikPakItem(file) {
+  const isFolder = Boolean(file?.isFolder)
+  const extension = String(file?.extension || extensionOf(file?.name))
+  const sizeBytes = file?.size === null || file?.size === undefined || file?.size === '' ? null : Number(file.size)
+  return {
+    id: String(file?.id || ''),
+    parentId: String(file?.parentId || ''),
+    name: String(file?.name || '未命名文件'),
+    path: isFolder ? '' : '/api/pikpak-download?id=' + encodeURIComponent(String(file?.id || '')),
+    size: isFolder ? '' : (sizeBytes !== null && Number.isFinite(sizeBytes) && sizeBytes >= 0 ? formatBytes(sizeBytes) : ''),
+    sizeBytes: !isFolder && sizeBytes !== null && Number.isFinite(sizeBytes) && sizeBytes >= 0 ? sizeBytes : null,
+    rawSize: sizeBytes !== null && Number.isFinite(sizeBytes) && sizeBytes >= 0 ? sizeBytes : null,
+    date: formatDate(file?.modifiedAt || file?.createdAt),
+    modifiedAt: file?.modifiedAt || file?.createdAt || '',
+    type: classifyType(file),
+    mimeType: String(file?.mimeType || ''),
+    description: '',
+    extension: extension.toLocaleLowerCase(),
+    isFolder,
+    thumbnail: file?.thumbnail || null,
+  }
+}
 
-const apiJson = async (url, options) => {
+function normalizeRootFolder(item) {
+  return {
+    ...normalizePikPakItem(item),
+    slug: String(item?.id || ''),
+    description: 'PikPak 实时目录',
+    updatedLabel: formatDate(item?.modifiedAt || item?.createdAt),
+    updatedAt: formatDate(item?.modifiedAt || item?.createdAt),
+  }
+}
+
+function latestDate(files) {
+  return files.map((file) => file.date || '').filter((date) => /^\d{4}-\d{2}-\d{2}$/.test(date)).sort().reverse()[0] || ''
+}
+
+function formatBytes(value) {
+  const bytes = Number(value)
+  if (!Number.isFinite(bytes) || bytes < 0) return ''
+  if (bytes === 0) return '0 B'
+  const units = ['B', 'KB', 'MB', 'GB', 'TB']
+  const index = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1)
+  const amount = bytes / 1024 ** index
+  return (amount >= 10 || index === 0 ? amount.toFixed(0) : amount.toFixed(1)) + ' ' + units[index]
+}
+
+function fileSizeLabel(file) {
+  return file.sizeBytes !== null ? formatBytes(file.sizeBytes) : (file.size || '大小未知')
+}
+
+function fileTypeLabel(file) {
+  if (file.isFolder) return '文件夹'
+  if (file.extension) return file.extension.toLocaleUpperCase()
+  const labels = { archive: '压缩包', document: '文档', image: '图片', video: '视频', other: '文件' }
+  return labels[file.type] || labels.other
+}
+
+function fileIconClass(file) {
+  if (file.isFolder) return 'file-icon--folder'
+  if (file.type === 'archive') return 'file-icon--archive'
+  if (isImageFile(file)) return 'file-icon--image'
+  if (file.type === 'video' || VIDEO_EXTENSIONS.includes(file.extension)) return 'file-icon--video'
+  if (file.extension === 'json') return 'file-icon--code'
+  return 'file-icon--document'
+}
+
+function dateLabel(date) {
+  return /^\d{4}-\d{2}-\d{2}$/.test(String(date || '')) ? date : ''
+}
+
+async function apiJson(url, options = {}) {
   const response = await fetch(url, {
     cache: 'no-store',
-    headers: {
-      Accept: 'application/json',
-      ...(options?.headers || {}),
-    },
+    headers: { Accept: 'application/json', ...(options.headers || {}) },
     ...options,
   })
   const payload = await response.json().catch(() => ({}))
   if (response.status === 401) {
-    const error = new Error('authentication_required')
+    const error = new Error('需要先登录云盘。')
     error.code = 'authentication_required'
     throw error
   }
-  if (!response.ok || payload?.ok === false) {
-    throw new Error(payload?.error || `HTTP ${response.status}`)
-  }
+  if (!response.ok || payload?.ok === false) throw new Error(payload?.error || ('HTTP ' + response.status))
   return payload
 }
 
-const loadFolder = async (id, name = '') => {
-  const payload = await apiJson(`/api/pikpak-files?parentId=${encodeURIComponent(id)}`)
-  const existing = folderMap.value[id]
-  const files = Array.isArray(payload?.items) ? payload.items.map(normalizePikPakItem) : []
+async function listPikPakItems(parentId = '') {
+  const items = []
+  let pageToken = ''
+  const seenTokens = new Set()
+  do {
+    const params = new URLSearchParams()
+    if (parentId) params.set('parentId', parentId)
+    if (pageToken) params.set('pageToken', pageToken)
+    const payload = await apiJson('/api/pikpak-files' + (params.size ? '?' + params.toString() : ''))
+    items.push(...(Array.isArray(payload?.items) ? payload.items : []).map(normalizePikPakItem))
+    manifestUpdatedAt.value = formatDate(payload?.syncTime) || manifestUpdatedAt.value
+    pageToken = String(payload?.nextPageToken || '')
+    if (pageToken && seenTokens.has(pageToken)) break
+    if (pageToken) seenTokens.add(pageToken)
+  } while (pageToken && seenTokens.size < 200)
+  return items
+}
+
+async function loadFolder(id, name = '') {
+  const files = await listPikPakItems(id)
+  const known = folderMap.value[id]
+  const root = rootFolders.value.find((folder) => folder.slug === id)
   folderMap.value = {
     ...folderMap.value,
     [id]: {
       id,
-      name: name || existing?.name || rootFolders.value.find((folder) => folder.slug === id)?.name || '目录',
+      slug: id,
+      name: name || known?.name || root?.name || '文件夹',
       description: 'PikPak 实时目录',
+      updatedAt: root?.updatedLabel || '',
       files,
     },
   }
   return folderMap.value[id]
 }
 
-const openFolder = async (slug, name = '') => {
-  if (!slug) return
+async function loadLibrary() {
   loadingLibrary.value = true
   errorMessage.value = ''
   uploadStatus.value = ''
   try {
-    const folder = await loadFolder(slug, name)
-    activeFolderSlug.value = slug
-    search.value = ''
-
-    const existingIndex = folderTrail.value.findIndex((item) => item.slug === slug)
-    if (existingIndex >= 0) {
-      folderTrail.value = folderTrail.value.slice(0, existingIndex + 1)
-    } else {
-      const root = rootFolders.value.find((item) => item.slug === slug)
-      folderTrail.value = root
-        ? [{ label: root.name, slug }]
-        : [...folderTrail.value, { label: folder.name, slug }]
-    }
-  } catch (error) {
-    if (error?.code === 'authentication_required') {
-      authRequired.value = true
-    } else {
-      errorMessage.value = error instanceof Error ? error.message : TEXT.errorFallback
-    }
-  } finally {
-    loadingLibrary.value = false
-  }
-}
-
-const goHome = () => {
-  activeFolderSlug.value = ''
-  folderTrail.value = []
-  search.value = ''
-  uploadStatus.value = ''
-}
-
-const openBreadcrumb = async (slug) => {
-  if (!slug) {
-    goHome()
-    return
-  }
-  const crumb = folderTrail.value.find((item) => item.slug === slug)
-  await openFolder(slug, crumb?.label || '')
-}
-
-const refreshManifestDate = () => {
-  const dates = [
-    ...rootFolders.value.map((folder) => folder.updatedLabel),
-    ...allFiles.value.map((item) => item.date),
-  ]
-    .filter((value) => /^\\d{4}-\\d{2}-\\d{2}$/.test(value || ''))
-    .sort((a, b) => b.localeCompare(a))
-  manifestUpdatedAt.value = dates[0] || ''
-}
-
-const loadLibrary = async () => {
-  loadingLibrary.value = true
-  errorMessage.value = ''
-  uploadStatus.value = ''
-
-  try {
-    const payload = await apiJson('/api/pikpak-files')
+    const items = await listPikPakItems()
     authRequired.value = false
-    manifestTitle.value = 'Map7e Cloud · PikPak'
-    const items = Array.isArray(payload?.items) ? payload.items : []
-    const folders = items.filter((item) => item?.isFolder)
-
-    rootFolders.value = folders.map(normalizeRootFolder)
+    rootFiles.value = items.filter((item) => !item.isFolder)
+    rootFolders.value = items.filter((item) => item.isFolder).map(normalizeRootFolder)
     folderMap.value = {}
-
-    await Promise.all(
-      rootFolders.value.map(async (folder) => {
-        try {
-          await loadFolder(folder.slug, folder.name)
-        } catch {
-          // A single unreadable child folder should not block the root view.
-        }
-      }),
-    )
-
-    refreshManifestDate()
+    await Promise.all(rootFolders.value.map(async (folder) => {
+      try {
+        await loadFolder(folder.slug, folder.name)
+      } catch (error) {
+        if (error?.code === 'authentication_required') throw error
+      }
+    }))
   } catch (error) {
+    rootFiles.value = []
     rootFolders.value = []
     folderMap.value = {}
     if (error?.code === 'authentication_required') {
       authRequired.value = true
     } else {
-      errorMessage.value = error instanceof Error ? error.message : TEXT.errorFallback
+      errorMessage.value = error instanceof Error ? error.message : '无法读取 PikPak 云盘。'
     }
   } finally {
     loadingLibrary.value = false
   }
 }
 
-const loginCloud = async () => {
-  const password = authPassword.value
-  if (!password || authenticating.value) return
-  authenticating.value = true
+function goHome() {
+  currentView.value = 'home'
+  activeFileFolder.value = ''
+  folderTrail.value = []
+  searchQuery.value = ''
+  uploadStatus.value = ''
+}
+
+function openAlbums() {
+  currentView.value = 'albums'
+  activeFileFolder.value = ''
+  searchQuery.value = ''
+}
+
+function openFiles() {
+  currentView.value = 'files'
+  activeFileFolder.value = ''
+  folderTrail.value = []
+  searchQuery.value = ''
+}
+
+async function openFileFolder(folder) {
+  if (!folder?.slug) return
+  loadingLibrary.value = true
   errorMessage.value = ''
   try {
-    await apiJson('/api/cloud-login', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ password }),
-    })
-    authPassword.value = ''
-    authRequired.value = false
-    await loadLibrary()
+    const data = await loadFolder(folder.slug, folder.name)
+    const actualDate = formatDate(folder.updatedAt || folder.date)
+    if (actualDate && !data.updatedAt) {
+      folderMap.value = { ...folderMap.value, [folder.slug]: { ...data, updatedAt: actualDate } }
+    }
+    activeFileFolder.value = folder.slug
+    currentView.value = 'files'
+    searchQuery.value = ''
+    const existingIndex = folderTrail.value.findIndex((item) => item.slug === folder.slug)
+    if (existingIndex >= 0) {
+      folderTrail.value = folderTrail.value.slice(0, existingIndex + 1)
+    } else {
+      folderTrail.value = [...folderTrail.value, { slug: folder.slug, label: data.name }]
+    }
   } catch (error) {
-    errorMessage.value = error instanceof Error ? error.message : '登录失败'
+    if (error?.code === 'authentication_required') authRequired.value = true
+    else errorMessage.value = error instanceof Error ? error.message : '无法打开此文件夹。'
   } finally {
-    authenticating.value = false
+    loadingLibrary.value = false
   }
 }
 
-const selectUploadFile = () => {
-  if (!activeFolder.value || uploading.value) return
+async function openNestedFolder(item) {
+  await openFileFolder({ slug: item.id, name: item.name, date: item.date })
+}
+
+function goParentFolder() {
+  folderTrail.value = folderTrail.value.slice(0, -1)
+  const parent = folderTrail.value[folderTrail.value.length - 1]
+  activeFileFolder.value = parent?.slug || ''
+  searchQuery.value = ''
+}
+
+function goBack() {
+  if (currentView.value === 'files' && activeFileFolder.value) {
+    goParentFolder()
+    return
+  }
+  goHome()
+}
+
+function selectUploadFile() {
+  if (!activeFileFolder.value || uploading.value) return
   uploadInput.value?.click()
 }
 
-const sha1 = async (bytes) =>
-  new Uint8Array(await crypto.subtle.digest('SHA-1', bytes))
+async function sha1(bytes) {
+  return new Uint8Array(await crypto.subtle.digest('SHA-1', bytes))
+}
 
-const hex = (bytes) =>
-  Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('').toUpperCase()
+function hex(bytes) {
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('').toUpperCase()
+}
 
-const calcGcid = async (file) => {
+async function calcGcid(file) {
   let blockSize = 0x40000
   while (file.size / blockSize > 0x200 && blockSize < 0x200000) blockSize <<= 1
-
   const hashes = []
   for (let offset = 0; offset < file.size; offset += blockSize) {
     const chunk = await file.slice(offset, Math.min(file.size, offset + blockSize)).arrayBuffer()
     hashes.push(await sha1(chunk))
   }
-
   const merged = new Uint8Array(hashes.length * 20)
   hashes.forEach((hash, index) => merged.set(hash, index * 20))
   return hex(await sha1(merged))
 }
 
-const waitForUploadedFile = async (parentId, fileId, fileName) => {
+async function waitForUploadedFile(parentId, fileId, fileName) {
   for (let attempt = 0; attempt < 15; attempt += 1) {
     await new Promise((resolve) => setTimeout(resolve, 2000))
-    const payload = await apiJson(`/api/pikpak-files?parentId=${encodeURIComponent(parentId)}`)
-    const items = Array.isArray(payload?.items) ? payload.items : []
-    const hit = items.find((item) => item?.id === fileId || item?.name === fileName)
-    if (hit) return normalizePikPakItem(hit)
+    const items = await listPikPakItems(parentId)
+    const hit = items.find((item) => item.id === fileId || item.name === fileName)
+    if (hit) return hit
   }
   return null
 }
 
-const handleUpload = async (event) => {
+async function handleUpload(event) {
   const input = event?.target
   const file = input?.files?.[0]
-  const parentId = activeFolderSlug.value
+  const parentId = activeFileFolder.value
   if (!file || !parentId || uploading.value) return
-
   uploading.value = true
   errorMessage.value = ''
   uploadStatus.value = '正在计算文件指纹…'
-
   let placeholder = null
   let form = null
   let iframe = null
-
   try {
     const hash = await calcGcid(file)
     uploadStatus.value = '正在申请 PikPak 上传凭证…'
-
     const ticket = await apiJson('/api/pikpak-upload-ticket', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        name: file.name,
-        size: file.size,
-        hash,
-        parentId,
-      }),
+      body: JSON.stringify({ name: file.name, size: file.size, hash, parentId }),
     })
-
     if (!ticket.instant) {
       uploadStatus.value = '正在直接上传到 PikPak…'
       iframe = document.createElement('iframe')
-      iframe.name = `pikpak-upload-${Date.now()}`
+      iframe.name = 'pikpak-upload-' + Date.now()
       iframe.style.display = 'none'
       document.body.appendChild(iframe)
-
       form = document.createElement('form')
       form.method = ticket.upload?.method || 'POST'
       form.action = ticket.upload?.url || ''
       form.enctype = 'multipart/form-data'
       form.target = iframe.name
       form.style.display = 'none'
-
       for (const [key, value] of Object.entries(ticket.upload?.fields || {})) {
         const hidden = document.createElement('input')
         hidden.type = 'hidden'
@@ -491,7 +427,6 @@ const handleUpload = async (event) => {
         hidden.value = String(value)
         form.appendChild(hidden)
       }
-
       placeholder = document.createComment('pikpak-upload-input')
       input.parentNode?.insertBefore(placeholder, input)
       input.name = 'file'
@@ -499,16 +434,11 @@ const handleUpload = async (event) => {
       document.body.appendChild(form)
       form.submit()
     }
-
-    uploadStatus.value = '已提交，正在重新读取确认…'
+    uploadStatus.value = '已提交，正在确认文件…'
     const uploaded = await waitForUploadedFile(parentId, ticket.file?.id || '', file.name)
-    if (!uploaded) {
-      throw new Error('上传已提交，但暂时没有在 PikPak 中确认到文件')
-    }
-
+    if (!uploaded) throw new Error('上传已提交，但暂时没有在 PikPak 中确认到文件。')
     await loadFolder(parentId, activeFolder.value?.name || '')
-    refreshManifestDate()
-    uploadStatus.value = `上传成功：${uploaded.name} · ${uploaded.size}`
+    uploadStatus.value = '上传成功：' + uploaded.name
   } catch (error) {
     if (error?.code === 'authentication_required') {
       authRequired.value = true
@@ -516,7 +446,7 @@ const handleUpload = async (event) => {
       errorMessage.value = '登录已失效，请重新输入云盘密码。'
     } else {
       uploadStatus.value = ''
-      errorMessage.value = error instanceof Error ? error.message : '上传失败'
+      errorMessage.value = error instanceof Error ? error.message : '上传失败。'
     }
   } finally {
     if (placeholder?.parentNode) placeholder.replaceWith(input)
@@ -527,484 +457,1982 @@ const handleUpload = async (event) => {
   }
 }
 
-onMounted(async () => {
-  document.body.style.backgroundColor = '#0f172a'
-  document.body.style.backgroundImage = `linear-gradient(rgba(0, 0, 0, 0.25), rgba(0, 0, 0, 0.35)), url("${beachBackgroundImage}")`
-  document.body.style.backgroundSize = 'cover'
-  document.body.style.backgroundPosition = 'center'
-  document.body.style.backgroundRepeat = 'no-repeat'
-  document.body.style.backgroundAttachment = 'fixed'
-  document.body.style.color = '#fff'
+async function loginCloud() {
+  if (!authPassword.value || authenticating.value) return
+  authenticating.value = true
+  errorMessage.value = ''
+  try {
+    await apiJson('/api/cloud-login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password: authPassword.value }),
+    })
+    authPassword.value = ''
+    authRequired.value = false
+    await loadLibrary()
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : '登录失败。'
+  } finally {
+    authenticating.value = false
+  }
+}
 
-  requestAnimationFrame(() => {
-    panelVisible.value = true
-  })
+function openPhotoViewer(file, items) {
+  viewerItems.value = items
+  viewerIndex.value = Math.max(0, items.findIndex((item) => item.path === file.path))
+  viewerScale.value = 1
+  viewerDimensions.value = ''
+}
 
-  await loadLibrary()
+function closePhotoViewer() {
+  viewerIndex.value = -1
+  viewerItems.value = []
+  viewerScale.value = 1
+  viewerDimensions.value = ''
+}
+
+function movePhoto(direction) {
+  if (viewerItems.value.length < 2) return
+  const length = viewerItems.value.length
+  viewerIndex.value = (viewerIndex.value + direction + length) % length
+  viewerScale.value = 1
+  viewerDimensions.value = ''
+}
+
+function handleViewerImageLoad(event) {
+  const image = event.target
+  viewerDimensions.value = image.naturalWidth + ' × ' + image.naturalHeight
+}
+
+function toggleZoom() {
+  viewerScale.value = viewerScale.value > 1 ? 1 : 2
+}
+
+function distanceBetweenTouches(touches) {
+  const dx = touches[0].clientX - touches[1].clientX
+  const dy = touches[0].clientY - touches[1].clientY
+  return Math.sqrt(dx * dx + dy * dy)
+}
+
+function handleViewerTouchStart(event) {
+  if (event.touches.length >= 2) {
+    touchOrigin = {
+      pinch: true,
+      distance: distanceBetweenTouches(event.touches),
+      scale: viewerScale.value,
+    }
+    return
+  }
+  if (event.touches.length === 1) {
+    touchOrigin = {
+      pinch: false,
+      x: event.touches[0].clientX,
+      y: event.touches[0].clientY,
+      scale: viewerScale.value,
+    }
+  }
+}
+
+function handleViewerTouchMove(event) {
+  if (event.touches.length >= 2 && touchOrigin?.pinch) {
+    event.preventDefault()
+    const nextScale = touchOrigin.scale * distanceBetweenTouches(event.touches) / Math.max(1, touchOrigin.distance)
+    viewerScale.value = Math.min(4, Math.max(1, nextScale))
+  }
+}
+
+function handleViewerTouchEnd(event) {
+  if (!touchOrigin) return
+  const origin = touchOrigin
+  touchOrigin = null
+  if (origin.pinch || event.changedTouches.length === 0 || origin.scale > 1.05) return
+  const dx = event.changedTouches[0].clientX - origin.x
+  const dy = event.changedTouches[0].clientY - origin.y
+  if (Math.abs(dx) > 48 && Math.abs(dy) < 90) movePhoto(dx < 0 ? 1 : -1)
+}
+
+async function openFile(file) {
+  if (isImageFile(file)) {
+    openPhotoViewer(file, [file])
+    return
+  }
+
+  previewFile.value = file
+  previewText.value = ''
+  previewError.value = ''
+  previewLoading.value = false
+  if (file.extension === 'pdf') {
+    previewMode.value = 'pdf'
+    return
+  }
+  if (file.type === 'video' || VIDEO_EXTENSIONS.includes(file.extension)) {
+    previewMode.value = 'video'
+    return
+  }
+  if (TEXT_EXTENSIONS.includes(file.extension) || String(file.mimeType || '').toLowerCase().startsWith('text/')) {
+    previewMode.value = 'text'
+    previewLoading.value = true
+    try {
+      const response = await fetch(file.path)
+      if (!response.ok) throw new Error('文件暂时无法预览。')
+      const text = await response.text()
+      if (text.length > 600000) throw new Error('文件内容较大，请下载后查看。')
+      if (file.extension === 'json') {
+        try {
+          previewText.value = JSON.stringify(JSON.parse(text), null, 2)
+        } catch {
+          previewText.value = text
+        }
+      } else {
+        previewText.value = text
+      }
+    } catch (error) {
+      previewError.value = error instanceof Error ? error.message : '文件暂时无法预览。'
+    } finally {
+      previewLoading.value = false
+    }
+    return
+  }
+  previewMode.value = 'unsupported'
+}
+
+function closePreview() {
+  previewFile.value = null
+  previewMode.value = ''
+  previewText.value = ''
+  previewError.value = ''
+}
+
+function handleKeydown(event) {
+  if (viewerImage.value) {
+    if (event.key === 'Escape') closePhotoViewer()
+    if (event.key === 'ArrowLeft') movePhoto(-1)
+    if (event.key === 'ArrowRight') movePhoto(1)
+    return
+  }
+  if (previewFile.value && event.key === 'Escape') closePreview()
+}
+
+watch(modalOpen, (open) => {
+  if (typeof document !== 'undefined') document.body.classList.toggle('modal-open', open)
+})
+
+onMounted(() => {
+  window.addEventListener('keydown', handleKeydown)
+  const background = document.querySelector('.background-video')
+  if (background instanceof HTMLVideoElement) {
+    background.muted = true
+    const playAttempt = background.play()
+    if (playAttempt && typeof playAttempt.catch === 'function') playAttempt.catch(() => {})
+  }
+  loadLibrary()
+})
+
+onBeforeUnmount(() => {
+  window.removeEventListener('keydown', handleKeydown)
+  document.body.classList.remove('modal-open')
 })
 </script>
 
 <template>
-  <div class="relative min-h-screen overflow-hidden bg-transparent font-body text-white">
-    <div class="absolute inset-0 ocean-scene">
-      <div class="absolute inset-0" :style="backgroundStyle" />
-      <div class="absolute inset-0 bg-[linear-gradient(180deg,rgba(255,255,255,0.08),transparent_26%,rgba(3,12,28,0.62)_100%)]" />
-      <div class="absolute inset-x-0 top-0 h-80 bg-[radial-gradient(circle_at_top,rgba(255,255,255,0.22),transparent_62%)] opacity-70" />
-      <div class="absolute inset-0 light-rays opacity-30" />
-      <div class="absolute -left-16 top-16 h-72 w-72 rounded-full bg-cyan-200/[0.12] blur-3xl float-slow" />
-      <div class="absolute right-[-7rem] top-1/3 h-[24rem] w-[24rem] rounded-full bg-sky-300/10 blur-3xl float-reverse" />
-      <div class="absolute bottom-[-10rem] left-1/3 h-[22rem] w-[22rem] rounded-full bg-blue-500/20 blur-3xl float-slow" />
-      <div
-        v-for="bubble in bubbleSpecs"
-        :key="bubble.id"
-        class="absolute bubble"
-        :style="{
-          width: `${bubble.size}px`,
-          height: `${bubble.size}px`,
-          left: bubble.left,
-          bottom: bubble.bottom,
-          animationDelay: bubble.delay,
-          animationDuration: bubble.duration,
-          opacity: bubble.opacity,
-          filter: `blur(${bubble.blur}px)`,
-          '--drift-a': bubble.driftA,
-          '--drift-b': bubble.driftB,
-          '--drift-c': bubble.driftC,
-          '--scale-start': bubble.scaleStart,
-          '--scale-mid': bubble.scaleMid,
-          '--scale-end': bubble.scaleEnd,
-        }"
-      />
+  <div class="app-root" :class="{ 'app-root--browse': currentView !== 'home' }">
+    <div class="wallpaper" aria-hidden="true">
+      <video
+        class="background-video"
+        autoplay
+        muted
+        loop
+        playsinline
+        webkit-playsinline
+        preload="metadata"
+        tabindex="-1"
+        aria-hidden="true"
+      >
+        <source src="/assets/underwater-h264.mp4" type='video/mp4; codecs="avc1.640028"' />
+        <source :src="BLOG_VIDEO_URL" type='video/mp4; codecs="hvc1.1.6.L120.B0"' />
+      </video>
+      <div class="wallpaper-shade" />
     </div>
 
-    <div class="absolute inset-0 bg-gradient-to-b from-slate-950/[0.08] via-slate-950/[0.22] to-slate-950/[0.58]" />
-
-    <div class="cloud-shell relative flex min-h-screen items-start justify-center px-3 pt-4 md:items-center md:p-10">
-      <div
-        class="cloud-panel relative flex w-full max-w-[1300px] flex-col overflow-visible rounded-[26px] border border-white/[0.22] bg-white/[0.15] shadow-[0_26px_90px_rgba(4,23,47,0.38)] backdrop-blur-[20px] transition-all duration-700 ease-out md:h-[80vh] md:w-[80vw] md:overflow-hidden md:rounded-[20px]"
-        :class="panelVisible ? 'translate-y-0 opacity-100' : 'translate-y-5 opacity-0'"
-      >
-        <div class="pointer-events-none absolute inset-0 rounded-[20px] border border-cyan-100/[0.08]" />
-        <div class="pointer-events-none absolute inset-0 rounded-[20px] shadow-[inset_0_1px_0_rgba(255,255,255,0.22),0_0_48px_rgba(56,189,248,0.08)]" />
-
-        <header class="relative z-10 flex flex-col gap-3 border-b border-white/10 px-4 py-4 md:px-8">
-          <nav class="flex items-center overflow-x-auto text-[0.78rem] text-white/[0.48]">
-            <template v-for="(crumb, index) in breadcrumbs" :key="`${crumb.slug || 'home'}-${index}`">
-              <span v-if="index > 0" class="px-2 text-white/[0.25]">/</span>
-              <button
-                type="button"
-                class="rounded-full bg-white/[0.06] px-3 py-1 transition hover:bg-white/[0.1] hover:text-white/[0.85]"
-                :class="index === breadcrumbs.length - 1 ? 'text-white/[0.85]' : 'text-white/[0.62]'"
-                @click="openBreadcrumb(crumb.slug)"
-              >
-                {{ crumb.label }}
-              </button>
-            </template>
-          </nav>
-
-          <div class="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-            <div class="min-w-0">
-              <p class="text-sm leading-7 text-white/[0.62]">
-                {{ currentViewDescription }}
-              </p>
-            </div>
-
-            <div class="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-end">
-              <label v-if="activeFolder" class="relative block w-full min-w-0 sm:min-w-[18rem] lg:w-[22rem]">
-                <span class="pointer-events-none absolute inset-y-0 left-4 flex items-center text-white/[0.45]">
-                  <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" aria-hidden="true">
-                    <path d="M14.166 14.167 17.5 17.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
-                    <circle cx="8.75" cy="8.75" r="5.917" stroke="currentColor" stroke-width="1.6" />
-                  </svg>
-                </span>
-                <input
-                  v-model="search"
-                  type="text"
-                  :disabled="!activeFolder"
-                  :placeholder="searchPlaceholder"
-                  class="w-full rounded-full border border-white/10 bg-white/10 py-3 pl-11 pr-4 text-sm text-white placeholder:text-white/[0.45] outline-none transition duration-300 focus:border-cyan-200/[0.35] focus:bg-white/[0.14] focus:shadow-[0_0_0_4px_rgba(125,211,252,0.08)] disabled:cursor-not-allowed disabled:opacity-60"
-                />
-              </label>
-
-              <input
-                ref="uploadInput"
-                type="file"
-                class="hidden"
-                @change="handleUpload"
-              />
-              <button
-                v-if="activeFolder"
-                type="button"
-                class="inline-flex w-full items-center justify-center rounded-full border border-cyan-100/20 bg-white/[0.1] px-5 py-3 text-sm font-semibold text-white transition hover:bg-white/[0.16] disabled:cursor-not-allowed disabled:opacity-45 sm:w-auto"
-                :disabled="uploading || authRequired"
-                @click="selectUploadFile"
-              >
-                {{ uploading ? '上传中…' : '上传文件' }}
-              </button>
-
-              <div class="group flex w-full min-w-0 items-center gap-2.5 rounded-2xl border border-white/12 bg-white/[0.09] px-3 py-2.5 shadow-[0_14px_30px_rgba(7,33,58,0.18)] backdrop-blur-xl sm:w-auto sm:min-w-[11.5rem] sm:gap-3 sm:rounded-[18px] sm:px-4 sm:py-3">
-                <div class="relative flex h-9 w-9 shrink-0 overflow-hidden rounded-xl sm:h-11 sm:w-11 sm:rounded-2xl">
-                   <img src="/assets/logo.png" class="w-full h-full object-cover" />
-                      </div>
-                <div class="min-w-0">
-                  <p class="font-display text-sm font-semibold tracking-[0.18em] text-white/95 sm:text-[1.02rem]">Map7e</p>
-                </div>
-              </div>
-            </div>
+    <div class="app-shell">
+      <div class="content-width">
+        <header v-if="currentView === 'home'" class="home-header">
+          <div class="brand-lockup">
+            <img class="brand-symbol" src="/assets/logo.png" alt="" />
+            <span class="brand-name">Map7e</span>
           </div>
-          <p v-if="uploadStatus" class="text-xs text-cyan-50/75">{{ uploadStatus }}</p>
+          <div class="location-chip" aria-label="当前位置">
+            <span>家</span><span class="location-separator">/</span><span>Map7e</span>
+          </div>
         </header>
 
-        <div class="relative z-10 flex min-h-0 flex-1 flex-col px-4 pb-4 pt-3 md:px-8 md:pb-6">
-          <div v-if="errorMessage" class="mb-4 rounded-2xl border border-rose-200/20 bg-rose-300/[0.08] px-4 py-3 text-sm text-rose-50">
-            {{ errorMessage }}
-          </div>
+        <header v-else class="inner-header">
+          <button class="back-button" type="button" @click="goBack" :aria-label="'返回' + backLabel">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6" /></svg>
+            <span>{{ backLabel }}</span>
+          </button>
+          <span class="inner-location">{{ locationLabel }}</span>
+        </header>
 
-          <section
-            v-if="authRequired"
-            class="mx-auto my-auto w-full max-w-md rounded-[24px] border border-white/12 bg-slate-950/[0.28] p-6 shadow-[0_24px_70px_rgba(2,12,27,0.3)]"
-          >
-            <p class="text-xs uppercase tracking-[0.28em] text-cyan-100/60">Private Cloud</p>
-            <h3 class="mt-2 font-display text-xl font-semibold text-white/95">登录 Map7e Cloud</h3>
-            <p class="mt-2 text-sm leading-6 text-white/[0.58]">输入你设置的 CLOUD_PASSWORD 后读取 PikPak 内容。</p>
-            <input
-              v-model="authPassword"
-              type="password"
-              autocomplete="current-password"
-              placeholder="云盘密码"
-              class="mt-5 w-full rounded-2xl border border-white/12 bg-white/[0.08] px-4 py-3.5 text-white outline-none placeholder:text-white/35 focus:border-cyan-200/35"
-              @keyup.enter="loginCloud"
-            />
-            <button
-              type="button"
-              class="mt-3 w-full rounded-2xl bg-white px-4 py-3.5 font-semibold text-slate-950 transition hover:bg-cyan-50 disabled:opacity-60"
-              :disabled="authenticating || !authPassword"
-              @click="loginCloud"
-            >
-              {{ authenticating ? '登录中…' : '登录' }}
-            </button>
+        <main>
+          <div v-if="errorMessage" class="error-banner" role="alert">{{ errorMessage }}</div>
+
+          <section v-if="authRequired" class="auth-gate" aria-labelledby="auth-title">
+            <div class="auth-mark"><img src="/assets/logo.png" alt="" /></div>
+            <p class="eyebrow">Map7e Cloud</p>
+            <h1 id="auth-title">登录私人云盘</h1>
+            <p class="auth-copy">输入云盘访问密码以读取 PikPak 目录。</p>
+            <form class="auth-form" @submit.prevent="loginCloud">
+              <input v-model="authPassword" type="password" autocomplete="current-password" placeholder="云盘访问密码" aria-label="云盘访问密码" />
+              <button class="auth-submit" type="submit" :disabled="!authPassword || authenticating">
+                {{ authenticating ? '正在登录…' : '登录' }}
+              </button>
+            </form>
           </section>
 
-          <section v-if="!authRequired" class="mb-2.5 shrink-0">
-            <div class="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
-              <button
-                v-for="folder in themedRootFolders"
-                :key="folder.slug"
-                type="button"
-                class="group rounded-[18px] border border-white/10 bg-white/[0.08] p-3.5 text-left shadow-[0_12px_35px_rgba(15,23,42,0.14)] transition duration-300 hover:-translate-y-1 hover:bg-white/[0.11] hover:shadow-[0_18px_40px_rgba(14,116,144,0.16)] sm:rounded-[20px] sm:p-4"
-                :class="activeFolderSlug === folder.slug ? 'border-cyan-100/[0.24] bg-white/[0.14] shadow-[0_18px_42px_rgba(56,189,248,0.18)]' : ''"
-                @click="openFolder(folder.slug, folder.name)"
-              >
-                <div class="flex items-start justify-between gap-3">
-                  <div
-                    class="flex h-9 w-9 items-center justify-center rounded-xl shadow-[inset_0_1px_0_rgba(255,255,255,0.55)] sm:h-11 sm:w-11 sm:rounded-2xl"
-                    :class="folder.iconBg"
-                  >
-                    <svg class="h-5.5 w-5.5 text-sky-700" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                      <path
-                        d="M3.75 8.25A2.25 2.25 0 0 1 6 6h3.214a2.25 2.25 0 0 1 1.591.659l1.036 1.035c.422.422.994.66 1.591.66H18A2.25 2.25 0 0 1 20.25 10.6v5.65A2.25 2.25 0 0 1 18 18.5H6a2.25 2.25 0 0 1-2.25-2.25v-8Z"
-                        fill="currentColor"
-                        opacity="0.18"
-                      />
-                      <path
-                        d="M3.75 9.25h16.5v7A2.25 2.25 0 0 1 18 18.5H6a2.25 2.25 0 0 1-2.25-2.25v-7Z"
-                        stroke="currentColor"
-                        stroke-width="1.4"
-                        stroke-linejoin="round"
-                      />
-                      <path
-                        d="M3.75 9.25V8.25A2.25 2.25 0 0 1 6 6h3.214a2.25 2.25 0 0 1 1.591.659l1.036 1.035c.422.422.994.66 1.591.66H18A2.25 2.25 0 0 1 20.25 10.5v-1.25"
-                        stroke="currentColor"
-                        stroke-width="1.4"
-                        stroke-linejoin="round"
-                      />
-                    </svg>
-                  </div>
-
-                  <span class="rounded-full bg-white/10 px-3 py-1 text-xs font-medium text-white/[0.65] transition group-hover:bg-white/[0.15] group-hover:text-white/80">
-                    {{ folder.itemCountLabel }}
-                  </span>
-                </div>
-
-                <div class="mt-3.5 sm:mt-6">
-                  <p class="text-[1.02rem] font-medium text-white/95">{{ folder.name }}</p>
-                  <p class="mt-1 text-xs leading-5 text-white/[0.56] sm:mt-1.5 sm:text-sm sm:leading-6">{{ folder.description }}</p>
-                  <p class="mt-1.5 truncate text-[0.68rem] uppercase tracking-[0.12em] text-white/[0.4] sm:mt-2 sm:text-xs sm:tracking-[0.2em]">{{ TEXT.updatedPrefix }} {{ folder.updatedLabel }}</p>
-                  <div class="mt-3 h-1 overflow-hidden rounded-full bg-[#1F2E40] sm:mt-4 sm:h-1.5">
-                    <div class="h-full w-4/5 rounded-full bg-gradient-to-r" :class="folder.accent" />
+          <section v-else-if="currentView === 'home'" class="home-view" aria-labelledby="overview-title">
+            <section class="overview-card">
+              <div class="overview-topline">
+                <div class="overview-brand">
+                  <img class="overview-symbol" src="/assets/logo.png" alt="" />
+                  <div>
+                    <p class="eyebrow">Cloud Storage</p>
+                    <h1 id="overview-title">Map7e</h1>
                   </div>
                 </div>
+                <span class="private-label">私人空间</span>
+              </div>
+              <p class="overview-subtitle">私人云端空间</p>
+
+              <div v-if="loadingLibrary" class="stats-loading">正在读取空间目录…</div>
+              <template v-else>
+                <div class="overview-stats">
+                  <div class="stat-block">
+                    <span class="stat-value">{{ photoCount }}</span>
+                    <span class="stat-label">图片</span>
+                  </div>
+                  <div class="stat-block">
+                    <span class="stat-value">{{ fileCount }}</span>
+                    <span class="stat-label">文件</span>
+                  </div>
+                </div>
+                <div class="content-composition" aria-label="图片与文件数量构成">
+                  <div class="composition-bar">
+                    <span class="composition-photos" :style="{ width: photoRatio + '%' }" />
+                    <span class="composition-files" :style="{ width: (100 - photoRatio) + '%' }" />
+                  </div>
+                  <div class="composition-labels">
+                    <span><i class="legend-dot legend-dot--photo" />图片 {{ photoCount }}</span>
+                    <span><i class="legend-dot legend-dot--file" />文件 {{ fileCount }}</span>
+                  </div>
+                </div>
+                <p class="overview-footnote">统计已读取的 PikPak 目录项目，不包含未展开子文件夹中的内容。</p>
+              </template>
+            </section>
+
+            <div class="directory-list" aria-label="目录">
+              <button class="directory-card" type="button" @click="openAlbums">
+                <span class="directory-icon directory-icon--photos" aria-hidden="true">
+                  <svg viewBox="0 0 24 24"><rect x="3.5" y="4" width="17" height="16" rx="3" /><circle cx="9" cy="9" r="1.4" /><path d="m5 17 4.2-4.2a1.8 1.8 0 0 1 2.6 0l2 2 1.6-1.6a1.8 1.8 0 0 1 2.6 0L20 16.2" /></svg>
+                </span>
+                <span class="directory-copy">
+                  <span class="directory-title">相册目录</span>
+                  <span class="directory-meta">{{ albumPhotos.length }} 张图片<span v-if="albumUpdatedAt"> · 更新于 {{ albumUpdatedAt }}</span></span>
+                </span>
+                <svg class="directory-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6" /></svg>
+              </button>
+
+              <button class="directory-card" type="button" @click="openFiles">
+                <span class="directory-icon directory-icon--files" aria-hidden="true">
+                  <svg viewBox="0 0 24 24"><path d="M4.5 6.5h6l2 2h7A1.5 1.5 0 0 1 21 10v7.5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a1.5 1.5 0 0 1 1.5-1.5Z" /><path d="M3.5 10h17" /></svg>
+                </span>
+                <span class="directory-copy">
+                  <span class="directory-title">文件目录</span>
+                  <span class="directory-meta">{{ fileCount }} 个文件<span v-if="latestFileDate"> · 更新于 {{ latestFileDate }}</span></span>
+                </span>
+                <svg class="directory-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6" /></svg>
               </button>
             </div>
           </section>
 
-          <section
-            v-if="!authRequired && !activeFolder && !loadingLibrary"
-            class="flex min-h-0 flex-1 flex-col justify-between overflow-hidden rounded-[22px] border border-white/10 bg-slate-950/[0.18] px-5 py-5 shadow-[inset_0_1px_0_rgba(255,255,255,0.05)]"
-          >
-            <div>
-              <p class="text-xs uppercase tracking-[0.28em] text-cyan-100/60">{{ TEXT.pageType }}</p>
-              <h3 class="mt-1 font-display text-lg font-semibold text-white/95">{{ TEXT.rootOverview }}</h3>
-              <p class="mt-2 max-w-3xl text-sm leading-7 text-white/[0.58]">
-                {{ TEXT.rootGuide }}
-              </p>
-            </div>
-
-            <div class="grid gap-3 pt-6 md:grid-cols-3">
-              <div class="rounded-[20px] border border-white/10 bg-white/[0.06] px-4 py-4">
-                <p class="text-xs uppercase tracking-[0.22em] text-white/[0.42]">{{ TEXT.folders }}</p>
-                <p class="mt-2 text-2xl font-semibold text-white/90">{{ themedRootFolders.length }}</p>
-                <p class="mt-2 text-sm leading-6 text-white/[0.54]">{{ TEXT.rootFoldersHint }}</p>
-              </div>
-              <div class="rounded-[20px] border border-white/10 bg-white/[0.06] px-4 py-4">
-                <p class="text-xs uppercase tracking-[0.22em] text-white/[0.42]">{{ TEXT.totalFiles }}</p>
-                <p class="mt-2 text-2xl font-semibold text-white/90">{{ totalFiles }}</p>
-                <p class="mt-2 text-sm leading-6 text-white/[0.54]">{{ TEXT.totalFilesHint }}</p>
-              </div>
-              <div class="rounded-[20px] border border-white/10 bg-white/[0.06] px-4 py-4">
-                <p class="text-xs uppercase tracking-[0.22em] text-white/[0.42]">{{ TEXT.lastUpdated }}</p>
-                <p class="mt-2 text-2xl font-semibold text-white/90">{{ latestDateLabel }}</p>
-                <p class="mt-2 text-sm leading-6 text-white/[0.54]">{{ TEXT.lastUpdatedHintPrefix }}{{ manifestUpdatedAt || TEXT.lastUpdatedHintFallback }}</p>
-              </div>
-            </div>
-          </section>
-
-          <section
-            v-else-if="!authRequired"
-            class="flex min-h-0 flex-1 flex-col overflow-hidden rounded-[22px] border border-white/10 bg-slate-950/[0.18] px-4 py-3.5 shadow-[inset_0_1px_0_rgba(255,255,255,0.05)] md:px-5"
-          >
-            <div class="mb-2.5 flex items-center justify-between gap-3">
+          <section v-else-if="currentView === 'albums'" class="browse-view" aria-labelledby="album-title">
+            <div class="section-heading">
               <div>
-                <p class="text-xs uppercase tracking-[0.28em] text-cyan-100/60">{{ activeFolder ? TEXT.files : TEXT.loading }}</p>
-                <h3 class="mt-1 font-display text-lg font-semibold text-white/95">
-                  {{ currentListTitle }}
-                </h3>
+                <p class="eyebrow">照片</p>
+                <h1 id="album-title">相册目录</h1>
               </div>
-              <div class="rounded-full bg-white/[0.06] px-3 py-1.5 text-sm text-white/60">
-                {{ currentItemCountLabel }}
+              <span class="result-count">{{ visiblePhotos.length }} 张</span>
+            </div>
+
+            <label class="search-box">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.8" cy="10.8" r="6.8" /><path d="m16 16 4.5 4.5" /></svg>
+              <input v-model.trim="searchQuery" type="search" placeholder="搜索图片" aria-label="搜索相册中的图片" />
+              <button v-if="searchQuery" class="clear-search" type="button" aria-label="清除搜索" @click="searchQuery = ''">×</button>
+            </label>
+
+            <div class="collection-meta">
+              <span>{{ albumPhotos.length }} 张图片</span>
+              <span v-if="albumUpdatedAt" class="meta-divider">·</span>
+              <span v-if="albumUpdatedAt">更新于 {{ albumUpdatedAt }}</span>
+            </div>
+
+            <div v-if="loadingLibrary" class="loading-state">正在加载相册…</div>
+            <div v-else-if="visiblePhotos.length" class="photo-grid">
+              <button
+                v-for="(photo, index) in visiblePhotos"
+                :key="photo.id || photo.path"
+                class="photo-tile"
+                type="button"
+                :aria-label="'查看图片 ' + photo.name"
+                @click="openPhotoViewer(photo, visiblePhotos)"
+              >
+                <span class="photo-thumb"><img :src="photo.thumbnail || photo.path" :alt="photo.name" loading="lazy" decoding="async" /></span>
+                <span class="photo-name">{{ photo.name }}</span>
+              </button>
+            </div>
+            <div v-else class="empty-state">
+              <span class="empty-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24"><rect x="3.5" y="4" width="17" height="16" rx="3" /><circle cx="9" cy="9" r="1.4" /><path d="m5 17 4.2-4.2a1.8 1.8 0 0 1 2.6 0l2 2 1.6-1.6a1.8 1.8 0 0 1 2.6 0L20 16.2" /></svg>
+              </span>
+              <strong>{{ searchQuery ? '没有找到匹配的图片' : '相册还是空的' }}</strong>
+              <span>{{ searchQuery ? '试试其他文件名。' : '添加图片后会在这里按网格显示。' }}</span>
+            </div>
+          </section>
+
+          <section v-else class="browse-view file-browser" aria-labelledby="files-title">
+            <div class="section-heading">
+              <div>
+                <p class="eyebrow">{{ activeFileFolderData ? '文件夹' : '云端文件' }}</p>
+                <h1 id="files-title">{{ currentHeading }}</h1>
+              </div>
+              <span class="result-count">{{ activeFileFolderData ? currentFileCount + ' 个文件' : fileCount + ' 个文件' }}</span>
+            </div>
+
+            <label class="search-box">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.8" cy="10.8" r="6.8" /><path d="m16 16 4.5 4.5" /></svg>
+              <input
+                v-model.trim="searchQuery"
+                type="search"
+                :placeholder="activeFileFolderData ? '搜索此文件夹' : '搜索文件或文件夹'"
+                aria-label="搜索当前文件目录"
+              />
+              <button v-if="searchQuery" class="clear-search" type="button" aria-label="清除搜索" @click="searchQuery = ''">×</button>
+            </label>
+
+            <div class="collection-meta">
+              <template v-if="activeFileFolderData">
+                <span>{{ currentFileCount }} 个文件</span>
+                <span v-if="dateLabel(activeFileFolderData.updatedAt)" class="meta-divider">·</span>
+                <span v-if="dateLabel(activeFileFolderData.updatedAt)">更新于 {{ activeFileFolderData.updatedAt }}</span>
+              </template>
+              <template v-else>
+                <span>{{ fileFolders.length }} 个文件夹</span>
+                <span class="meta-divider">·</span>
+                <span>{{ fileCount }} 个文件</span>
+              </template>
+            </div>
+
+            <div v-if="activeFileFolderData" class="upload-toolbar">
+              <input ref="uploadInput" class="visually-hidden" type="file" @change="handleUpload" />
+              <button class="upload-button" type="button" :disabled="uploading" @click="selectUploadFile">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15V4m0 0L8 8m4-4 4 4M5 14v5h14v-5" /></svg>
+                <span>{{ uploading ? '上传中…' : '上传文件' }}</span>
+              </button>
+              <span v-if="uploadStatus" class="upload-status" role="status">{{ uploadStatus }}</span>
+            </div>
+
+            <div v-if="loadingLibrary" class="loading-state">正在加载文件…</div>
+            <div v-else-if="!activeFileFolderData" class="file-list">
+              <button v-for="folder in visibleFileFolders" :key="folder.slug" class="folder-row" type="button" @click="openFileFolder(folder)">
+                <span class="folder-row-icon" aria-hidden="true">
+                  <svg viewBox="0 0 24 24"><path d="M3.5 7.5A1.5 1.5 0 0 1 5 6h5l2 2h7A1.5 1.5 0 0 1 20.5 9.5v8A1.5 1.5 0 0 1 19 19H5a1.5 1.5 0 0 1-1.5-1.5Z" /><path d="M3.5 10h17" /></svg>
+                </span>
+                <span class="row-copy">
+                  <span class="row-title">{{ folder.name }}</span>
+                  <span class="row-meta">文件夹 · {{ folder.fileCount }} 个文件<span v-if="dateLabel(folder.updatedAt)"> · {{ folder.updatedAt }}</span></span>
+                </span>
+                <svg class="row-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6" /></svg>
+              </button>
+
+              <article v-for="file in rootFileSearchResults" :key="'root-' + file.id" class="file-row">
+                <button class="file-open" type="button" :aria-label="'预览 ' + file.name" @click="openFile(file)">
+                  <span class="file-type-icon" :class="fileIconClass(file)"><span>{{ fileTypeLabel(file) }}</span></span>
+                  <span class="row-copy">
+                    <span class="row-title">{{ file.name }}</span>
+                    <span class="row-meta">{{ fileTypeLabel(file) }} · {{ fileSizeLabel(file) }}<span v-if="dateLabel(file.date)"> · {{ file.date }}</span></span>
+                  </span>
+                </button>
+                <a class="download-button" :href="file.path" :download="file.name" :aria-label="'下载 ' + file.name" @click.stop>
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.5v11m0 0 4-4m-4 4-4-4M5 17v3h14v-3" /></svg>
+                </a>
+              </article>
+
+              <div v-if="searchQuery && !visibleFileFolders.length && !rootFileSearchResults.length" class="empty-state empty-state--compact">
+                <strong>没有找到匹配的文件</strong><span>试试其他文件名。</span>
+              </div>
+              <div v-if="!searchQuery && !fileFolders.length && !rootLooseFiles.length" class="empty-state empty-state--compact">
+                <strong>文件目录为空</strong><span>当前没有可浏览的文件夹。</span>
               </div>
             </div>
 
-            <div class="file-list-scroll min-h-0 flex-1 overflow-auto pr-1">
-              <div class="hidden grid-cols-[minmax(0,1.8fr)_110px_128px_120px] gap-4 px-3 pb-2 text-xs uppercase tracking-[0.24em] text-white/40 md:grid">
-                <span>{{ TEXT.fileName }}</span>
-                <span>{{ TEXT.fileSize }}</span>
-                <span>{{ TEXT.fileDate }}</span>
-                <span class="text-right">{{ TEXT.action }}</span>
+            <div v-else class="file-list">
+              <button v-for="folder in visibleCurrentFolders" :key="folder.id" class="folder-row" type="button" @click="openNestedFolder(folder)">
+                <span class="folder-row-icon" aria-hidden="true">
+                  <svg viewBox="0 0 24 24"><path d="M3.5 7.5A1.5 1.5 0 0 1 5 6h5l2 2h7A1.5 1.5 0 0 1 20.5 9.5v8A1.5 1.5 0 0 1 19 19H5a1.5 1.5 0 0 1-1.5-1.5Z" /><path d="M3.5 10h17" /></svg>
+                </span>
+                <span class="row-copy">
+                  <span class="row-title">{{ folder.name }}</span>
+                  <span class="row-meta">文件夹<span v-if="dateLabel(folder.date)"> · {{ folder.date }}</span></span>
+                </span>
+                <svg class="row-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6" /></svg>
+              </button>
+              <article v-for="file in visibleCurrentFiles" :key="file.id" class="file-row">
+                <button class="file-open" type="button" :aria-label="'预览 ' + file.name" @click="openFile(file)">
+                  <span class="file-type-icon" :class="fileIconClass(file)"><span>{{ fileTypeLabel(file) }}</span></span>
+                  <span class="row-copy">
+                    <span class="row-title">{{ file.name }}</span>
+                    <span class="row-meta">{{ fileTypeLabel(file) }} · {{ fileSizeLabel(file) }}<span v-if="dateLabel(file.date)"> · {{ file.date }}</span></span>
+                  </span>
+                </button>
+                <a class="download-button" :href="file.path" :download="file.name" :aria-label="'下载 ' + file.name" @click.stop>
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.5v11m0 0 4-4m-4 4-4-4M5 17v3h14v-3" /></svg>
+                </a>
+              </article>
+              <div v-if="searchQuery && !visibleCurrentFiles.length && !visibleCurrentFolders.length" class="empty-state empty-state--compact">
+                <strong>没有找到匹配的文件</strong><span>试试其他文件名。</span>
               </div>
-
-              <div v-if="loadingLibrary" class="space-y-2">
-                <div v-for="row in 4" :key="row" class="grid grid-cols-1 gap-4 rounded-2xl bg-white/[0.05] px-3 py-4 md:grid-cols-[minmax(0,1.8fr)_110px_128px_120px]">
-                  <div class="h-14 animate-pulse rounded-2xl bg-white/[0.08]" />
-                  <div class="h-10 animate-pulse rounded-2xl bg-white/[0.08]" />
-                  <div class="h-10 animate-pulse rounded-2xl bg-white/[0.08]" />
-                  <div class="h-10 animate-pulse rounded-2xl bg-white/[0.08]" />
-                </div>
-              </div>
-
-              <div v-else-if="activeFolder" class="space-y-2">
-                <article
-                  v-for="file in visibleFiles"
-                  :key="file.id || file.path"
-                  class="grid grid-cols-1 gap-4 rounded-2xl border border-transparent px-3 py-3 text-sm transition duration-300 hover:-translate-y-0.5 hover:border-white/[0.08] hover:bg-white/[0.07] hover:shadow-[0_16px_30px_rgba(15,23,42,0.18)] md:grid-cols-[minmax(0,1.8fr)_110px_128px_120px] md:items-center"
-                  :class="file.isFolder ? 'cursor-pointer' : ''"
-                  @click="file.isFolder && openFolder(file.id, file.name)"
-                >
-                  <div class="flex min-w-0 items-start gap-3">
-                    <div class="mt-0.5 flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl bg-white/[0.08] shadow-[inset_0_1px_0_rgba(255,255,255,0.12)]">
-                      <svg class="h-5 w-5 text-white/[0.85]" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                        <path
-                          d="M14.25 3.75H7.5A1.75 1.75 0 0 0 5.75 5.5v13A1.75 1.75 0 0 0 7.5 20.25h9A1.75 1.75 0 0 0 18.25 18.5V7.75l-4-4Z"
-                          stroke="currentColor"
-                          stroke-width="1.4"
-                          stroke-linejoin="round"
-                        />
-                        <path d="M14.25 3.75V7.5h3.75" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round" />
-                      </svg>
-                    </div>
-
-                    <div class="min-w-0">
-                      <div class="flex flex-wrap items-center gap-2">
-                        <p class="truncate text-[0.94rem] font-medium text-white/92">{{ file.name }}</p>
-                        <span class="inline-flex rounded-full px-2.5 py-1 text-[0.7rem] font-medium uppercase tracking-[0.2em]" :class="fileBadgeClass(file.type)">
-                          {{ fileTypeLabel(file.type) }}
-                        </span>
-                      </div>
-                      <p v-if="file.description" class="mt-1.5 text-sm leading-6 text-white/[0.56]">
-                        {{ file.description }}
-                      </p>
-                      <div class="mt-2 flex flex-wrap gap-2 text-xs text-white/[0.5] md:hidden">
-                        <span class="rounded-full bg-white/[0.06] px-3 py-1">{{ TEXT.fileSize }} {{ file.size }}</span>
-                        <span class="rounded-full bg-white/[0.06] px-3 py-1">{{ TEXT.fileDate }} {{ file.date }}</span>
-                      </div>
-                    </div>
-                  </div>
-
-                  <span class="hidden text-white/[0.65] md:block">{{ file.size }}</span>
-                  <span class="hidden text-white/[0.55] md:block">{{ file.date }}</span>
-                  <div class="flex md:justify-end">
-                    <button
-                      v-if="file.isFolder"
-                      type="button"
-                      class="inline-flex w-full items-center justify-center rounded-full border border-sky-200/20 bg-white/[0.08] px-4 py-2.5 text-sm font-semibold text-sky-50 transition duration-300 hover:bg-white/[0.14] md:w-auto"
-                      @click.stop="openFolder(file.id, file.name)"
-                    >
-                      打开
-                    </button>
-                    <a
-                      v-else
-                      :href="file.path"
-                      download
-                      class="inline-flex w-full items-center justify-center rounded-full border border-cyan-200/20 bg-white/[0.08] px-4 py-2.5 text-sm font-semibold text-cyan-50 transition duration-300 hover:border-cyan-200/35 hover:bg-white/[0.14] hover:text-white md:w-auto"
-                      @click.stop
-                    >
-                      {{ TEXT.download }}
-                    </a>
-                  </div>
-                </article>
-
-                <div
-                  v-if="activeFolder.files.length === 0"
-                  class="rounded-[20px] border border-white/10 bg-white/[0.05] px-6 py-10 text-center text-white/60"
-                >
-                  {{ TEXT.emptyFolder }}
-                </div>
-
-                <div
-                  v-else-if="visibleFiles.length === 0"
-                  class="rounded-[20px] border border-white/10 bg-white/[0.05] px-6 py-10 text-center text-white/60"
-                >
-                  {{ TEXT.noMatch }}
-                </div>
+              <div v-if="!searchQuery && !currentFileItems.length" class="empty-state empty-state--compact">
+                <strong>这个文件夹是空的</strong><span>当前没有可下载的文件。</span>
               </div>
             </div>
           </section>
-        </div>
+        </main>
 
-        <footer class="relative z-10 mt-2 shrink-0 border-t border-white/10 px-4 py-3 text-center text-[0.68rem] tracking-[0.12em] text-white/[0.48] md:mt-0 md:px-8 md:text-xs md:tracking-[0.16em]">
-          <div class="rounded-full border border-white/8 bg-white/[0.04] px-4 py-2 shadow-[inset_0_1px_0_rgba(255,255,255,0.06)]">
-            {{ TEXT.copyright }}
-          </div>
-        </footer>
+        <footer class="page-footer">© 2026 Map7e</footer>
       </div>
     </div>
+
+    <Transition name="viewer-fade">
+      <div v-if="viewerImage" class="photo-viewer" role="dialog" aria-modal="true" :aria-label="'图片预览：' + viewerImage.name" @click.self="closePhotoViewer">
+        <div class="viewer-layout">
+          <header class="viewer-topbar">
+            <button class="viewer-icon-button" type="button" aria-label="关闭图片预览" @click="closePhotoViewer">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6" /></svg>
+            </button>
+            <span class="viewer-counter">{{ photoCounter }}</span>
+            <a class="viewer-icon-button" :href="viewerImage.path" :download="viewerImage.name" :aria-label="'下载原图 ' + viewerImage.name">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.5v11m0 0 4-4m-4 4-4-4M5 17v3h14v-3" /></svg>
+            </a>
+          </header>
+
+          <button v-if="viewerItems.length > 1" class="viewer-arrow viewer-arrow--left" type="button" aria-label="上一张" @click="movePhoto(-1)">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6" /></svg>
+          </button>
+          <div class="viewer-stage" @touchstart="handleViewerTouchStart" @touchmove="handleViewerTouchMove" @touchend="handleViewerTouchEnd">
+            <img
+              :key="viewerImage.path"
+              class="viewer-image"
+              :src="viewerImage.path"
+              :alt="viewerImage.name"
+              :style="{ transform: 'scale(' + viewerScale + ')' }"
+              @load="handleViewerImageLoad"
+            />
+          </div>
+          <button v-if="viewerItems.length > 1" class="viewer-arrow viewer-arrow--right" type="button" aria-label="下一张" @click="movePhoto(1)">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6" /></svg>
+          </button>
+
+          <footer class="viewer-details">
+            <div class="viewer-file-info">
+              <strong class="viewer-filename">{{ viewerImage.name }}</strong>
+              <span class="viewer-metadata">
+                <span v-if="viewerDimensions">{{ viewerDimensions }}</span>
+                <span v-if="viewerImage.sizeBytes !== null">{{ fileSizeLabel(viewerImage) }}</span>
+                <span v-if="dateLabel(viewerImage.date)">{{ viewerImage.date }}</span>
+              </span>
+            </div>
+            <button class="zoom-button" type="button" :aria-label="viewerScale > 1 ? '缩小图片' : '放大图片'" @click="toggleZoom">
+              <span>{{ viewerScale > 1 ? '适合屏幕' : '放大' }}</span>
+            </button>
+          </footer>
+        </div>
+      </div>
+    </Transition>
+
+    <Transition name="viewer-fade">
+      <div v-if="previewFile" class="preview-overlay" role="dialog" aria-modal="true" :aria-label="'文件预览：' + previewFile.name" @click.self="closePreview">
+        <div class="preview-panel">
+          <header class="preview-header">
+            <button class="viewer-icon-button" type="button" aria-label="关闭文件预览" @click="closePreview">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6" /></svg>
+            </button>
+            <div class="preview-heading"><strong>{{ previewFile.name }}</strong><span>{{ fileTypeLabel(previewFile) }} · {{ fileSizeLabel(previewFile) }}</span></div>
+            <a class="viewer-icon-button" :href="previewFile.path" :download="previewFile.name" :aria-label="'下载 ' + previewFile.name">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.5v11m0 0 4-4m-4 4-4-4M5 17v3h14v-3" /></svg>
+            </a>
+          </header>
+          <div v-if="previewLoading" class="preview-message">正在打开文件…</div>
+          <div v-else-if="previewError" class="preview-message">
+            <strong>{{ previewError }}</strong>
+            <a class="primary-download" :href="previewFile.path" :download="previewFile.name">下载原文件</a>
+          </div>
+          <iframe v-else-if="previewMode === 'pdf'" class="pdf-preview" :src="previewFile.path" :title="previewFile.name" />
+          <video v-else-if="previewMode === 'video'" class="file-video-preview" :src="previewFile.path" controls playsinline />
+          <pre v-else-if="previewMode === 'text'" class="text-preview">{{ previewText }}</pre>
+          <div v-else class="preview-message">
+            <strong>这个格式暂不支持站内预览</strong>
+            <span>你可以下载原文件后查看。</span>
+            <a class="primary-download" :href="previewFile.path" :download="previewFile.name">下载原文件</a>
+          </div>
+        </div>
+      </div>
+    </Transition>
   </div>
 </template>
 
-<style scoped>
-.cloud-shell {
-  padding-bottom: calc(7.25rem + env(safe-area-inset-bottom, 0px));
+<style>
+:root {
+  --ink: #06111c;
+  --ink-soft: #0b1a28;
+  --panel: rgba(9, 22, 35, 0.84);
+  --panel-strong: rgba(8, 19, 31, 0.91);
+  --line: rgba(214, 231, 248, 0.12);
+  --line-strong: rgba(214, 231, 248, 0.19);
+  --text: #f5f8fc;
+  --muted: rgba(226, 236, 247, 0.68);
+  --subtle: rgba(216, 228, 241, 0.48);
+  --accent: #86c8f3;
 }
 
-@media (max-width: 767px) {
-  .cloud-panel {
-    min-height: calc(100dvh - 8.5rem - env(safe-area-inset-top, 0px));
-  }
+.app-root {
+  position: relative;
+  min-height: 100vh;
+  min-height: 100dvh;
+  isolation: isolate;
+  color: var(--text);
 }
 
-.ocean-scene {
-  animation: drift-zoom 24s ease-in-out infinite alternate;
+.wallpaper,
+.background-video,
+.wallpaper-shade {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+.wallpaper {
+  z-index: -1;
+  overflow: hidden;
+  background: #07131f;
+}
+
+.background-video {
+  object-fit: cover;
+  object-position: center;
+  background: #07131f;
+  filter: brightness(0.58) saturate(0.82);
+}
+
+.wallpaper-shade {
+  background:
+    linear-gradient(180deg, rgba(2, 8, 15, 0.26) 0%, rgba(2, 8, 15, 0.30) 40%, rgba(2, 8, 15, 0.63) 100%),
+    radial-gradient(ellipse at 50% 34%, rgba(7, 25, 43, 0.02), rgba(3, 11, 19, 0.30) 78%);
+  transition: background 220ms ease;
+}
+
+.app-root--browse .background-video {
+  filter: brightness(0.38) saturate(0.7);
+}
+
+.app-root--browse .wallpaper-shade {
+  background: linear-gradient(180deg, rgba(3, 9, 16, 0.58), rgba(3, 9, 16, 0.72));
+}
+
+.app-shell {
+  display: flex;
+  min-height: 100vh;
+  min-height: 100dvh;
+  flex-direction: column;
+  padding: calc(env(safe-area-inset-top, 0px) + 16px) 22px calc(env(safe-area-inset-bottom, 0px) + 30px);
+}
+
+.content-width {
+  display: flex;
+  width: min(100%, 900px);
+  min-height: calc(100vh - 46px);
+  min-height: calc(100dvh - 46px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px));
+  flex-direction: column;
+  margin: 0 auto;
+}
+
+.home-header,
+.inner-header {
+  display: flex;
+  min-height: 48px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  margin-bottom: 28px;
+}
+
+.brand-lockup {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.brand-symbol {
+  display: block;
+  width: 34px;
+  height: 34px;
+  object-fit: contain;
+}
+
+.brand-name {
+  font-size: 18px;
+  font-weight: 720;
+  letter-spacing: 0.1em;
+}
+
+.location-chip,
+.inner-location {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.location-chip {
+  padding: 8px 12px;
+  border: 1px solid rgba(223, 237, 250, 0.12);
+  border-radius: 999px;
+  background: rgba(6, 17, 28, 0.52);
+}
+
+.location-separator,
+.inner-location {
+  color: var(--subtle);
+}
+
+.inner-header {
+  margin-bottom: 26px;
+}
+
+.back-button {
+  display: inline-flex;
+  min-height: 44px;
+  align-items: center;
+  gap: 7px;
+  padding: 0 10px 0 0;
+  border: 0;
+  background: transparent;
+  color: #eff6fc;
+  font-size: 15px;
+  font-weight: 620;
+  cursor: pointer;
+}
+
+.back-button svg,
+.directory-chevron,
+.row-chevron,
+.viewer-icon-button svg,
+.viewer-arrow svg,
+.download-button svg {
+  width: 20px;
+  height: 20px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.inner-location {
+  overflow: hidden;
+  justify-content: flex-end;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+}
+
+main {
+  flex: 1 0 auto;
+}
+
+.home-view {
+  display: grid;
+  gap: 14px;
+}
+
+.overview-card {
+  position: relative;
+  overflow: hidden;
+  padding: 20px 22px 18px;
+  border: 1px solid var(--line-strong);
+  border-radius: 23px;
+  background: linear-gradient(135deg, rgba(11, 29, 46, 0.92), rgba(13, 33, 51, 0.78));
+  box-shadow: 0 18px 52px rgba(1, 7, 13, 0.22), inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+}
+
+.overview-card::after {
+  position: absolute;
+  top: -82px;
+  right: -50px;
+  width: 210px;
+  height: 210px;
+  border-radius: 50%;
+  background: radial-gradient(circle, rgba(126, 196, 238, 0.14), transparent 70%);
+  content: "";
+  pointer-events: none;
+}
+
+.overview-topline,
+.overview-brand,
+.overview-stats,
+.composition-labels {
+  display: flex;
+  align-items: center;
+}
+
+.overview-topline {
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.overview-brand {
+  gap: 12px;
+}
+
+.overview-symbol {
+  width: 44px;
+  height: 44px;
+  flex: 0 0 auto;
+  object-fit: contain;
+}
+
+.eyebrow {
+  margin: 0 0 4px;
+  color: #a9d7f3;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+
+.overview-brand h1,
+.section-heading h1 {
+  margin: 0;
+  color: var(--text);
+  font-size: 24px;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  line-height: 1.18;
+}
+
+.private-label {
+  padding: 7px 11px;
+  border: 1px solid rgba(207, 231, 248, 0.12);
+  border-radius: 999px;
+  background: rgba(224, 239, 252, 0.055);
+  color: rgba(235, 244, 251, 0.74);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.overview-subtitle {
+  margin: 7px 0 15px 56px;
+  color: rgba(228, 239, 249, 0.67);
+  font-size: 14px;
+}
+
+.overview-stats {
+  gap: 0;
+  padding: 13px 0 12px;
+  border-top: 1px solid rgba(225, 239, 251, 0.095);
+}
+
+.stat-block {
+  display: flex;
+  flex: 1;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.stat-block + .stat-block {
+  padding-left: 18px;
+  border-left: 1px solid rgba(225, 239, 251, 0.11);
+}
+
+.stat-value {
+  font-size: 25px;
+  font-weight: 700;
+  letter-spacing: -0.04em;
+  line-height: 1;
+}
+
+.stat-label {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.stats-loading {
+  padding: 16px 0 3px 56px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.content-composition {
+  padding-top: 2px;
+}
+
+.composition-bar {
+  display: flex;
+  height: 5px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(219, 233, 245, 0.13);
+}
+
+.composition-photos {
+  min-width: 0;
+  background: linear-gradient(90deg, #78c8ec, #8db6ef);
+  transition: width 300ms ease;
+}
+
+.composition-files {
+  min-width: 0;
+  background: rgba(145, 165, 188, 0.54);
+}
+
+.composition-labels {
+  justify-content: space-between;
+  gap: 14px;
+  margin-top: 9px;
+  color: var(--subtle);
+  font-size: 11px;
+}
+
+.composition-labels span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.overview-footnote {
+  margin: 9px 0 0;
+  color: var(--subtle);
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.auth-gate {
+  display: flex;
+  min-height: min(58vh, 520px);
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 28px 22px;
+  border: 1px solid var(--line);
+  border-radius: 22px;
+  background: rgba(7, 19, 31, 0.88);
+  text-align: center;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.28);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+}
+
+.auth-mark {
+  display: grid;
+  width: 58px;
+  height: 58px;
+  margin-bottom: 18px;
+  place-items: center;
+  border: 1px solid rgba(164, 211, 239, 0.18);
+  border-radius: 18px;
+  background: rgba(87, 157, 198, 0.13);
+}
+
+.auth-mark img {
+  width: 42px;
+  height: 42px;
+  object-fit: contain;
+}
+
+.auth-gate h1 {
+  margin: 0;
+  font-size: 23px;
+}
+
+.auth-copy {
+  margin: 10px 0 22px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.auth-form {
+  display: grid;
+  width: min(100%, 380px);
+  gap: 10px;
+}
+
+.auth-form input {
+  min-width: 0;
+  min-height: 48px;
+  padding: 0 15px;
+  border: 1px solid rgba(222, 237, 250, 0.15);
+  border-radius: 14px;
+  outline: none;
+  background: rgba(3, 12, 20, 0.68);
+  color: var(--text);
+}
+
+.auth-submit,
+.upload-button {
+  display: inline-flex;
+  min-height: 44px;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 0 16px;
+  border: 1px solid rgba(148, 206, 239, 0.24);
+  border-radius: 13px;
+  background: rgba(77, 143, 183, 0.24);
+  color: #e9f6fd;
+  font-size: 13px;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.auth-submit:disabled,
+.upload-button:disabled {
+  cursor: wait;
+  opacity: 0.62;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  clip-path: inset(50%);
+}
+
+.legend-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+}
+
+.legend-dot--photo {
+  background: #8bd0f2;
+}
+
+.legend-dot--file {
+  background: #9aaabd;
+}
+
+.directory-list {
+  display: grid;
+  gap: 10px;
+}
+
+.directory-card {
+  display: grid;
+  width: 100%;
+  min-height: 82px;
+  grid-template-columns: 46px minmax(0, 1fr) 24px;
+  align-items: center;
+  gap: 13px;
+  padding: 13px 16px;
+  border: 1px solid rgba(219, 235, 250, 0.13);
+  border-radius: 19px;
+  background: rgba(9, 22, 35, 0.82);
+  box-shadow: 0 10px 28px rgba(1, 7, 13, 0.16);
+  text-align: left;
+  cursor: pointer;
+  transition: transform 160ms ease, border-color 160ms ease, background 160ms ease;
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+
+.directory-card:hover,
+.directory-card:focus-visible {
+  border-color: rgba(155, 210, 243, 0.32);
+  background: rgba(12, 29, 45, 0.9);
+}
+
+.directory-card:active {
+  transform: scale(0.99);
+}
+
+.directory-icon {
+  display: grid;
+  width: 44px;
+  height: 44px;
+  place-items: center;
+  border: 1px solid rgba(201, 229, 247, 0.14);
+  border-radius: 15px;
+}
+
+.directory-icon svg,
+.empty-icon svg {
+  width: 23px;
+  height: 23px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.65;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.directory-icon--photos {
+  background: rgba(84, 156, 202, 0.19);
+  color: #a8dafa;
+}
+
+.directory-icon--files {
+  background: rgba(133, 155, 183, 0.17);
+  color: #c4d2e2;
+}
+
+.directory-copy,
+.row-copy {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+}
+
+.directory-title {
+  overflow: hidden;
+  color: #f5f8fc;
+  font-size: 16px;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.directory-meta {
+  overflow: hidden;
+  margin-top: 5px;
+  color: var(--muted);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.directory-chevron {
+  color: rgba(226, 239, 250, 0.56);
+}
+
+.page-footer {
+  margin-top: 24px;
+  padding: 24px 4px 2px;
+  color: rgba(218, 231, 243, 0.46);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-align: center;
+}
+
+.error-banner {
+  margin-bottom: 14px;
+  padding: 12px 14px;
+  border: 1px solid rgba(255, 175, 170, 0.22);
+  border-radius: 13px;
+  background: rgba(91, 25, 30, 0.54);
+  color: #ffe4e0;
+  font-size: 13px;
+}
+
+.browse-view {
+  display: flex;
+  min-height: 320px;
+  flex-direction: column;
+}
+
+.section-heading {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 18px;
+}
+
+.section-heading h1 {
+  font-size: 25px;
+}
+
+.result-count {
+  padding: 7px 10px;
+  border: 1px solid rgba(221, 236, 249, 0.12);
+  border-radius: 999px;
+  background: rgba(8, 19, 31, 0.60);
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.search-box {
+  display: flex;
+  min-height: 48px;
+  align-items: center;
+  gap: 10px;
+  padding: 0 13px;
+  border: 1px solid rgba(222, 237, 249, 0.15);
+  border-radius: 15px;
+  background: rgba(8, 19, 31, 0.75);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.025);
+}
+
+.search-box:focus-within {
+  border-color: rgba(142, 204, 238, 0.45);
+  box-shadow: 0 0 0 3px rgba(108, 183, 225, 0.10);
+}
+
+.search-box > svg {
+  width: 19px;
+  height: 19px;
+  flex: 0 0 auto;
+  fill: none;
+  stroke: rgba(225, 237, 248, 0.58);
+  stroke-width: 1.7;
+  stroke-linecap: round;
+}
+
+.search-box input {
+  width: 100%;
+  min-width: 0;
+  height: 46px;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--text);
+  font-size: 14px;
+}
+
+.search-box input::placeholder {
+  color: rgba(218, 231, 243, 0.44);
+}
+
+.search-box input::-webkit-search-cancel-button {
+  display: none;
+}
+
+.clear-search {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  flex: 0 0 auto;
+  place-items: center;
+  border: 0;
+  border-radius: 50%;
+  background: rgba(228, 239, 249, 0.1);
+  color: rgba(239, 246, 252, 0.78);
+  font-size: 19px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.collection-meta {
+  display: flex;
+  min-height: 34px;
+  align-items: center;
+  gap: 7px;
+  margin: 5px 1px 9px;
+  color: var(--subtle);
+  font-size: 12px;
+}
+
+.upload-toolbar {
+  display: flex;
+  min-height: 42px;
+  align-items: center;
+  gap: 12px;
+  margin: 0 0 10px;
+}
+
+.upload-button {
+  min-height: 40px;
+  border-radius: 12px;
+}
+
+.upload-button svg {
+  width: 17px;
+  height: 17px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.upload-status {
+  min-width: 0;
+  color: var(--muted);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.meta-divider {
+  color: rgba(220, 232, 244, 0.34);
+}
+
+.photo-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  align-content: start;
+  gap: 10px;
+}
+
+.photo-tile {
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+
+.photo-thumb {
+  display: block;
+  overflow: hidden;
+  aspect-ratio: 1 / 1;
+  border: 1px solid rgba(223, 237, 249, 0.17);
+  border-radius: 14px;
+  background: rgba(9, 23, 37, 0.9);
+}
+
+.photo-thumb img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  transition: transform 220ms ease;
+}
+
+.photo-tile:hover .photo-thumb img {
+  transform: scale(1.035);
+}
+
+.photo-name {
+  display: block;
+  overflow: hidden;
+  margin: 7px 2px 0;
+  color: rgba(237, 244, 251, 0.72);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-list {
+  display: grid;
+  align-content: start;
+  gap: 8px;
+}
+
+.folder-row,
+.file-row {
+  display: grid;
+  width: 100%;
+  min-height: 72px;
+  grid-template-columns: 44px minmax(0, 1fr) 40px;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid rgba(221, 236, 249, 0.10);
+  border-radius: 15px;
+  background: rgba(8, 20, 32, 0.83);
+  color: inherit;
+  text-align: left;
+  box-shadow: 0 7px 20px rgba(1, 6, 11, 0.11);
+}
+
+.folder-row {
+  border-color: rgba(131, 190, 225, 0.16);
+  background: linear-gradient(100deg, rgba(20, 45, 65, 0.89), rgba(10, 25, 39, 0.85));
+  cursor: pointer;
+}
+
+.folder-row:hover,
+.folder-row:focus-visible,
+.file-row:hover {
+  border-color: rgba(161, 210, 239, 0.28);
+  background-color: rgba(13, 30, 46, 0.92);
+}
+
+.folder-row-icon,
+.file-type-icon {
+  display: grid;
+  width: 42px;
+  height: 42px;
+  flex: 0 0 auto;
+  place-items: center;
+  border-radius: 13px;
+}
+
+.folder-row-icon {
+  border: 1px solid rgba(135, 202, 239, 0.16);
+  background: rgba(82, 157, 206, 0.17);
+  color: #9bd5f4;
+}
+
+.folder-row-icon svg {
+  width: 22px;
+  height: 22px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.65;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.row-title {
+  overflow: hidden;
+  color: #f3f7fb;
+  font-size: 14px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.row-meta {
+  overflow: hidden;
+  margin-top: 5px;
+  color: rgba(221, 233, 244, 0.58);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.row-location {
+  margin-top: 4px;
+  color: rgba(173, 203, 226, 0.56);
+  font-size: 10px;
+}
+
+.row-chevron {
+  justify-self: center;
+  color: rgba(217, 233, 247, 0.52);
+}
+
+.file-row {
+  grid-template-columns: minmax(0, 1fr) 40px;
+  padding: 0 10px 0 12px;
+}
+
+.file-open {
+  display: grid;
+  min-width: 0;
+  min-height: 70px;
+  grid-template-columns: 42px minmax(0, 1fr);
+  align-items: center;
+  gap: 12px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.file-type-icon {
+  position: relative;
+  border: 1px solid rgba(204, 223, 240, 0.12);
+  background: rgba(146, 169, 193, 0.13);
+  color: #d0ddeb;
+}
+
+.file-type-icon::before {
+  position: absolute;
+  inset: 8px 10px 12px;
+  border: 1.3px solid currentColor;
+  border-radius: 3px;
+  content: "";
+  opacity: 0.8;
+}
+
+.file-type-icon::after {
+  top: 14px;
+  left: 13px;
+  width: 15px;
+  height: 1px;
+  background: currentColor;
+  box-shadow: 0 4px 0 currentColor;
+  content: "";
+  opacity: 0.64;
+}
+
+.file-type-icon span {
+  position: absolute;
+  right: 2px;
+  bottom: 2px;
+  z-index: 1;
+  padding: 1px 3px;
+  border-radius: 4px;
+  background: rgba(5, 15, 25, 0.92);
+  color: #e4edf5;
+  font-size: 7px;
+  font-weight: 750;
+  letter-spacing: 0.01em;
+}
+
+.file-icon--archive {
+  border-color: rgba(205, 178, 136, 0.18);
+  background: rgba(137, 101, 52, 0.15);
+  color: #e3c89b;
+}
+
+.file-icon--image {
+  border-color: rgba(120, 195, 177, 0.18);
+  background: rgba(44, 119, 100, 0.18);
+  color: #a8ddcd;
+}
+
+.file-icon--video {
+  border-color: rgba(163, 160, 227, 0.2);
+  background: rgba(87, 82, 150, 0.2);
+  color: #c4c2f1;
+}
+
+.file-icon--code {
+  border-color: rgba(124, 184, 220, 0.2);
+  background: rgba(48, 102, 140, 0.2);
+  color: #a9d8f4;
+}
+
+.download-button,
+.viewer-icon-button {
+  display: grid;
+  width: 40px;
+  height: 40px;
+  place-items: center;
+  border: 1px solid rgba(221, 237, 250, 0.12);
+  border-radius: 13px;
+  background: rgba(220, 235, 247, 0.06);
+  color: rgba(232, 242, 250, 0.76);
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.download-button svg {
+  width: 19px;
+  height: 19px;
+}
+
+.download-button:hover,
+.viewer-icon-button:hover {
+  border-color: rgba(147, 207, 240, 0.35);
+  background: rgba(144, 199, 232, 0.14);
+  color: #fff;
+}
+
+.empty-state {
+  display: flex;
+  min-height: 220px;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 26px;
+  border: 1px solid rgba(220, 235, 248, 0.10);
+  border-radius: 18px;
+  background: rgba(7, 19, 31, 0.73);
+  color: var(--muted);
+  text-align: center;
+}
+
+.empty-state strong {
+  color: rgba(245, 249, 253, 0.92);
+  font-size: 14px;
+}
+
+.empty-state > span:last-child {
+  font-size: 12px;
+}
+
+.empty-state--compact {
+  min-height: 100px;
+}
+
+.empty-icon {
+  display: grid;
+  width: 48px;
+  height: 48px;
+  margin-bottom: 3px;
+  place-items: center;
+  border-radius: 16px;
+  background: rgba(123, 183, 219, 0.12);
+  color: #a3d4f0;
+}
+
+.loading-state {
+  padding: 24px 8px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.photo-viewer,
+.preview-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: flex;
+  align-items: stretch;
+  justify-content: center;
+  background: rgba(2, 4, 8, 0.985);
+  color: #f6f8fb;
+  overscroll-behavior: contain;
+}
+
+.viewer-layout {
+  position: relative;
+  display: flex;
+  width: min(100%, 1440px);
+  min-height: 100vh;
+  min-height: 100dvh;
+  flex-direction: column;
+  padding: max(12px, env(safe-area-inset-top, 0px)) 18px calc(14px + env(safe-area-inset-bottom, 0px));
+}
+
+.viewer-topbar,
+.preview-header {
+  display: grid;
+  min-height: 48px;
+  grid-template-columns: 44px minmax(0, 1fr) 44px;
+  align-items: center;
+  gap: 10px;
+}
+
+.viewer-icon-button {
+  width: 42px;
+  height: 42px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.07);
+}
+
+.viewer-counter {
+  color: rgba(238, 243, 249, 0.8);
+  font-size: 13px;
+  text-align: center;
+}
+
+.viewer-topbar > :last-child,
+.preview-header > :last-child {
+  justify-self: end;
+}
+
+.viewer-stage {
+  display: grid;
+  min-height: 0;
+  flex: 1;
+  place-items: center;
+  overflow: hidden;
+  padding: 16px 56px;
+  touch-action: none;
+}
+
+.viewer-image {
+  display: block;
+  max-width: 100%;
+  max-height: calc(100vh - 172px);
+  max-height: calc(100dvh - 172px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px));
+  object-fit: contain;
   transform-origin: center;
+  transition: transform 160ms ease-out;
+  user-select: none;
+  -webkit-user-drag: none;
 }
 
-.light-rays {
-  background:
-    linear-gradient(112deg, rgba(255, 255, 255, 0.16), transparent 24%),
-    linear-gradient(96deg, rgba(255, 255, 255, 0.08), transparent 20%),
-    linear-gradient(80deg, rgba(255, 255, 255, 0.06), transparent 18%);
-  filter: blur(12px);
-  transform: translateY(-8%) scale(1.15);
+.viewer-arrow {
+  position: absolute;
+  top: 50%;
+  z-index: 1;
+  display: grid;
+  width: 46px;
+  height: 46px;
+  place-items: center;
+  transform: translateY(-50%);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.08);
+  color: rgba(246, 249, 252, 0.86);
+  cursor: pointer;
 }
 
-.float-slow {
-  animation: float-slow 16s ease-in-out infinite;
+.viewer-arrow--left {
+  left: 18px;
 }
 
-.float-reverse {
-  animation: float-reverse 18s ease-in-out infinite;
+.viewer-arrow--right {
+  right: 18px;
 }
 
-.bubble {
-  border: 1px solid rgba(255, 255, 255, 0.18);
+.viewer-details {
+  display: flex;
+  min-height: 60px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 10px 2px 0;
+}
+
+.viewer-file-info {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.viewer-filename {
+  overflow: hidden;
+  color: #f8fafc;
+  font-size: 14px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.viewer-metadata {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px 12px;
+  color: rgba(218, 228, 238, 0.60);
+  font-size: 11px;
+}
+
+.zoom-button,
+.primary-download {
+  display: inline-flex;
+  min-height: 40px;
+  align-items: center;
+  justify-content: center;
+  padding: 0 14px;
+  border: 1px solid rgba(142, 204, 239, 0.28);
   border-radius: 999px;
-  background:
-    radial-gradient(circle at 30% 28%, rgba(255, 255, 255, 0.34), rgba(255, 255, 255, 0.12) 30%, rgba(255, 255, 255, 0.04) 55%, transparent 74%),
-    radial-gradient(circle at 68% 72%, rgba(110, 190, 255, 0.1), transparent 62%);
-  box-shadow:
-    inset -8px -10px 18px rgba(255, 255, 255, 0.06),
-    inset 8px 10px 18px rgba(255, 255, 255, 0.12),
-    0 0 18px rgba(148, 220, 255, 0.07);
-  animation-name: bubble-rise;
-  animation-timing-function: linear;
-  animation-iteration-count: infinite;
-  will-change: transform;
+  background: rgba(83, 148, 190, 0.18);
+  color: #e7f5fd;
+  font-size: 12px;
+  font-weight: 600;
+  text-decoration: none;
+  white-space: nowrap;
+  cursor: pointer;
 }
 
-.file-list-scroll {
-  scrollbar-width: thin;
-  scrollbar-color: #1f2e40 rgba(15, 23, 42, 0.22);
+.preview-overlay {
+  z-index: 21;
+  align-items: center;
+  padding: 20px;
+  background: rgba(2, 5, 9, 0.94);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
 }
 
-.file-list-scroll::-webkit-scrollbar {
-  width: 10px;
+.preview-panel {
+  display: flex;
+  width: min(100%, 900px);
+  max-height: min(86vh, 900px);
+  max-height: min(86dvh, 900px);
+  min-height: min(360px, 74vh);
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid rgba(229, 239, 248, 0.12);
+  border-radius: 20px;
+  background: #08121d;
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.44);
 }
 
-.file-list-scroll::-webkit-scrollbar-track {
-  border-radius: 999px;
-  background: rgba(15, 23, 42, 0.22);
+.preview-header {
+  flex: 0 0 auto;
+  padding: 12px 14px;
+  border-bottom: 1px solid rgba(229, 239, 248, 0.10);
 }
 
-.file-list-scroll::-webkit-scrollbar-thumb {
-  border: 2px solid rgba(15, 23, 42, 0.22);
-  border-radius: 999px;
-  background: #1f2e40;
+.preview-heading {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 4px;
+  text-align: center;
 }
 
-.file-list-scroll::-webkit-scrollbar-thumb:hover {
-  background: #25384f;
+.preview-heading strong {
+  overflow: hidden;
+  color: #f5f8fb;
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-@keyframes bubble-rise {
-  0% {
-    transform: translate3d(0, 0, 0) scale(var(--scale-start, 0.82));
+.preview-heading span {
+  color: var(--subtle);
+  font-size: 11px;
+}
+
+.preview-message {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 30px;
+  color: var(--muted);
+  text-align: center;
+}
+
+.preview-message strong {
+  color: #f1f5f9;
+  font-size: 15px;
+}
+
+.preview-message > span {
+  font-size: 13px;
+}
+
+.text-preview {
+  flex: 1;
+  overflow: auto;
+  margin: 0;
+  padding: 20px;
+  color: #dce8f2;
+  font: 13px/1.7 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.pdf-preview,
+.file-video-preview {
+  width: 100%;
+  min-height: 0;
+  flex: 1;
+  border: 0;
+  background: #0b1117;
+}
+
+.file-video-preview {
+  object-fit: contain;
+}
+
+.viewer-fade-enter-active,
+.viewer-fade-leave-active {
+  transition: opacity 160ms ease;
+}
+
+.viewer-fade-enter-from,
+.viewer-fade-leave-to {
+  opacity: 0;
+}
+
+@media (min-width: 700px) {
+  .app-shell {
+    padding-top: calc(env(safe-area-inset-top, 0px) + 28px);
+    padding-bottom: calc(env(safe-area-inset-bottom, 0px) + 34px);
   }
-  32% {
-    transform: translate3d(var(--drift-a, 12px), -34vh, 0) scale(var(--scale-mid, 0.98));
+
+  .content-width {
+    min-height: calc(100vh - 62px);
+    min-height: calc(100dvh - 62px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px));
   }
-  68% {
-    transform: translate3d(var(--drift-b, -14px), -78vh, 0) scale(1);
+
+  .home-header,
+  .inner-header {
+    margin-bottom: 34px;
   }
-  100% {
-    transform: translate3d(var(--drift-c, 10px), -118vh, 0) scale(var(--scale-end, 1.08));
+
+  .home-view {
+    gap: 16px;
+  }
+
+  .overview-card {
+    padding: 24px 28px 20px;
+  }
+
+  .directory-list {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px;
+  }
+
+  .directory-card {
+    min-height: 90px;
+    padding: 15px 17px;
+  }
+
+  .photo-grid {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 14px;
+  }
+
+  .photo-thumb {
+    border-radius: 16px;
+  }
+
+  .file-list {
+    gap: 9px;
+  }
+
+  .folder-row,
+  .file-row {
+    min-height: 78px;
+    padding-top: 11px;
+    padding-bottom: 11px;
   }
 }
 
-@keyframes float-slow {
-  0%,
-  100% {
-    transform: translate3d(0, 0, 0);
+@media (max-width: 430px) {
+  .app-shell {
+    padding-right: 17px;
+    padding-left: 17px;
   }
-  50% {
-    transform: translate3d(0, -12px, 0);
+
+  .home-header,
+  .inner-header {
+    margin-bottom: 22px;
+  }
+
+  .overview-card {
+    padding: 18px 17px 16px;
+    border-radius: 20px;
+  }
+
+  .overview-brand h1 {
+    font-size: 22px;
+  }
+
+  .private-label {
+    padding: 6px 9px;
+  }
+
+  .overview-subtitle {
+    margin-left: 54px;
+    font-size: 13px;
+  }
+
+  .directory-card {
+    min-height: 76px;
+    grid-template-columns: 42px minmax(0, 1fr) 20px;
+    gap: 11px;
+    padding: 11px 13px;
+    border-radius: 17px;
+  }
+
+  .directory-icon {
+    width: 42px;
+    height: 42px;
+    border-radius: 14px;
+  }
+
+  .directory-title {
+    font-size: 15px;
+  }
+
+  .directory-meta {
+    font-size: 11px;
+  }
+
+  .photo-grid {
+    gap: 7px;
+  }
+
+  .photo-thumb {
+    border-radius: 11px;
+  }
+
+  .photo-name {
+    font-size: 10px;
   }
 }
 
-@keyframes float-reverse {
-  0%,
-  100% {
-    transform: translate3d(0, 0, 0);
+@media (max-width: 360px) {
+  .location-chip {
+    gap: 6px;
+    padding-right: 9px;
+    padding-left: 9px;
+    font-size: 12px;
   }
-  50% {
-    transform: translate3d(0, 14px, 0);
+
+  .overview-stats {
+    padding-top: 11px;
+  }
+
+  .stat-value {
+    font-size: 23px;
+  }
+
+  .directory-card {
+    grid-template-columns: 38px minmax(0, 1fr) 18px;
+    gap: 9px;
+  }
+
+  .directory-icon {
+    width: 38px;
+    height: 38px;
+  }
+
+  .directory-meta {
+    font-size: 10px;
   }
 }
 
-@keyframes drift-zoom {
-  0% {
-    transform: scale(1) translate3d(0, 0, 0);
+@media (max-width: 560px) {
+  .viewer-layout {
+    padding-right: 12px;
+    padding-left: 12px;
   }
-  100% {
-    transform: scale(1.05) translate3d(0, -1.2%, 0);
+
+  .viewer-stage {
+    padding: 14px 4px;
+  }
+
+  .viewer-image {
+    max-width: 100%;
+    max-height: calc(100vh - 176px);
+    max-height: calc(100dvh - 176px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px));
+  }
+
+  .viewer-arrow {
+    display: none;
+  }
+
+  .viewer-details {
+    gap: 10px;
+  }
+
+  .viewer-filename {
+    max-width: 66vw;
+    font-size: 13px;
+  }
+
+  .zoom-button {
+    min-height: 38px;
+    padding: 0 11px;
+    font-size: 11px;
+  }
+
+  .preview-overlay {
+    padding: 10px;
+  }
+
+  .preview-panel {
+    max-height: calc(100vh - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px) - 20px);
+    max-height: calc(100dvh - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px) - 20px);
+    min-height: min(420px, 78vh);
+    border-radius: 17px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
   }
 }
 </style>
