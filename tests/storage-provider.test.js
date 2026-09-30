@@ -282,3 +282,48 @@ await test('authorized Quark pagination returns the provider pacing delay', asyn
   assert.equal(target.body.nextRequestDelayMs, 120)
   assert.ok(target.body.nextPageToken)
 })
+
+
+await test('concurrent Quark providers wait for the winning token refresh instead of returning 409', async () => {
+  await writeAuth('quark-main', { accessToken: 'shared-expired', refreshToken: 'shared-refresh', deviceId: 'device', accessExpiresAt: 1 })
+  const initial = await readAuth('quark-main')
+  const first = createQuarkProvider({ storageId: 'quark-main' }, { ...initial })
+  const second = createQuarkProvider({ storageId: 'quark-main' }, { ...initial })
+  let rotateCount = 0
+  upstream = async url => {
+    if (url.pathname.endsWith('/rotate')) {
+      rotateCount += 1
+      await new Promise(resolve => setTimeout(resolve, 80))
+      return { status: 0, data: { access_token: 'shared-rotated', refresh_token: 'shared-refresh-2', expires_in: 7200 } }
+    }
+    if (url.pathname.endsWith('/user/get_vip_info')) return { status: 0, data: { capacity: '100', used: '25' } }
+    return { status: 0, data: { nickname: 'test' } }
+  }
+  const [a, b] = await Promise.all([first.getQuota(), second.getQuota()])
+  assert.deepEqual(a, { total: 100, used: 25, free: 75 })
+  assert.deepEqual(b, { total: 100, used: 25, free: 75 })
+  assert.equal(rotateCount, 1)
+})
+
+await test('adding a secondary PikPak instance validates its PAT before persistence', async () => {
+  await writeConfig({ version: 1, defaultStorageId: 'pikpak-main', instances: [
+    { storageId: 'pikpak-main', provider: 'pikpak', displayName: 'PikPak', enabled: true },
+    { storageId: 'quark-main', provider: 'quark', displayName: '夸克网盘', enabled: true },
+  ] })
+  const adminCookie = `map7e_admin_session=${createAdminSessionToken().token}`
+  upstream = async url => url.pathname.endsWith('/about')
+    ? new Response(JSON.stringify({ error: 'unauthorized' }), { status: 401, headers: { 'Content-Type': 'application/json' } })
+    : { status: 0, data: {} }
+  const rejected = res()
+  await adminStorages({ method: 'POST', body: { action: 'add', storageId: 'pikpak-bad', provider: 'pikpak', displayName: 'Bad', accessToken: 'bad-token' }, headers: { cookie: adminCookie } }, rejected)
+  assert.equal(rejected.statusCode, 401)
+  assert.equal(await readAuth('pikpak-bad'), null)
+  assert.equal((await readConfig()).instances.some(item => item.storageId === 'pikpak-bad'), false)
+
+  upstream = async url => url.pathname.endsWith('/about') ? { user: { name: 'Good' }, quota: { limit: 100, usage: 1 } } : { status: 0, data: {} }
+  const added = res()
+  await adminStorages({ method: 'POST', body: { action: 'add', storageId: 'pikpak-good', provider: 'pikpak', displayName: 'Good', accessToken: 'good-token' }, headers: { cookie: adminCookie } }, added)
+  assert.equal(added.statusCode, 200)
+  assert.equal((await readAuth('pikpak-good')).accessToken, 'good-token')
+  assert.equal((await readConfig()).instances.some(item => item.storageId === 'pikpak-good'), true)
+})
