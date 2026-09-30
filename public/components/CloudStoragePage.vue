@@ -8,6 +8,7 @@ const VIDEO_EXTENSIONS = ['mp4', 'webm', 'mov', 'm4v']
 const rootFolders = ref([])
 const folderMap = ref({})
 const rootFiles = ref([])
+const directoryMetadata = ref({})
 const manifestUpdatedAt = ref('')
 const loadingLibrary = ref(true)
 const errorMessage = ref('')
@@ -39,8 +40,11 @@ const managementName = ref('')
 const managementError = ref('')
 const managementBusy = ref(false)
 const managementStatus = ref('')
+const newFolderType = ref('folder')
+const newFolderAccess = ref('inherit')
 const fileNameInput = ref(null)
 let touchOrigin = null
+let pendingDeepLinkFolderId = ''
 
 const activeFolder = computed(() => folderMap.value[activeFileFolder.value] || null)
 const allFiles = computed(() => {
@@ -90,6 +94,8 @@ const visibleCurrentFiles = computed(() => {
   const query = searchQuery.value.trim().toLocaleLowerCase()
   return currentFileItems.value.filter((file) => !file.isFolder && (!query || file.name.toLocaleLowerCase().includes(query)))
 })
+const visibleAlbumFolderPhotos = computed(() => visibleCurrentFiles.value.filter(isImageFile))
+const visibleNonImageFolderFiles = computed(() => visibleCurrentFiles.value.filter((file) => !isImageFile(file)))
 const visibleCurrentFolders = computed(() => {
   const query = searchQuery.value.trim().toLocaleLowerCase()
   return currentFileItems.value.filter((file) => file.isFolder && (!query || file.name.toLocaleLowerCase().includes(query)))
@@ -153,7 +159,7 @@ function normalizePikPakItem(file) {
     id: String(file?.id || ''),
     parentId: String(file?.parentId || ''),
     name: String(file?.name || '未命名文件'),
-    path: isFolder ? '' : '/api/pikpak-download?id=' + encodeURIComponent(String(file?.id || '')),
+    path: isFolder ? '' : '/api/pikpak-download?id=' + encodeURIComponent(String(file?.id || '')) + '&parentId=' + encodeURIComponent(String(file?.parentId || '')),
     size: isFolder ? '' : (sizeBytes !== null && Number.isFinite(sizeBytes) && sizeBytes >= 0 ? formatBytes(sizeBytes) : ''),
     sizeBytes: !isFolder && sizeBytes !== null && Number.isFinite(sizeBytes) && sizeBytes >= 0 ? sizeBytes : null,
     rawSize: sizeBytes !== null && Number.isFinite(sizeBytes) && sizeBytes >= 0 ? sizeBytes : null,
@@ -164,6 +170,9 @@ function normalizePikPakItem(file) {
     description: '',
     extension: extension.toLocaleLowerCase(),
     isFolder,
+    folderType: file?.folderType === 'album' ? 'album' : 'folder',
+    access: ['inherit', 'public', 'locked'].includes(file?.access) ? file.access : 'inherit',
+    effectiveAccess: file?.effectiveAccess === 'locked' ? 'locked' : 'public',
     writable: file?.writable !== false,
     thumbnail: file?.thumbnail || null,
   }
@@ -242,6 +251,9 @@ async function listPikPakItems(parentId = '') {
     if (parentId) params.set('parentId', parentId)
     if (pageToken) params.set('pageToken', pageToken)
     const payload = await apiJson('/api/pikpak-files' + (params.size ? '?' + params.toString() : ''))
+    if (payload?.folder) {
+      directoryMetadata.value = { ...directoryMetadata.value, [parentId]: payload.folder }
+    }
     items.push(...(Array.isArray(payload?.items) ? payload.items : []).map(normalizePikPakItem))
     manifestUpdatedAt.value = formatDate(payload?.syncTime) || manifestUpdatedAt.value
     pageToken = String(payload?.nextPageToken || '')
@@ -251,20 +263,24 @@ async function listPikPakItems(parentId = '') {
   return items
 }
 
-async function loadFolder(id, name = '', writable, parentId) {
+async function loadFolder(id, name = '', writable, parentId, metadata = {}) {
   const files = await listPikPakItems(id)
   const known = folderMap.value[id]
   const root = rootFolders.value.find((folder) => folder.slug === id)
+  const actual = directoryMetadata.value[id] || {}
   folderMap.value = {
     ...folderMap.value,
     [id]: {
       id,
       slug: id,
-      name: name || known?.name || root?.name || '文件夹',
+      name: name || known?.name || root?.name || actual.name || '文件夹',
       description: 'PikPak 实时目录',
       updatedAt: root?.updatedLabel || '',
-      parentId: parentId ?? root?.parentId ?? known?.parentId ?? '',
-      writable: writable ?? root?.writable ?? known?.writable ?? true,
+      parentId: parentId ?? metadata.parentId ?? root?.parentId ?? known?.parentId ?? actual.parentId ?? '',
+      writable: writable ?? metadata.writable ?? root?.writable ?? known?.writable ?? actual.writable ?? true,
+      folderType: metadata.folderType ?? actual.type ?? known?.folderType ?? root?.folderType ?? 'folder',
+      access: metadata.access ?? actual.access ?? known?.access ?? root?.access ?? 'inherit',
+      effectiveAccess: metadata.effectiveAccess ?? actual.effectiveAccess ?? known?.effectiveAccess ?? root?.effectiveAccess ?? 'public',
       files,
     },
   }
@@ -280,7 +296,7 @@ async function readLibraryDirectory(strictFolderReads = false) {
     try {
       await loadFolder(folder.slug, folder.name, folder.writable, '')
     } catch (error) {
-      if (strictFolderReads || error?.code === 'authentication_required') throw error
+      if (strictFolderReads) throw error
     }
   }))
   return items
@@ -350,11 +366,12 @@ async function openFileFolder(folder) {
   loadingLibrary.value = true
   errorMessage.value = ''
   try {
-    const data = await loadFolder(folder.slug, folder.name, folder.writable, folder.parentId)
+    const data = await loadFolder(folder.slug, folder.name, folder.writable, folder.parentId, folder)
     const actualDate = formatDate(folder.updatedAt || folder.date)
     if (actualDate && !data.updatedAt) {
       folderMap.value = { ...folderMap.value, [folder.slug]: { ...data, updatedAt: actualDate } }
     }
+    authRequired.value = false
     activeFileFolder.value = folder.slug
     currentView.value = 'files'
     searchQuery.value = ''
@@ -364,16 +381,27 @@ async function openFileFolder(folder) {
     } else {
       folderTrail.value = [...folderTrail.value, { slug: folder.slug, label: data.name }]
     }
+    return true
   } catch (error) {
     if (error?.code === 'authentication_required') authRequired.value = true
     else errorMessage.value = error instanceof Error ? error.message : '无法打开此文件夹。'
+    return false
   } finally {
     loadingLibrary.value = false
   }
 }
 
 async function openNestedFolder(item) {
-  await openFileFolder({ slug: item.id, name: item.name, date: item.date, writable: item.writable, parentId: item.parentId })
+  await openFileFolder({
+    slug: item.id,
+    name: item.name,
+    date: item.date,
+    writable: item.writable,
+    parentId: item.parentId,
+    folderType: item.folderType,
+    access: item.access,
+    effectiveAccess: item.effectiveAccess,
+  })
 }
 
 function goParentFolder() {
@@ -548,6 +576,8 @@ function openManagementDialog(mode, item = null, parentId = '', writable = item?
 function openCreateFolderDialog() {
   if (!activeDirectoryWritable.value || managementBusy.value) return
   managementStatus.value = ''
+  newFolderType.value = 'folder'
+  newFolderAccess.value = 'inherit'
   openManagementDialog('create-folder')
 }
 
@@ -558,6 +588,8 @@ function closeManagementDialog(force = false) {
   managementParentId.value = ''
   managementWritable.value = true
   managementName.value = ''
+  newFolderType.value = 'folder'
+  newFolderAccess.value = 'inherit'
   managementError.value = ''
 }
 
@@ -637,7 +669,12 @@ async function submitManagementDialog() {
       const result = await apiJson('/api/pikpak-create-folder', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: requestedName, parentId }),
+        body: JSON.stringify({
+          name: requestedName,
+          parentId,
+          type: newFolderType.value,
+          access: newFolderAccess.value,
+        }),
       })
       requestAccepted = true
       const items = await refreshDirectory(parentId)
@@ -648,7 +685,9 @@ async function submitManagementDialog() {
       if (!created || created.name !== requestedName) {
         throw new Error('PikPak 已接受创建请求，但重新读取目录后未能确认新文件夹。')
       }
-      managementStatus.value = '文件夹已创建：' + created.name
+      managementStatus.value = result.metadataSaved === false
+        ? '文件夹已创建，但类型或权限尚未保存；请在管理后台重试。'
+        : '文件夹已创建：' + created.name
       closeManagementDialog(true)
       return
     }
@@ -726,6 +765,10 @@ async function loginCloud() {
     authPassword.value = ''
     authRequired.value = false
     await loadLibrary()
+    if (pendingDeepLinkFolderId) {
+      const opened = await openFileFolder({ slug: pendingDeepLinkFolderId })
+      if (opened) pendingDeepLinkFolderId = ''
+    }
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : '登录失败。'
   } finally {
@@ -881,7 +924,7 @@ watch(modalOpen, (open) => {
   if (typeof document !== 'undefined') document.body.classList.toggle('modal-open', open)
 })
 
-onMounted(() => {
+onMounted(async () => {
   window.addEventListener('keydown', handleKeydown)
   const background = document.querySelector('.background-video')
   if (background instanceof HTMLVideoElement) {
@@ -889,7 +932,14 @@ onMounted(() => {
     const playAttempt = background.play()
     if (playAttempt && typeof playAttempt.catch === 'function') playAttempt.catch(() => {})
   }
-  loadLibrary()
+  const folderId = new URLSearchParams(window.location.search).get('folderId') || ''
+  if (folderId) {
+    pendingDeepLinkFolderId = folderId
+    await loadLibrary()
+    if (await openFileFolder({ slug: folderId })) pendingDeepLinkFolderId = ''
+  } else {
+    loadLibrary()
+  }
 })
 
 onBeforeUnmount(() => {
@@ -1067,7 +1117,7 @@ onBeforeUnmount(() => {
           <section v-else class="browse-view file-browser" aria-labelledby="files-title">
             <div class="section-heading">
               <div>
-                <p class="eyebrow">{{ activeFileFolderData ? '文件夹' : '云端文件' }}</p>
+                <p class="eyebrow">{{ activeFileFolderData ? (activeFileFolderData.folderType === 'album' ? '相册' : '文件夹') : '云端文件' }}</p>
                 <h1 id="files-title">{{ currentHeading }}</h1>
               </div>
               <span class="result-count">{{ activeFileFolderData ? currentFileCount + ' 个文件' : fileCount + ' 个文件' }}</span>
@@ -1122,7 +1172,7 @@ onBeforeUnmount(() => {
                   </span>
                   <span class="row-copy">
                     <span class="row-title">{{ folder.name }}</span>
-                    <span class="row-meta">文件夹 · {{ folder.fileCount }} 个文件<span v-if="dateLabel(folder.updatedAt)"> · {{ folder.updatedAt }}</span></span>
+                    <span class="row-meta">{{ folder.folderType === 'album' ? '相册' : '文件夹' }} · {{ folder.fileCount }} 个文件<span v-if="folder.effectiveAccess === 'locked'"> · 上锁</span><span v-if="dateLabel(folder.updatedAt)"> · {{ folder.updatedAt }}</span></span>
                   </span>
                   <svg class="row-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6" /></svg>
                 </button>
@@ -1149,6 +1199,15 @@ onBeforeUnmount(() => {
             </div>
 
             <div v-else class="file-list">
+              <div v-if="activeFileFolderData.folderType === 'album' && visibleAlbumFolderPhotos.length" class="photo-grid folder-photo-grid">
+                <article v-for="photo in visibleAlbumFolderPhotos" :key="photo.id || photo.path" class="photo-tile">
+                  <button class="photo-open" type="button" :aria-label="'查看图片 ' + photo.name" @click="openPhotoViewer(photo, visibleAlbumFolderPhotos)">
+                    <span class="photo-thumb"><img :src="photo.thumbnail || photo.path" :alt="photo.name" loading="lazy" decoding="async" /></span>
+                    <span class="photo-name">{{ photo.name }}</span>
+                  </button>
+                  <button class="photo-more" type="button" :aria-label="'图片操作：' + photo.name" @click.stop="openItemActions(photo)">···</button>
+                </article>
+              </div>
               <article v-for="folder in visibleCurrentFolders" :key="folder.id" class="folder-row">
                 <button class="folder-open" type="button" @click="openNestedFolder(folder)">
                   <span class="folder-row-icon" aria-hidden="true">
@@ -1156,13 +1215,13 @@ onBeforeUnmount(() => {
                   </span>
                   <span class="row-copy">
                     <span class="row-title">{{ folder.name }}</span>
-                    <span class="row-meta">文件夹<span v-if="dateLabel(folder.date)"> · {{ folder.date }}</span></span>
+                    <span class="row-meta">{{ folder.folderType === 'album' ? '相册' : '文件夹' }}<span v-if="folder.effectiveAccess === 'locked'"> · 上锁</span><span v-if="dateLabel(folder.date)"> · {{ folder.date }}</span></span>
                   </span>
                   <svg class="row-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6" /></svg>
                 </button>
                 <button class="item-more" type="button" :aria-label="'文件夹操作：' + folder.name" @click.stop="openItemActions(folder)">···</button>
               </article>
-              <article v-for="file in visibleCurrentFiles" :key="file.id" class="file-row">
+              <article v-for="file in (activeFileFolderData.folderType === 'album' ? visibleNonImageFolderFiles : visibleCurrentFiles)" :key="file.id" class="file-row">
                 <button class="file-open" type="button" :aria-label="'预览 ' + file.name" @click="openFile(file)">
                   <span class="file-type-icon" :class="fileIconClass(file)"><span>{{ fileTypeLabel(file) }}</span></span>
                   <span class="row-copy">
@@ -1302,6 +1361,20 @@ onBeforeUnmount(() => {
               autocomplete="off"
               :placeholder="managementDialog === 'rename' ? '输入新名称' : '输入文件夹名称'"
             />
+            <template v-if="managementDialog === 'create-folder'">
+              <label class="management-label management-select-label" for="new-folder-type">显示类型</label>
+              <select id="new-folder-type" v-model="newFolderType" class="management-input management-select">
+                <option value="folder">普通文件夹</option>
+                <option value="album">相册</option>
+              </select>
+              <label class="management-label management-select-label" for="new-folder-access">访问权限</label>
+              <select id="new-folder-access" v-model="newFolderAccess" class="management-input management-select">
+                <option value="inherit">继承上级</option>
+                <option value="public">公开</option>
+                <option value="locked">上锁</option>
+              </select>
+              <p class="management-hint">非默认类型或权限需要先登录管理后台，并配置持久化存储。</p>
+            </template>
             <p v-if="managementDialog === 'rename' && !managementItem?.isFolder && fileExtensionSuffix(managementItem)" class="management-hint">文件扩展名会自动保留。</p>
           </template>
           <p v-if="managementError" class="management-error" role="alert">{{ managementError }}</p>
@@ -2521,6 +2594,25 @@ main {
   margin: 7px 0 0;
   color: var(--subtle);
   font-size: 11px;
+}
+
+.management-select-label {
+  margin-top: 13px;
+}
+
+.management-select {
+  appearance: auto;
+  color-scheme: dark;
+}
+
+.management-select option {
+  background: #0b1a28;
+  color: #f5f8fc;
+}
+
+.folder-photo-grid {
+  width: 100%;
+  margin-bottom: 3px;
 }
 
 .management-error {
