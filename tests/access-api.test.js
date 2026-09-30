@@ -15,7 +15,7 @@ import { createAdminSessionToken } from '../lib/admin-auth.js'
 import { getGlobalAccessState, isPersistentStoreConfigured, setFileMetadata, setFolderMetadata, setGlobalAccess } from '../lib/admin-store.js'
 
 const originalFetch = globalThis.fetch
-const envKeys = ['PIKPAK_PAT', 'CLOUD_PASSWORD', 'ADMIN_PASSWORD', 'UPSTASH_REDIS_REST_URL', 'UPSTASH_REDIS_REST_TOKEN', 'KV_REST_API_URL', 'KV_REST_API_TOKEN', 'VERCEL_ENV']
+const envKeys = ['PIKPAK_PAT', 'CLOUD_PASSWORD', 'ADMIN_PASSWORD', 'UPSTASH_REDIS_REST_URL', 'UPSTASH_REDIS_REST_TOKEN', 'KV_REST_API_URL', 'KV_REST_API_TOKEN', 'VERCEL_ENV', 'QUARK_AUTH_BLOB']
 const originalEnv = Object.fromEntries(envKeys.map((key) => [key, process.env[key]]))
 process.env.VERCEL_ENV = 'production'
 const redis = new Map()
@@ -246,6 +246,34 @@ test('dispatcher maps API paths to handlers and rejects unknown or unauthenticat
 
   const unknownRoute = await invoke(dispatchHandler, { query: { route: 'not-a-route' } })
   assert.equal(unknownRoute.statusCode, 404)
+})
+
+test('generic storage APIs expose providers and keep PikPak behavior compatible', async () => {
+  process.env.PIKPAK_PAT = 'test-pikpak-token-signing-key'
+  process.env.UPSTASH_REDIS_REST_URL = 'https://redis.test'
+  process.env.UPSTASH_REDIS_REST_TOKEN = 'test-redis-token'
+  delete process.env.QUARK_AUTH_BLOB
+  resetFixtures()
+  setGlobal('public')
+
+  let response = await invoke(dispatchHandler, { query: { route: 'storage-providers' } })
+  assert.equal(response.statusCode, 200)
+  assert.equal(response.body.defaultStorageId, 'pikpak-main')
+  assert.deepEqual(
+    response.body.providers.map((provider) => [provider.id, provider.status, provider.selectable]),
+    [
+      ['pikpak-main', 'connected', true],
+      ['quark-main', 'authorization_required', false],
+    ],
+  )
+
+  response = await invoke(dispatchHandler, { query: { route: 'storage-files', storageId: 'pikpak-main' } })
+  assert.equal(response.statusCode, 200)
+  assert.ok(response.body.items.some((item) => item.id === 'root-file'))
+
+  response = await invoke(dispatchHandler, { query: { route: 'storage-files', storageId: 'quark-main' } })
+  assert.equal(response.statusCode, 409)
+  assert.equal(response.body.error, 'storage_authorization_required')
 })
 
 test('direct downloads check the actual parent path and do not disclose a URL when locked', async () => {

@@ -54,6 +54,21 @@
           <p class="muted">下级文件夹、相册和单个文件可以继续用“继承 / 公开 / 上锁”覆盖这一总设置。</p>
         </section>
 
+        <section class="panel storage-panel" aria-labelledby="storage-heading">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">STORAGE</p>
+              <h2 id="storage-heading">存储管理</h2>
+              <p class="muted">可以接入多个网盘；未完成授权的网盘不会影响现有 PikPak。</p>
+            </div>
+          </div>
+          <div id="storage-list" class="storage-list"></div>
+          <label class="storage-picker" for="storage-select">
+            <span>当前管理网盘</span>
+            <select id="storage-select"></select>
+          </label>
+        </section>
+
         <section class="panel browser-panel" aria-labelledby="browser-heading">
           <div class="section-heading browser-heading">
             <div>

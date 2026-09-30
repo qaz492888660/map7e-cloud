@@ -196,6 +196,17 @@ button:disabled { cursor: not-allowed; opacity: .42; }
 .notice[data-kind="success"] { border-color: rgba(129, 209, 170, .26); background: rgba(46, 117, 84, .17); color: #c9f1d9; }
 .empty { padding: 24px 12px; border: 1px dashed rgba(216, 234, 250, .17); border-radius: 15px; color: rgba(222, 235, 246, .58); font-size: 13px; text-align: center; }
 
+.storage-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 10px; margin-bottom: 14px; }
+.storage-card { display: grid; gap: 8px; padding: 14px; border: 1px solid rgba(174, 219, 242, .14); border-radius: 14px; background: rgba(38, 83, 109, .12); }
+.storage-card__head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.storage-card__name { color: #f1f8fc; font-size: 14px; font-weight: 760; }
+.storage-card__type { margin: 0; color: rgba(220, 235, 245, .5); font-size: 10px; text-transform: uppercase; }
+.storage-status { padding: 4px 8px; border: 1px solid rgba(212, 232, 248, .14); border-radius: 999px; color: #c0d9e7; font-size: 9px; white-space: nowrap; }
+.storage-status[data-status="connected"] { border-color: rgba(129, 209, 170, .3); color: #b9efd1; }
+.storage-status[data-status="authorization_required"] { border-color: rgba(229, 186, 111, .3); color: #f2d49d; }
+.storage-status[data-status="not_configured"] { border-color: rgba(230, 133, 136, .28); color: #ffc4c1; }
+.storage-picker { display: grid; gap: 6px; max-width: 420px; }
+
 .password-settings { max-width: 520px; }
 .password-settings h3 { margin: 0 0 6px; font-size: 15px; }
 .password-settings .primary-button { justify-self: start; margin-top: 5px; }
