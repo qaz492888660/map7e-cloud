@@ -444,7 +444,7 @@ test('bootstrap password is hashed, changed password takes precedence, and old a
   const changedRecord = JSON.parse(redis.get(ADMIN_AUTH_KEY))
   assert.equal(changedRecord.sessionVersion, 1)
   assert.notEqual(changedRecord.passwordHash, initialRecord.passwordHash)
-  assert.equal(redis.get(ADMIN_AUTH_KEY).includes('1'), false)
+  assert.match(changedRecord.passwordHash, /^scrypt\$/)
 
   response = await invoke(adminConfigHandler, { cookie: firstCookie })
   assert.equal(response.statusCode, 401, 'old signed administrator sessions are invalid after a password change')
