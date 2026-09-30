@@ -8,21 +8,44 @@ jobs:
   inspect:
     runs-on: ubuntu-latest
     steps:
-      - name: Download and install Quark official CLI
+      - name: Inspect Quark auth persistence
         shell: bash
         run: |
           set -euo pipefail
           curl -fsSL -o quark.zip "https://github.com/quark-clouddrive/quarkclouddrive_offical/releases/download/quarkclouddrive-v1.0.20/quarkclouddrive-1.0.20.zip"
-          echo "1b2060c15308cfda0cd79eefc02a3444f5af1daf6a529c2b039c590406cb549a  quark.zip" | sha256sum -c -
           mkdir quark
           unzip -q quark.zip -d quark
           cd quark
-          bash install.sh
-          echo "=== INSTALLED FILES ==="
-          find . -maxdepth 4 -type f | sort
-          echo "=== CLI VERSION ==="
-          node scripts/quark-drive.cjs --version
-          echo "=== CLI HELP ==="
-          node scripts/quark-drive.cjs --help | head -160 || true
-          echo "=== AUTH/CONFIG REFERENCES ==="
-          grep -RInE "config\.json|access_token|refresh_token|token|open-api-drive\.quark\.cn|oauth|login|CONFIG" scripts --include='*.cjs' --include='*.js' | head -300 || true
+          bash install.sh >/tmp/quark-install.log
+          echo "=== LOGIN HELP ==="
+          node scripts/quark-drive.cjs login --help | head -120 || true
+          echo "=== BROWSE HELP ==="
+          node scripts/quark-drive.cjs browse --help | head -100 || true
+          echo "=== DOWNLOAD HELP ==="
+          node scripts/quark-drive.cjs download --help | head -100 || true
+          echo "=== USER INFO HELP ==="
+          node scripts/quark-drive.cjs get-user-info --help | head -100 || true
+          echo "=== TARGETED AUTH SNIPPETS ==="
+          python3 - <<'PY'
+          from pathlib import Path
+          s=Path("scripts/quark-drive.cjs").read_text(errors="replace")
+          terms=[
+            ".quarkclouddrive","config.json","accessToken","refreshToken",
+            "access_token","refresh_token","agent_auth_code","authorization_url",
+            "auth_url","getAccount","saveAccount","setAccount","permissionManager",
+            "open-api-drive.quark.cn"
+          ]
+          for term in terms:
+              print("\n---",term,"---")
+              start=0
+              found=0
+              while found<4:
+                  i=s.find(term,start)
+                  if i<0: break
+                  lo=max(0,i-450); hi=min(len(s),i+900)
+                  print(s[lo:hi].replace("\n"," "))
+                  print()
+                  found+=1
+                  start=i+len(term)
+              if not found: print("(not found)")
+          PY
