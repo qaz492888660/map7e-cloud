@@ -14,6 +14,7 @@
         <div>
           <p class="eyebrow">MAP7E CLOUD</p>
           <h1>管理后台</h1>
+          <p class="header-note">统一管理云盘访问、相册、文件夹和单个文件。</p>
         </div>
         <a class="quiet-link" href="/">返回网盘</a>
       </header>
@@ -21,45 +22,73 @@
       <p id="notice" class="notice" role="status" hidden></p>
 
       <section id="login-panel" class="panel login-panel" hidden>
+        <p class="eyebrow">ADMIN</p>
         <h2>管理员登录</h2>
-        <p class="muted">使用独立的管理后台密码。网盘访客密码不能代替管理员认证。</p>
+        <p class="muted">这里使用独立管理员密码，不与访客进入云盘的密码共用。</p>
         <form id="login-form" class="stack">
           <label for="admin-password">管理员密码</label>
           <input id="admin-password" name="password" type="password" autocomplete="current-password" required />
-          <button class="primary-button" type="submit">登录</button>
+          <button class="primary-button" type="submit">进入后台</button>
         </form>
       </section>
 
       <div id="dashboard" hidden>
-        <section class="panel global-panel" aria-labelledby="global-heading">
+        <section class="panel overview-panel" aria-labelledby="global-heading">
           <div class="section-heading">
             <div>
               <p class="eyebrow">ACCESS POLICY</p>
-              <h2 id="global-heading">全局设置</h2>
+              <h2 id="global-heading">云盘入口</h2>
             </div>
-            <button id="logout-button" class="quiet-button" type="button">退出管理</button>
+            <button id="logout-button" class="quiet-button" type="button">退出后台</button>
           </div>
           <div class="global-control">
-            <label for="global-access">网盘访问</label>
-            <select id="global-access">
-              <option value="public">公开</option>
-              <option value="locked">上锁</option>
-            </select>
-            <button id="save-global" class="primary-button" type="button">保存全局设置</button>
+            <div class="field-block">
+              <label for="global-access">进入云盘是否需要密码</label>
+              <select id="global-access">
+                <option value="public">公开进入</option>
+                <option value="locked">需要密码</option>
+              </select>
+            </div>
+            <button id="save-global" class="primary-button" type="button">保存入口设置</button>
           </div>
-          <p class="muted">上锁后，继承权限的目录和文件需要使用现有云盘密码登录。公开目录可以覆盖上级锁定。</p>
+          <p class="muted">下级文件夹、相册和单个文件可以继续用“继承 / 公开 / 上锁”覆盖这一总设置。</p>
+        </section>
+
+        <section class="panel browser-panel" aria-labelledby="browser-heading">
+          <div class="section-heading browser-heading">
+            <div>
+              <p class="eyebrow">FILE MANAGER</p>
+              <h2 id="browser-heading">文件管理</h2>
+              <p id="directory-summary" class="muted"></p>
+            </div>
+            <div class="heading-actions">
+              <button id="create-folder-button" class="primary-button" type="button">新建文件夹</button>
+              <button id="refresh-directory" class="quiet-button" type="button">刷新</button>
+            </div>
+          </div>
+
+          <nav id="breadcrumb" class="breadcrumb" aria-label="目录路径"></nav>
+
+          <div class="browser-tools">
+            <label class="search-box">
+              <span>搜索当前目录</span>
+              <input id="item-search" type="search" placeholder="输入文件或文件夹名称" />
+            </label>
+          </div>
+
+          <div id="item-list" class="item-list"></div>
         </section>
 
         <section class="panel settings-panel" aria-labelledby="settings-heading">
           <div class="section-heading">
             <div>
               <p class="eyebrow">SECURITY</p>
-              <h2 id="settings-heading">设置</h2>
+              <h2 id="settings-heading">后台安全</h2>
             </div>
           </div>
           <div class="password-settings">
             <h3>修改管理员密码</h3>
-            <p class="muted">修改前需要再次验证当前密码。更新后，其他已登录的管理会话也会失效。</p>
+            <p class="muted">修改后所有旧管理员会话都会失效，需要重新登录。</p>
             <form id="admin-password-form" class="stack">
               <label for="current-admin-password">当前管理员密码</label>
               <input id="current-admin-password" name="currentPassword" type="password" autocomplete="current-password" required />
@@ -71,20 +100,72 @@
             </form>
           </div>
         </section>
-
-        <section class="folder-section" aria-labelledby="folders-heading">
-          <div class="section-heading folder-heading">
-            <div>
-              <p class="eyebrow">PIKPAK FOLDERS</p>
-              <h2 id="folders-heading">文件夹管理</h2>
-              <p id="folder-summary" class="muted"></p>
-            </div>
-            <button id="refresh-folders" class="quiet-button" type="button">重新读取</button>
-          </div>
-          <div id="folder-list" class="folder-list"></div>
-        </section>
       </div>
     </main>
+
+    <dialog id="create-dialog" class="admin-dialog">
+      <form id="create-folder-form" method="dialog" class="dialog-card">
+        <div>
+          <p class="eyebrow">CREATE</p>
+          <h2>新建文件夹</h2>
+        </div>
+        <label>名称
+          <input id="create-folder-name" maxlength="255" required />
+        </label>
+        <div class="dialog-grid">
+          <label>类型
+            <select id="create-folder-type">
+              <option value="folder">普通文件夹</option>
+              <option value="album">相册</option>
+            </select>
+          </label>
+          <label>权限
+            <select id="create-folder-access">
+              <option value="inherit">继承</option>
+              <option value="public">公开</option>
+              <option value="locked">上锁</option>
+            </select>
+          </label>
+        </div>
+        <div class="dialog-actions">
+          <button class="quiet-button" value="cancel" type="button" data-close-dialog>取消</button>
+          <button class="primary-button" type="submit">创建</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="rename-dialog" class="admin-dialog">
+      <form id="rename-form" method="dialog" class="dialog-card">
+        <div>
+          <p class="eyebrow">RENAME</p>
+          <h2>重命名</h2>
+        </div>
+        <p id="rename-target" class="muted"></p>
+        <label>新名称
+          <input id="rename-name" maxlength="255" required />
+        </label>
+        <div class="dialog-actions">
+          <button class="quiet-button" type="button" data-close-dialog>取消</button>
+          <button class="primary-button" type="submit">保存名称</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="delete-dialog" class="admin-dialog">
+      <form id="delete-form" method="dialog" class="dialog-card">
+        <div>
+          <p class="eyebrow">TRASH</p>
+          <h2>移到回收站</h2>
+        </div>
+        <p id="delete-target" class="dialog-warning"></p>
+        <p class="muted">此操作会调用 PikPak 的移到回收站，不是永久删除。</p>
+        <div class="dialog-actions">
+          <button class="quiet-button" type="button" data-close-dialog>取消</button>
+          <button class="danger-button" type="submit">移到回收站</button>
+        </div>
+      </form>
+    </dialog>
+
     <script type="module" src="/assets/admin.js"></script>
   </body>
 </html>
