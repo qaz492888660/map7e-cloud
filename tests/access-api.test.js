@@ -263,7 +263,7 @@ test('generic storage APIs expose providers and keep PikPak behavior compatible'
     response.body.providers.map((provider) => [provider.id, provider.status, provider.selectable]),
     [
       ['pikpak-main', 'connected', true],
-      ['quark-main', 'authorization_required', false],
+      ['quark-main', 'official_web_api_unavailable', false],
     ],
   )
 
