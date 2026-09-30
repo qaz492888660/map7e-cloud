@@ -434,17 +434,17 @@ test('bootstrap password is hashed, changed password takes precedence, and old a
     cookie: firstCookie,
     body: {
       currentPassword: 'initial-bootstrap-admin-password',
-      newPassword: 'a-new-admin-password-long-enough',
-      confirmPassword: 'a-new-admin-password-long-enough',
+      newPassword: '1',
+      confirmPassword: '1',
     },
   })
-  assert.equal(response.statusCode, 200)
+  assert.equal(response.statusCode, 200, 'a one-character non-empty admin password is allowed')
   assert.equal(response.body.passwordHash, undefined)
   assert.match(response.headers['Set-Cookie'], /Max-Age=0/)
   const changedRecord = JSON.parse(redis.get(ADMIN_AUTH_KEY))
   assert.equal(changedRecord.sessionVersion, 1)
   assert.notEqual(changedRecord.passwordHash, initialRecord.passwordHash)
-  assert.equal(redis.get(ADMIN_AUTH_KEY).includes('a-new-admin-password-long-enough'), false)
+  assert.equal(redis.get(ADMIN_AUTH_KEY).includes('1'), false)
 
   response = await invoke(adminConfigHandler, { cookie: firstCookie })
   assert.equal(response.statusCode, 401, 'old signed administrator sessions are invalid after a password change')
@@ -457,7 +457,7 @@ test('bootstrap password is hashed, changed password takes precedence, and old a
 
   response = await invoke(adminLoginHandler, {
     method: 'POST',
-    body: { password: 'a-new-admin-password-long-enough' },
+    body: { password: '1' },
   })
   assert.equal(response.statusCode, 200)
   assert.equal(Object.hasOwn(response.body, 'passwordHash'), false)
