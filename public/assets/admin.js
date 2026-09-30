@@ -272,6 +272,7 @@ function storageStatusText(status) {
   if (status === 'authorization_required') return '待授权'
   if (status === 'not_configured') return '未配置'
   if (status === 'integration_pending') return '接入中'
+  if (status === 'official_web_api_unavailable') return '官方 Web 接入未开放'
   return '不可用'
 }
 
@@ -301,10 +302,10 @@ function renderStorageProviders() {
     head.append(copy, status)
     card.append(head)
 
-    if (provider.type === 'quark' && provider.status === 'authorization_required') {
+    if (provider.type === 'quark' && provider.status === 'official_web_api_unavailable') {
       const note = document.createElement('p')
       note.className = 'muted'
-      note.textContent = '夸克官方 OAuth 尚未绑定；完成授权后会自动加入可管理网盘。'
+      note.textContent = '官方当前提供 Agent Skill 接入，尚未公开普通网站可直接使用的个人网盘 Web API。'
       card.append(note)
     }
     storageList.append(card)
