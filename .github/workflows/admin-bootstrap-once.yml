@@ -1,26 +1,11 @@
 name: Run admin bootstrap once
 
-on:
-  push:
-    branches: [main]
+on: [push]
 
 jobs:
   bootstrap:
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
       - name: Call production bootstrap endpoint
-        shell: bash
-        run: |
-          set -euo pipefail
-          url="https://map7e-cloud.vercel.app/api/admin-bootstrap-once"
-          for attempt in $(seq 1 60); do
-            body="$(curl -fsS "$url" || true)"
-            if printf '%s' "$body" | grep -q '"ok":true'; then
-              printf '%s
-' "$body"
-              exit 0
-            fi
-            sleep 5
-          done
-          echo "Bootstrap endpoint did not return ok=true" >&2
-          exit 1
+        run: curl --fail --silent --show-error https://map7e-cloud.vercel.app/api/admin-bootstrap-once
