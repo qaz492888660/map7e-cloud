@@ -8,7 +8,7 @@ jobs:
   inspect:
     runs-on: ubuntu-latest
     steps:
-      - name: Inspect Quark auth persistence
+      - name: Inspect Quark hosted OAuth start
         shell: bash
         run: |
           set -euo pipefail
@@ -17,35 +17,34 @@ jobs:
           unzip -q quark.zip -d quark
           cd quark
           bash install.sh >/tmp/quark-install.log
-          echo "=== LOGIN HELP ==="
-          node scripts/quark-drive.cjs login --help | head -120 || true
-          echo "=== BROWSE HELP ==="
-          node scripts/quark-drive.cjs browse --help | head -100 || true
-          echo "=== DOWNLOAD HELP ==="
-          node scripts/quark-drive.cjs download --help | head -100 || true
-          echo "=== USER INFO HELP ==="
-          node scripts/quark-drive.cjs get-user-info --help | head -100 || true
-          echo "=== TARGETED AUTH SNIPPETS ==="
+          cli="$PWD/scripts/quark-drive.cjs"
+          mkdir -p /tmp/quark-work /tmp/quark-home
+          echo "=== LOGIN OUTPUT (12s CAP) ==="
+          set +e
+          (cd /tmp/quark-work && HOME=/tmp/quark-home timeout 12s node "$cli" login) 2>&1 | tee /tmp/login-output.txt
+          code=${PIPESTATUS[0]}
+          set -e
+          echo "login_exit=$code"
+          echo "=== CONFIG LOCATIONS ==="
+          find /tmp/quark-work /tmp/quark-home -type f -name 'config.json' -print
+          echo "=== REDACTED CONFIG ==="
           python3 - <<'PY'
-          from pathlib import Path
-          s=Path("scripts/quark-drive.cjs").read_text(errors="replace")
-          terms=[
-            ".quarkclouddrive","config.json","accessToken","refreshToken",
-            "access_token","refresh_token","agent_auth_code","authorization_url",
-            "auth_url","getAccount","saveAccount","setAccount","permissionManager",
-            "open-api-drive.quark.cn"
-          ]
-          for term in terms:
-              print("\n---",term,"---")
-              start=0
-              found=0
-              while found<4:
-                  i=s.find(term,start)
-                  if i<0: break
-                  lo=max(0,i-450); hi=min(len(s),i+900)
-                  print(s[lo:hi].replace("\n"," "))
-                  print()
-                  found+=1
-                  start=i+len(term)
-              if not found: print("(not found)")
+          import json, pathlib
+          roots=[pathlib.Path("/tmp/quark-work"),pathlib.Path("/tmp/quark-home")]
+          def redact(v):
+              if isinstance(v,dict):
+                  out={}
+                  for k,x in v.items():
+                      kl=k.lower()
+                      if "token" in kl or "secret" in kl or "signkey" in kl:
+                          out[k]="[redacted]" if x else x
+                      else: out[k]=redact(x)
+                  return out
+              if isinstance(v,list): return [redact(x) for x in v]
+              return v
+          for root in roots:
+              for p in root.rglob("config.json"):
+                  print("PATH",p)
+                  try: print(json.dumps(redact(json.loads(p.read_text())),ensure_ascii=False,indent=2))
+                  except Exception as e: print("read_error",type(e).__name__)
           PY
