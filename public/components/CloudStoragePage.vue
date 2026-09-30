@@ -237,12 +237,17 @@ async function apiJson(url, options = {}) {
     ...options,
   })
   const payload = await response.json().catch(() => ({}))
-  if (response.status === 401) {
-    const error = new Error('需要先登录云盘。')
-    error.code = 'authentication_required'
+  if (!response.ok || payload?.ok === false) {
+    const code = String(payload?.error || (response.status === 401 ? 'authentication_required' : 'http_error'))
+    const providerAuthFailure = code === 'storage_token_expired' || code === 'storage_authorization_required'
+    const message = providerAuthFailure
+      ? '当前网盘授权已失效，请在管理后台重新授权。'
+      : (response.status === 401 && code === 'authentication_required' ? '需要先登录云盘。' : (payload?.message || payload?.error || ('HTTP ' + response.status)))
+    const error = new Error(message)
+    error.code = code
+    error.status = response.status
     throw error
   }
-  if (!response.ok || payload?.ok === false) throw new Error(payload?.message || payload?.error || ('HTTP ' + response.status))
   return payload
 }
 
@@ -257,6 +262,8 @@ async function listPikPakItems(parentId = '') {
     if (parentId) params.set('parentId', parentId)
     if (pageToken) params.set('pageToken', pageToken)
     const payload = await apiJson('/api/storage-files?' + params.toString())
+    const nextRequestDelayMs = Number(payload?.nextRequestDelayMs || 0)
+    if (!Number.isFinite(nextRequestDelayMs) || nextRequestDelayMs < 0) throw new Error('网盘分页节流参数无效。')
     if (storageId !== activeStorageId.value) throw new Error('网盘已切换，请重新读取目录。')
     if (payload?.folder) {
       directoryMetadata.value = { ...directoryMetadata.value, [parentId]: payload.folder }
@@ -266,6 +273,10 @@ async function listPikPakItems(parentId = '') {
     pageToken = String(payload?.nextPageToken || '')
     if (pageToken && seenTokens.has(pageToken)) break
     if (pageToken) seenTokens.add(pageToken)
+    if (pageToken && nextRequestDelayMs > 0) {
+      if (nextRequestDelayMs > 1000) { const error = new Error('当前网盘请求频率受限，请稍后重试。'); error.code = 'quark_rate_limited'; throw error }
+      await new Promise((resolve) => setTimeout(resolve, nextRequestDelayMs))
+    }
   } while (pageToken && seenTokens.size < 200)
   return items
 }

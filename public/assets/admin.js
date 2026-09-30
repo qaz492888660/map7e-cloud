@@ -318,6 +318,20 @@ function renderStorageProviders() {
       primary.addEventListener('click', async () => { primary.disabled = true; try { await apiJson('/api/admin-storages', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'set-default', storageId: provider.id }) }); await loadStorageProviders(); showNotice('默认网盘已更新。', 'success') } catch (error) { showNotice(error.message, 'error'); primary.disabled = false } })
       card.append(primary)
     }
+    if (provider.type === 'pikpak' && !provider.primary) {
+      const rotate = document.createElement('button'); rotate.type = 'button'; rotate.className = 'quiet-button'; rotate.textContent = '更新 PikPak 凭据'
+      rotate.addEventListener('click', async () => {
+        const accessToken = window.prompt('请输入新的 PikPak PAT。该值只会提交到管理 API，不会显示在状态信息中。')
+        if (accessToken === null) return
+        if (!accessToken) { showNotice('PikPak PAT 不能为空。', 'error'); return }
+        rotate.disabled = true
+        try {
+          await apiJson('/api/admin-storages', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'update', storageId: provider.id, accessToken }) })
+          await loadStorageProviders(); showNotice('PikPak 凭据已验证并更新。', 'success')
+        } catch (error) { showNotice(error.message, 'error') } finally { rotate.disabled = false }
+      })
+      card.append(rotate)
+    }
     if (provider.type === 'quark') {
       const authorize = document.createElement('button'); authorize.type = 'button'; authorize.className = 'quiet-button'; authorize.textContent = provider.configured ? '重新授权' : '授权夸克网盘'
       authorize.addEventListener('click', async () => {

@@ -229,3 +229,56 @@ await test('permissions use actual parent and scope identical file ids to each s
   await assert.rejects(requireItemRead({ headers: {} }, provider, 'quark-main', 'same-id', ''), /authentication_required|cloud_login_not_configured/)
   assert.equal((await requireItemRead({ headers: {} }, provider, 'pikpak-two', 'same-id', '')).id, 'same-id')
 })
+
+
+await test('OAuth restart tolerates unreadable stored Quark credentials', async () => {
+  await writeConfig({ version: 1, defaultStorageId: 'pikpak-main', instances: [
+    { storageId: 'pikpak-main', provider: 'pikpak', displayName: 'PikPak', enabled: true },
+    { storageId: 'quark-main', provider: 'quark', displayName: '夸克网盘', enabled: true },
+  ] })
+  redis.set('map7e-cloud:storage:auth:v1:quark-main', JSON.stringify({ version: 1, iv: 'bad', tag: 'bad', data: 'bad' }))
+  upstream = async url => url.pathname.endsWith('/get_authorize_page_url') ? { status: 0, data: {
+    authorize_page_url: 'https://pan.quark.cn/open/v1/oauth/agent?page_code=restart', page_code: 'restart', device_id: 'device',
+  } } : { status: 0, data: {} }
+  const adminCookie = `map7e_admin_session=${createAdminSessionToken().token}`
+  const start = res()
+  await quarkOAuth({ method: 'POST', body: { action: 'start', storageId: 'quark-main' }, headers: { cookie: adminCookie } }, start)
+  assert.equal(start.statusCode, 200)
+  assert.equal(start.body.authorizeUrl, 'https://pan.quark.cn/open/v1/oauth/agent?page_code=restart')
+  redis.delete('map7e-cloud:storage:auth:v1:quark-main')
+})
+
+await test('secondary PikPak credentials can be validated and rotated through admin update', async () => {
+  await writeConfig({ version: 1, defaultStorageId: 'pikpak-main', instances: [
+    { storageId: 'pikpak-main', provider: 'pikpak', displayName: 'PikPak', enabled: true },
+    { storageId: 'pikpak-two', provider: 'pikpak', displayName: 'Second', enabled: true },
+    { storageId: 'quark-main', provider: 'quark', displayName: '夸克网盘', enabled: true },
+  ] })
+  await writeAuth('pikpak-two', { accessToken: 'old-secondary-token' })
+  upstream = async url => url.pathname.endsWith('/about') ? { user: { name: 'Secondary' }, quota: { limit: 100, usage: 1 } } : { status: 0, data: {} }
+  const adminCookie = `map7e_admin_session=${createAdminSessionToken().token}`
+  const updated = res()
+  await adminStorages({ method: 'POST', body: { action: 'update', storageId: 'pikpak-two', accessToken: 'new-secondary-token' }, headers: { cookie: adminCookie } }, updated)
+  assert.equal(updated.statusCode, 200)
+  assert.equal((await readAuth('pikpak-two')).accessToken, 'new-secondary-token')
+  assert.equal(calls.at(-1).headers.Authorization, 'Bearer new-secondary-token')
+})
+
+await test('authorized Quark pagination returns the provider pacing delay', async () => {
+  await writeConfig({ version: 1, defaultStorageId: 'quark-main', instances: [
+    { storageId: 'pikpak-main', provider: 'pikpak', displayName: 'PikPak', enabled: true },
+    { storageId: 'quark-main', provider: 'quark', displayName: '夸克网盘', enabled: true },
+  ] })
+  await writeAuth('quark-main', { accessToken: 'paged-access', refreshToken: 'paged-refresh', deviceId: 'device' })
+  await setGlobalAccess('public')
+  upstream = async url => url.pathname.endsWith('/file/list') ? {
+    status: 0,
+    metadata: { tq_gap: 120 },
+    data: { file_list: [], last_page: false, next_query_cursor: { version: '1', token: 'next' } },
+  } : { status: 0, data: {} }
+  const target = res()
+  await storageFiles({ method: 'GET', query: { storageId: 'quark-main' }, headers: {} }, target)
+  assert.equal(target.statusCode, 200)
+  assert.equal(target.body.nextRequestDelayMs, 120)
+  assert.ok(target.body.nextPageToken)
+})
