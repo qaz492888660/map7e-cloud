@@ -8,10 +8,11 @@ import adminLoginHandler from '../lib/api-handlers/admin-login.js'
 import adminChangePasswordHandler from '../lib/api-handlers/admin-change-password.js'
 import adminConfigHandler from '../lib/api-handlers/admin-config.js'
 import adminFoldersHandler from '../lib/api-handlers/admin-folders.js'
+import adminFileMetadataHandler from '../lib/api-handlers/admin-file-metadata.js'
 import adminFolderMetadataHandler from '../lib/api-handlers/admin-folder-metadata.js'
 import { createSessionToken } from '../lib/cloud-auth.js'
 import { createAdminSessionToken } from '../lib/admin-auth.js'
-import { getGlobalAccessState, isPersistentStoreConfigured, setFolderMetadata, setGlobalAccess } from '../lib/admin-store.js'
+import { getGlobalAccessState, isPersistentStoreConfigured, setFileMetadata, setFolderMetadata, setGlobalAccess } from '../lib/admin-store.js'
 
 const originalFetch = globalThis.fetch
 const envKeys = ['PIKPAK_PAT', 'CLOUD_PASSWORD', 'ADMIN_PASSWORD', 'UPSTASH_REDIS_REST_URL', 'UPSTASH_REDIS_REST_TOKEN', 'KV_REST_API_URL', 'KV_REST_API_TOKEN', 'VERCEL_ENV']
@@ -28,6 +29,11 @@ let createdFolderRequests = 0
 function folderKey(folderId) {
   const prefix = process.env.VERCEL_ENV === 'preview' ? 'map7e-cloud:preview:' : 'map7e-cloud:'
   return `${prefix}folder:v1:${Buffer.from(folderId).toString('base64url')}`
+}
+
+function fileKey(fileId) {
+  const prefix = process.env.VERCEL_ENV === 'preview' ? 'map7e-cloud:preview:' : 'map7e-cloud:'
+  return `${prefix}file:v1:${Buffer.from(fileId).toString('base64url')}`
 }
 
 function resetFixtures() {
@@ -162,6 +168,10 @@ function setFolder(folderId, access, type = 'folder') {
   redis.set(folderKey(folderId), JSON.stringify({ folderId, access, type }))
 }
 
+function setFile(fileId, access) {
+  redis.set(fileKey(fileId), JSON.stringify({ fileId, access }))
+}
+
 test('API enforces global and folder access before returning file listings', async () => {
   process.env.PIKPAK_PAT = 'test-pikpak-token-signing-key'
   process.env.CLOUD_PASSWORD = 'visitor-password'
@@ -205,6 +215,11 @@ test('API enforces global and folder access before returning file listings', asy
   assert.deepEqual(response.body.items.map((item) => item.id), ['public-folder'])
   assert.equal(response.body.items[0].folderType, 'album')
   assert.equal(response.body.items[0].effectiveAccess, 'public')
+
+  setFile('root-file', 'public')
+  response = await invoke(filesHandler)
+  assert.equal(response.statusCode, 200, 'an explicitly public root file stays discoverable under a locked global policy')
+  assert.equal(response.body.items.some((item) => item.id === 'root-file' && item.effectiveAccess === 'public'), true)
 
   const manyRootFiles = Array.from({ length: 100 }, (_, index) => ({
     id: `page-file-${index}`,
@@ -279,6 +294,19 @@ test('direct downloads check the actual parent path and do not disclose a URL wh
   response = await invoke(downloadHandler, { query: { id: 'nested-public-file', parentId: 'public-child' } })
   assert.equal(response.statusCode, 302, 'an explicit public child overrides its locked ancestor')
   assert.equal(response.headers.Location, 'https://cdn.example/nested.txt')
+
+  setGlobal('public')
+  setFile('root-file', 'locked')
+  response = await invoke(downloadHandler, { query: { id: 'root-file', parentId: '' } })
+  assert.equal(response.statusCode, 401, 'a file-level lock overrides a public parent')
+  response = await invoke(downloadHandler, { query: { id: 'root-file', parentId: '' }, cookie: cloudCookie })
+  assert.equal(response.statusCode, 302)
+
+  setGlobal('locked')
+  setFile('root-file', 'public')
+  response = await invoke(downloadHandler, { query: { id: 'root-file', parentId: '' } })
+  assert.equal(response.statusCode, 302, 'a file-level public override can expose one root file while the drive is locked')
+  assert.equal(response.headers.Location, 'https://cdn.example/root.txt')
 })
 
 test('admin writes require the separate administrator cookie and persist metadata', async () => {
@@ -327,6 +355,16 @@ test('admin writes require the separate administrator cookie and persist metadat
   assert.equal(storedMetadata.type, 'album')
   assert.equal(storedMetadata.access, 'locked')
   assert.match(storedMetadata.updatedAt, /^\d{4}-\d{2}-\d{2}T/)
+
+  response = await invoke(adminFileMetadataHandler, {
+    method: 'POST',
+    body: { fileId: 'root-file', access: 'locked' },
+    cookie: adminCookie,
+  })
+  assert.equal(response.statusCode, 200)
+  const storedFileMetadata = JSON.parse(redis.get(fileKey('root-file')))
+  assert.equal(storedFileMetadata.fileId, 'root-file')
+  assert.equal(storedFileMetadata.access, 'locked')
 })
 
 test('bootstrap password is hashed, changed password takes precedence, and old admin sessions expire', async () => {
@@ -475,9 +513,9 @@ test('new-folder metadata options require admin auth and persist after PikPak cr
   response = await invoke(createFolderHandler, {
     method: 'POST',
     body: { name: 'New Album', parentId: '', type: 'album', access: 'locked' },
-    cookie: `${cloudCookie}; map7e_admin_session=${adminSession.token}`,
+    cookie: `map7e_admin_session=${adminSession.token}`,
   })
-  assert.equal(response.statusCode, 200)
+  assert.equal(response.statusCode, 200, 'the admin session alone can create and classify a folder')
   assert.equal(response.body.metadataSaved, true)
   const id = response.body.item.id
   const metadata = JSON.parse(redis.get(folderKey(id)))
@@ -515,8 +553,10 @@ test('Vercel Upstash variables work and Preview settings are isolated from Produ
   process.env.VERCEL_ENV = 'production'
   await setGlobalAccess('locked')
   await setFolderMetadata('shared-folder', { type: 'folder', access: 'inherit' })
+  await setFileMetadata('shared-file', { access: 'locked' })
   assert.equal(redis.get('map7e-cloud:global-access:v1'), 'locked')
   assert.equal(redis.has(`map7e-cloud:folder:v1:${Buffer.from('shared-folder').toString('base64url')}`), true)
+  assert.equal(redis.has(`map7e-cloud:file:v1:${Buffer.from('shared-file').toString('base64url')}`), true)
 
   process.env.VERCEL_ENV = 'preview'
   assert.equal(isPersistentStoreConfigured(), true, 'the Upstash integration REST variables enable persistent storage')
@@ -524,8 +564,10 @@ test('Vercel Upstash variables work and Preview settings are isolated from Produ
   assert.equal(redisAuthHeaders.at(-1), 'Bearer test-kv-token')
   await setGlobalAccess('public')
   await setFolderMetadata('shared-folder', { type: 'album', access: 'locked' })
+  await setFileMetadata('shared-file', { access: 'public' })
   assert.equal(redis.get('map7e-cloud:preview:global-access:v1'), 'public')
   assert.equal(redis.get(`map7e-cloud:preview:folder:v1:${Buffer.from('shared-folder').toString('base64url')}`) !== redis.get(`map7e-cloud:folder:v1:${Buffer.from('shared-folder').toString('base64url')}`), true)
+  assert.equal(redis.get(`map7e-cloud:preview:file:v1:${Buffer.from('shared-file').toString('base64url')}`) !== redis.get(`map7e-cloud:file:v1:${Buffer.from('shared-file').toString('base64url')}`), true)
   assert.equal(redis.get('map7e-cloud:global-access:v1'), 'locked', 'Preview writes leave Production settings unchanged')
 })
 
