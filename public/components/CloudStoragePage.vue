@@ -10,6 +10,9 @@ const folderMap = ref({})
 const rootFiles = ref([])
 const directoryMetadata = ref({})
 const manifestUpdatedAt = ref('')
+const storageProviders = ref([])
+const activeStorageId = ref('pikpak-main')
+const activeStorageName = computed(() => storageProviders.value.find((provider) => provider.id === activeStorageId.value)?.name || '网盘')
 const loadingLibrary = ref(true)
 const errorMessage = ref('')
 const authRequired = ref(false)
@@ -159,7 +162,7 @@ function normalizePikPakItem(file) {
     id: String(file?.id || ''),
     parentId: String(file?.parentId || ''),
     name: String(file?.name || '未命名文件'),
-    path: isFolder ? '' : '/api/pikpak-download?id=' + encodeURIComponent(String(file?.id || '')) + '&parentId=' + encodeURIComponent(String(file?.parentId || '')),
+    path: isFolder ? '' : '/api/storage-download?storageId=' + encodeURIComponent(activeStorageId.value) + '&id=' + encodeURIComponent(String(file?.id || '')) + '&parentId=' + encodeURIComponent(String(file?.parentId || '')),
     size: isFolder ? '' : (sizeBytes !== null && Number.isFinite(sizeBytes) && sizeBytes >= 0 ? formatBytes(sizeBytes) : ''),
     sizeBytes: !isFolder && sizeBytes !== null && Number.isFinite(sizeBytes) && sizeBytes >= 0 ? sizeBytes : null,
     rawSize: sizeBytes !== null && Number.isFinite(sizeBytes) && sizeBytes >= 0 ? sizeBytes : null,
@@ -182,7 +185,7 @@ function normalizeRootFolder(item) {
   return {
     ...normalizePikPakItem(item),
     slug: String(item?.id || ''),
-    description: 'PikPak 实时目录',
+    description: activeStorageName.value + ' 实时目录',
     updatedLabel: formatDate(item?.modifiedAt || item?.createdAt),
     updatedAt: formatDate(item?.modifiedAt || item?.createdAt),
   }
@@ -248,9 +251,10 @@ async function listPikPakItems(parentId = '') {
   const seenTokens = new Set()
   do {
     const params = new URLSearchParams()
+    params.set('storageId', activeStorageId.value)
     if (parentId) params.set('parentId', parentId)
     if (pageToken) params.set('pageToken', pageToken)
-    const payload = await apiJson('/api/pikpak-files' + (params.size ? '?' + params.toString() : ''))
+    const payload = await apiJson('/api/storage-files?' + params.toString())
     if (payload?.folder) {
       directoryMetadata.value = { ...directoryMetadata.value, [parentId]: payload.folder }
     }
@@ -274,7 +278,7 @@ async function loadFolder(id, name = '', writable, parentId, metadata = {}) {
       id,
       slug: id,
       name: name || known?.name || root?.name || actual.name || '文件夹',
-      description: 'PikPak 实时目录',
+      description: activeStorageName.value + ' 实时目录',
       updatedAt: root?.updatedLabel || '',
       parentId: parentId ?? metadata.parentId ?? root?.parentId ?? known?.parentId ?? actual.parentId ?? '',
       writable: writable ?? metadata.writable ?? root?.writable ?? known?.writable ?? actual.writable ?? true,
@@ -302,6 +306,17 @@ async function readLibraryDirectory(strictFolderReads = false) {
   return items
 }
 
+async function loadStorageProviders() {
+  const payload = await apiJson('/api/storage-providers')
+  storageProviders.value = Array.isArray(payload?.providers) ? payload.providers : []
+  const current = storageProviders.value.find((provider) => provider.id === activeStorageId.value && provider.selectable)
+  if (!current) {
+    const fallback = storageProviders.value.find((provider) => provider.id === payload?.defaultStorageId && provider.selectable)
+      || storageProviders.value.find((provider) => provider.selectable)
+    if (fallback) activeStorageId.value = fallback.id
+  }
+}
+
 async function loadLibrary() {
   loadingLibrary.value = true
   errorMessage.value = ''
@@ -316,7 +331,7 @@ async function loadLibrary() {
     if (error?.code === 'authentication_required') {
       authRequired.value = true
     } else {
-      errorMessage.value = error instanceof Error ? error.message : '无法读取 PikPak 云盘。'
+      errorMessage.value = error instanceof Error ? error.message : '无法读取当前网盘。'
     }
   } finally {
     loadingLibrary.value = false
@@ -932,6 +947,7 @@ onMounted(async () => {
     const playAttempt = background.play()
     if (playAttempt && typeof playAttempt.catch === 'function') playAttempt.catch(() => {})
   }
+  await loadStorageProviders()
   const folderId = new URLSearchParams(window.location.search).get('folderId') || ''
   if (folderId) {
     pendingDeepLinkFolderId = folderId
