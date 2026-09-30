@@ -62,6 +62,16 @@
               <p class="muted">可以接入多个网盘；未完成授权的网盘不会影响现有 PikPak。</p>
             </div>
           </div>
+          <details>
+            <summary>添加存储实例</summary>
+            <form id="add-storage-form" class="settings-grid">
+              <label>实例 ID<input name="storageId" pattern="[a-z][a-z0-9-]{0,63}" required placeholder="quark-second" /></label>
+              <label>名称<input name="displayName" maxlength="80" required /></label>
+              <label>网盘<select name="provider"><option value="quark">夸克网盘</option><option value="pikpak">PikPak</option></select></label>
+              <label>PikPak PAT（仅添加 PikPak 时填写）<input name="accessToken" type="password" autocomplete="off" /></label>
+              <button type="submit" class="primary-button">添加网盘</button>
+            </form>
+          </details>
           <div id="storage-list" class="storage-list"></div>
           <label class="storage-picker" for="storage-select">
             <span>当前管理网盘</span>

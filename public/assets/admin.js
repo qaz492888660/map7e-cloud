@@ -17,7 +17,7 @@ const storageSelect = document.querySelector('#storage-select')
 
 let savedGlobalAccess = 'locked'
 let storageProviders = []
-let activeStorageId = 'pikpak-main'
+let activeStorageId = new URLSearchParams(location.search).get('storageId') || ''
 let storageReady = false
 let currentFolderId = ''
 let currentItems = []
@@ -197,7 +197,7 @@ function renderItem(item) {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            folderId: item.id,
+            storageId: activeStorageId, folderId: item.id,
             type: typeSelect.value,
             access: accessSelect.value,
           }),
@@ -206,7 +206,7 @@ function renderItem(item) {
         await apiJson('/api/admin-file-metadata', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ fileId: item.id, access: accessSelect.value }),
+          body: JSON.stringify({ storageId: activeStorageId, fileId: item.id, access: accessSelect.value }),
         })
       }
       await loadDirectory()
@@ -235,14 +235,14 @@ function renderItem(item) {
   rename.type = 'button'
   rename.className = 'quiet-button'
   rename.textContent = '重命名'
-  rename.disabled = item.writable === false
+  rename.disabled = item.writable === false || !activeCapabilities().rename
   rename.addEventListener('click', () => openRename(item))
 
   const remove = document.createElement('button')
   remove.type = 'button'
   remove.className = 'danger-ghost'
   remove.textContent = '删除'
-  remove.disabled = item.writable === false
+  remove.disabled = item.writable === false || !activeCapabilities().trash
   remove.addEventListener('click', () => openDelete(item))
   actions.append(rename, remove)
 
@@ -270,11 +270,15 @@ function renderItems() {
 function storageStatusText(status) {
   if (status === 'connected') return '已连接'
   if (status === 'authorization_required') return '待授权'
+  if (status === 'unavailable') return '暂不可用'
+  if (status === 'disabled') return '已停用'
   if (status === 'not_configured') return '未配置'
   if (status === 'integration_pending') return '接入中'
   if (status === 'official_web_api_unavailable') return '官方 Web 接入未开放'
   return '不可用'
 }
+
+function activeCapabilities() { return storageProviders.find(p => p.id === activeStorageId)?.capabilities || {} }
 
 function renderStorageProviders() {
   storageList.replaceChildren()
@@ -292,7 +296,7 @@ function renderStorageProviders() {
     name.textContent = provider.name
     const type = document.createElement('p')
     type.className = 'storage-card__type'
-    type.textContent = provider.type
+    type.textContent = provider.type + (provider.default ? ' · 默认盘' : '')
     copy.append(name, type)
 
     const status = document.createElement('span')
@@ -302,12 +306,38 @@ function renderStorageProviders() {
     head.append(copy, status)
     card.append(head)
 
-    if (provider.type === 'quark' && provider.status === 'official_web_api_unavailable') {
-      const note = document.createElement('p')
-      note.className = 'muted'
-      note.textContent = '官方当前提供 Agent Skill 接入，尚未公开普通网站可直接使用的个人网盘 Web API。'
-      card.append(note)
+    const detail = document.createElement('p')
+    detail.className = 'muted'
+    const member = { NORMAL: '普通用户', VIP: '会员', SVIP: '超级会员' }[provider.accountInfo?.memberType] || provider.accountInfo?.memberType || ''
+    const hasQuota = provider.quota && Number.isFinite(provider.quota.used) && Number.isFinite(provider.quota.total)
+    detail.textContent = [provider.accountInfo?.nickname, member, hasQuota ? `已用 ${formatBytes(provider.quota.used)} / ${formatBytes(provider.quota.total)}` : '容量尚不可用', provider.authStatus === 'valid' ? '认证有效' : '等待认证检查'].filter(Boolean).join(' · ')
+    card.append(detail)
+    if (provider.selectable) {
+      const enter = document.createElement('a'); enter.className = 'quiet-button'; enter.textContent = '进入网盘'; enter.href = '/?storageId=' + encodeURIComponent(provider.id); card.append(enter)
+      const primary = document.createElement('button'); primary.type = 'button'; primary.className = 'quiet-button'; primary.textContent = provider.default ? '当前默认盘' : '设为默认盘'; primary.disabled = provider.default
+      primary.addEventListener('click', async () => { primary.disabled = true; try { await apiJson('/api/admin-storages', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'set-default', storageId: provider.id }) }); await loadStorageProviders(); showNotice('默认网盘已更新。', 'success') } catch (error) { showNotice(error.message, 'error'); primary.disabled = false } })
+      card.append(primary)
     }
+    if (provider.type === 'quark') {
+      const authorize = document.createElement('button'); authorize.type = 'button'; authorize.className = 'quiet-button'; authorize.textContent = provider.configured ? '重新授权' : '授权夸克网盘'
+      authorize.addEventListener('click', async () => {
+        authorize.disabled = true
+        // Open during the user gesture so mobile browsers allow the authorization tab.
+        const authWindow = window.open('about:blank', '_blank')
+        try {
+          const result = await apiJson('/api/quark-oauth', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'start', storageId: provider.id }) })
+          if (authWindow) { authWindow.opener = null; authWindow.location = result.authorizeUrl }
+          const link = document.createElement('a'); link.textContent = '打开夸克授权页'; link.href = result.authorizeUrl; link.target = '_blank'; link.rel = 'noopener noreferrer'; card.append(link)
+          const complete = document.createElement('button'); complete.type = 'button'; complete.className = 'primary-button'; complete.textContent = '我已授权，检查连接'
+          complete.addEventListener('click', async () => {
+            complete.disabled = true
+            try { const result = await apiJson('/api/quark-oauth', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'complete', storageId: provider.id }) }); if (result.status === 'authorization_pending') showNotice('夸克授权尚未完成，请先在授权页确认。'); else { await loadStorageProviders(); showNotice('夸克授权已保存，连接状态已重新读取。', 'success') } } catch (error) { showNotice(error.message, 'error') } finally { complete.disabled = false }
+          }); card.append(complete)
+        } catch (error) { authWindow?.close(); showNotice(error.message, 'error') } finally { authorize.disabled = false }
+      }); card.append(authorize)
+
+    }
+    if (provider.type === 'quark') { const note = document.createElement('p'); note.className = 'muted'; note.textContent = '授权使用夸克官方 Agent Skill 流程；普通网站 API 尚无公开的通用接入文档。文件列表、创建文件夹与免账号凭据直链需授权后验证；上传、重命名/移动和回收站暂不开放。'; card.append(note) }
     storageList.append(card)
 
     if (provider.selectable) {
@@ -325,7 +355,7 @@ function renderStorageProviders() {
 }
 
 async function loadStorageProviders() {
-  const payload = await apiJson('/api/storage-providers')
+  const payload = await apiJson('/api/admin-storages')
   storageProviders = Array.isArray(payload.providers) ? payload.providers : []
   const current = storageProviders.find((provider) => provider.id === activeStorageId && provider.selectable)
   if (!current) {
@@ -380,7 +410,7 @@ async function loadDirectory() {
     showNotice(error.message, 'error')
   } finally {
     refreshButton.disabled = false
-    createButton.disabled = false
+    createButton.disabled = !activeCapabilities().createFolder
   }
 }
 
@@ -477,10 +507,10 @@ document.querySelector('#create-folder-form').addEventListener('submit', async (
   const access = document.querySelector('#create-folder-access').value
   setBusy(button, true, '创建中…', '创建')
   try {
-    await apiJson('/api/pikpak-create-folder', {
+    await apiJson('/api/storage-create-folder', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name, parentId: currentFolderId, type, access }),
+      body: JSON.stringify({ storageId: activeStorageId, name, parentId: currentFolderId, type, access }),
     })
     createDialog.close()
     await loadDirectory()
@@ -499,10 +529,10 @@ document.querySelector('#rename-form').addEventListener('submit', async (event) 
   const name = document.querySelector('#rename-name').value.trim()
   setBusy(button, true, '保存中…', '保存名称')
   try {
-    await apiJson('/api/pikpak-rename', {
+    await apiJson('/api/storage-rename', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ id: renameItem.id, parentId: currentFolderId, name }),
+      body: JSON.stringify({ storageId: activeStorageId, id: renameItem.id, parentId: currentFolderId, name }),
     })
     renameDialog.close()
     renameItem = null
@@ -522,10 +552,10 @@ document.querySelector('#delete-form').addEventListener('submit', async (event) 
   const name = deleteItem.name
   setBusy(button, true, '处理中…', '移到回收站')
   try {
-    await apiJson('/api/pikpak-trash', {
+    await apiJson('/api/storage-trash', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ id: deleteItem.id, parentId: currentFolderId }),
+      body: JSON.stringify({ storageId: activeStorageId, id: deleteItem.id, parentId: currentFolderId }),
     })
     deleteDialog.close()
     deleteItem = null
@@ -621,3 +651,14 @@ async function initialize() {
 }
 
 initialize()
+
+document.querySelector('#add-storage-form').addEventListener('submit', async (event) => {
+  event.preventDefault()
+  const form = event.currentTarget, button = form.querySelector('button[type="submit"]')
+  const data = new FormData(form), accessToken = data.get('accessToken')
+  button.disabled = true
+  try {
+    await apiJson('/api/admin-storages', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'add', storageId: data.get('storageId'), provider: data.get('provider'), displayName: data.get('displayName'), ...(accessToken ? { accessToken } : {}) }) })
+    form.reset(); await loadStorageProviders(); showNotice('存储实例已添加。', 'success')
+  } catch (error) { showNotice(error.message, 'error') } finally { button.disabled = false }
+})
