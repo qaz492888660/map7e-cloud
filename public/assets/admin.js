@@ -12,8 +12,12 @@ const createButton = document.querySelector('#create-folder-button')
 const createDialog = document.querySelector('#create-dialog')
 const renameDialog = document.querySelector('#rename-dialog')
 const deleteDialog = document.querySelector('#delete-dialog')
+const storageList = document.querySelector('#storage-list')
+const storageSelect = document.querySelector('#storage-select')
 
 let savedGlobalAccess = 'locked'
+let storageProviders = []
+let activeStorageId = 'pikpak-main'
 let storageReady = false
 let currentFolderId = ''
 let currentItems = []
@@ -263,6 +267,73 @@ function renderItems() {
   filtered.forEach((item) => itemList.append(renderItem(item)))
 }
 
+function storageStatusText(status) {
+  if (status === 'connected') return '已连接'
+  if (status === 'authorization_required') return '待授权'
+  if (status === 'not_configured') return '未配置'
+  return '不可用'
+}
+
+function renderStorageProviders() {
+  storageList.replaceChildren()
+  storageSelect.replaceChildren()
+
+  storageProviders.forEach((provider) => {
+    const card = document.createElement('article')
+    card.className = 'storage-card'
+
+    const head = document.createElement('div')
+    head.className = 'storage-card__head'
+    const copy = document.createElement('div')
+    const name = document.createElement('div')
+    name.className = 'storage-card__name'
+    name.textContent = provider.name
+    const type = document.createElement('p')
+    type.className = 'storage-card__type'
+    type.textContent = provider.type
+    copy.append(name, type)
+
+    const status = document.createElement('span')
+    status.className = 'storage-status'
+    status.dataset.status = provider.status || ''
+    status.textContent = storageStatusText(provider.status)
+    head.append(copy, status)
+    card.append(head)
+
+    if (provider.type === 'quark' && provider.status === 'authorization_required') {
+      const note = document.createElement('p')
+      note.className = 'muted'
+      note.textContent = '夸克官方 OAuth 尚未绑定；完成授权后会自动加入可管理网盘。'
+      card.append(note)
+    }
+    storageList.append(card)
+
+    if (provider.selectable) {
+      appendOption(storageSelect, provider.id, provider.name)
+    }
+  })
+
+  if ([...storageSelect.options].some((option) => option.value === activeStorageId)) {
+    storageSelect.value = activeStorageId
+  } else if (storageSelect.options.length) {
+    activeStorageId = storageSelect.options[0].value
+    storageSelect.value = activeStorageId
+  }
+  storageSelect.disabled = storageSelect.options.length <= 1
+}
+
+async function loadStorageProviders() {
+  const payload = await apiJson('/api/storage-providers')
+  storageProviders = Array.isArray(payload.providers) ? payload.providers : []
+  const current = storageProviders.find((provider) => provider.id === activeStorageId && provider.selectable)
+  if (!current) {
+    const fallback = storageProviders.find((provider) => provider.id === payload.defaultStorageId && provider.selectable)
+      || storageProviders.find((provider) => provider.selectable)
+    if (fallback) activeStorageId = fallback.id
+  }
+  renderStorageProviders()
+}
+
 async function loadConfig() {
   const config = await apiJson('/api/admin-config')
   savedGlobalAccess = config.globalAccess
@@ -285,8 +356,9 @@ async function loadDirectory() {
   renderBreadcrumb()
 
   try {
-    const query = currentFolderId ? `?parentId=${encodeURIComponent(currentFolderId)}` : ''
-    const listing = await apiJson(`/api/pikpak-files${query}`)
+    const params = new URLSearchParams({ storageId: activeStorageId })
+    if (currentFolderId) params.set('parentId', currentFolderId)
+    const listing = await apiJson(`/api/storage-files?${params.toString()}`)
     currentItems = Array.isArray(listing.items) ? listing.items : []
     const folders = currentItems.filter((item) => item.isFolder).length
     const files = currentItems.length - folders
@@ -314,6 +386,7 @@ async function loadDashboard() {
   showNotice('正在读取后台配置和云盘目录…')
   try {
     await loadConfig()
+    await loadStorageProviders()
     await loadDirectory()
     if (storageReady) showNotice('后台已读取最新状态。')
   } catch (error) {
@@ -371,6 +444,15 @@ saveGlobalButton.addEventListener('click', async () => {
     saveGlobalButton.textContent = '保存入口设置'
     saveGlobalButton.disabled = !storageReady || globalAccess.value === savedGlobalAccess
   }
+})
+
+storageSelect.addEventListener('change', () => {
+  activeStorageId = storageSelect.value || 'pikpak-main'
+  currentFolderId = ''
+  currentItems = []
+  folderStack = [{ id: '', name: '根目录' }]
+  searchInput.value = ''
+  loadDirectory()
 })
 
 searchInput.addEventListener('input', renderItems)
