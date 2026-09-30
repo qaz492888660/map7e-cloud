@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import crypto from 'node:crypto'
-import { seal, unseal, metadataId, writeAuth, readAuth, writeConfig, withLock } from '../lib/storage/store.js'
+import { seal, unseal, metadataId, writeAuth, readAuth, readConfig, writeConfig, withLock } from '../lib/storage/store.js'
 import { storageDescriptors, resolveStorage } from '../lib/storage/registry.js'
 import { safeDirectUrl } from '../lib/storage/errors.js'
 import { createPikPakProvider } from '../lib/storage/providers/pikpak.js'
