@@ -8,43 +8,38 @@ jobs:
   inspect:
     runs-on: ubuntu-latest
     steps:
-      - name: Inspect Quark hosted OAuth start
+      - name: Inspect Quark agent environment gate
         shell: bash
         run: |
           set -euo pipefail
-          curl --retry 5 --retry-delay 2 --connect-timeout 15 --max-time 180 -fL             -o runtime.zip "https://pdds.quark.cn/download/stfile/uu66xuuuuuvyuw8wx/quarkclouddrive-1.0.20.zip"
+          curl --retry 5 --retry-all-errors --retry-delay 2 --connect-timeout 15 --max-time 180 -fL             -o runtime.zip "https://pdds.quark.cn/download/stfile/uu66xuuuuuvyuw8wx/quarkclouddrive-1.0.20.zip"
           mkdir runtime
           unzip -q runtime.zip -d runtime
           cli="$(find runtime -type f -name 'quark-drive.cjs' | head -1)"
-          test -n "$cli"
-          cli="$(realpath "$cli")"
-          mkdir -p /tmp/quark-work /tmp/quark-home
-          echo "=== LOGIN OUTPUT (12s CAP) ==="
-          set +e
-          (cd /tmp/quark-work && HOME=/tmp/quark-home timeout 12s node "$cli" login) 2>&1 | tee /tmp/login-output.txt
-          code=${PIPESTATUS[0]}
-          set -e
-          echo "login_exit=$code"
-          echo "=== CONFIG LOCATIONS ==="
-          find /tmp/quark-work /tmp/quark-home -type f -name 'config.json' -print
-          echo "=== REDACTED CONFIG ==="
-          python3 - <<'PY'
-          import json, pathlib
-          roots=[pathlib.Path("/tmp/quark-work"),pathlib.Path("/tmp/quark-home")]
-          def redact(v):
-              if isinstance(v,dict):
-                  out={}
-                  for k,x in v.items():
-                      kl=k.lower()
-                      if "token" in kl or "secret" in kl or "signkey" in kl:
-                          out[k]="[redacted]" if x else x
-                      else: out[k]=redact(x)
-                  return out
-              if isinstance(v,list): return [redact(x) for x in v]
-              return v
-          for root in roots:
-              for p in root.rglob("config.json"):
-                  print("PATH",p)
-                  try: print(json.dumps(redact(json.loads(p.read_text())),ensure_ascii=False,indent=2))
-                  except Exception as e: print("read_error",type(e).__name__)
+          python3 - "$cli" <<'PY'
+          import re,sys,pathlib
+          s=pathlib.Path(sys.argv[1]).read_text(errors="replace")
+          needle="无法识别当前 Agent 环境"
+          i=s.find(needle)
+          print("=== ERROR CONTEXT ===")
+          print(s[max(0,i-7000):min(len(s),i+7000)] if i>=0 else "not found")
+          print("\n=== ENV NAMES ===")
+          names=set()
+          for pat in [r'process\.env\.([A-Za-z_][A-Za-z0-9_]*)',r'process\.env\[["\']([^"\']+)["\']\]']:
+              names.update(re.findall(pat,s))
+          for n in sorted(names):
+              if any(k in n.lower() for k in ["agent","claw","codex","claude","cursor","gemini","open","runtime","skill"]):
+                  print(n)
+          print("\n=== AGENT-LIKE STRING LITERALS ===")
+          vals=set(re.findall(r'["\']([^"\']{2,100})["\']',s))
+          keys=("openclaw","codex","claude","cursor","gemini","windsurf","agent")
+          for v in sorted(vals):
+              lv=v.lower()
+              if any(k in lv for k in keys) and len(v)<100:
+                  print(v)
+          for fn in ["he","Ln","Ls","Da"]:
+              m=re.search(r'function '+fn+r'\([^)]*\)\{',s)
+              print("\n=== FUNCTION",fn,"===")
+              if m: print(s[m.start():m.start()+5000])
+              else: print("not found")
           PY
