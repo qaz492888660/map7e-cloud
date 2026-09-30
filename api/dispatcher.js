@@ -8,6 +8,9 @@ import adminLogout from '../lib/api-handlers/admin-logout.js'
 import adminSession from '../lib/api-handlers/admin-session.js'
 import cloudLogin from '../lib/api-handlers/cloud-login.js'
 import cloudLogout from '../lib/api-handlers/cloud-logout.js'
+import storageDownload from '../lib/api-handlers/storage-download.js'
+import storageFiles from '../lib/api-handlers/storage-files.js'
+import storageProviders from '../lib/api-handlers/storage-providers.js'
 import pikpakAbout from '../lib/api-handlers/pikpak-about.js'
 import pikpakCreateFolder from '../lib/api-handlers/pikpak-create-folder.js'
 import pikpakDownload from '../lib/api-handlers/pikpak-download.js'
@@ -28,6 +31,9 @@ const handlers = new Map([
   ['admin-session', adminSession],
   ['cloud-login', cloudLogin],
   ['cloud-logout', cloudLogout],
+  ['storage-download', storageDownload],
+  ['storage-files', storageFiles],
+  ['storage-providers', storageProviders],
   ['pikpak-about', pikpakAbout],
   ['pikpak-create-folder', pikpakCreateFolder],
   ['pikpak-download', pikpakDownload],
