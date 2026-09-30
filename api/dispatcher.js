@@ -1,5 +1,6 @@
 import adminChangePassword from '../lib/api-handlers/admin-change-password.js'
 import adminConfig from '../lib/api-handlers/admin-config.js'
+import adminFileMetadata from '../lib/api-handlers/admin-file-metadata.js'
 import adminFolderMetadata from '../lib/api-handlers/admin-folder-metadata.js'
 import adminFolders from '../lib/api-handlers/admin-folders.js'
 import adminLogin from '../lib/api-handlers/admin-login.js'
@@ -19,6 +20,7 @@ import pikpakUploadTicket from '../lib/api-handlers/pikpak-upload-ticket.js'
 const handlers = new Map([
   ['admin-change-password', adminChangePassword],
   ['admin-config', adminConfig],
+  ['admin-file-metadata', adminFileMetadata],
   ['admin-folder-metadata', adminFolderMetadata],
   ['admin-folders', adminFolders],
   ['admin-login', adminLogin],
