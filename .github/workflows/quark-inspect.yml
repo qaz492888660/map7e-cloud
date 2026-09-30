@@ -12,12 +12,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          curl -fsSL -o quark.zip "https://github.com/quark-clouddrive/quarkclouddrive_offical/releases/download/quarkclouddrive-v1.0.20/quarkclouddrive-1.0.20.zip"
-          mkdir quark
-          unzip -q quark.zip -d quark
-          cd quark
-          bash install.sh >/tmp/quark-install.log
-          cli="$PWD/scripts/quark-drive.cjs"
+          curl --retry 5 --retry-delay 2 --connect-timeout 15 --max-time 180 -fL             -o runtime.zip "https://pdds.quark.cn/download/stfile/uu66xuuuuuvyuw8wx/quarkclouddrive-1.0.20.zip"
+          mkdir runtime
+          unzip -q runtime.zip -d runtime
+          cli="$(find runtime -type f -name 'quark-drive.cjs' | head -1)"
+          test -n "$cli"
+          cli="$(realpath "$cli")"
           mkdir -p /tmp/quark-work /tmp/quark-home
           echo "=== LOGIN OUTPUT (12s CAP) ==="
           set +e
