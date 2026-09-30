@@ -271,6 +271,7 @@ function storageStatusText(status) {
   if (status === 'connected') return '已连接'
   if (status === 'authorization_required') return '待授权'
   if (status === 'not_configured') return '未配置'
+  if (status === 'integration_pending') return '接入中'
   return '不可用'
 }
 
