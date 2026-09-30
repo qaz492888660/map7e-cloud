@@ -1,0 +1,25 @@
+name: Inspect official Quark CLI
+
+on:
+  push:
+    branches: [chore/inspect-quark-cli]
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download and inspect Quark official CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL -o quark.zip "https://github.com/quark-clouddrive/quarkclouddrive_offical/releases/download/quarkclouddrive-v1.0.20/quarkclouddrive-1.0.20.zip"
+          echo "1b2060c15308cfda0cd79eefc02a3444f5af1daf6a529c2b039c590406cb549a  quark.zip" | sha256sum -c -
+          mkdir quark
+          unzip -q quark.zip -d quark
+          echo "=== FILES ==="
+          find quark -maxdepth 4 -type f | sort
+          echo "=== HELP ==="
+          cli="$(find quark -type f -name 'quark-drive.cjs' | head -1)"
+          node "$cli" --help | head -120
+          echo "=== AUTH/CONFIG REFERENCES ==="
+          grep -RInE "config\.json|access_token|refresh_token|token|open-api-drive\.quark\.cn|oauth|login" quark --include='*.cjs' --include='*.js' | head -220 || true
