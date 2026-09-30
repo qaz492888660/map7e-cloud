@@ -327,3 +327,20 @@ await test('adding a secondary PikPak instance validates its PAT before persiste
   assert.equal((await readAuth('pikpak-good')).accessToken, 'good-token')
   assert.equal((await readConfig()).instances.some(item => item.storageId === 'pikpak-good'), true)
 })
+
+
+await test('storage router preserves non-enumerable request headers for PikPak auth', async () => {
+  await writeConfig({ version: 1, defaultStorageId: 'pikpak-main', instances: [
+    { storageId: 'pikpak-main', provider: 'pikpak', displayName: 'PikPak', enabled: true },
+    { storageId: 'quark-main', provider: 'quark', displayName: '夸克网盘', enabled: true },
+  ] })
+  await setGlobalAccess('locked')
+  upstream = async () => ({ files: [], next_page_token: '' })
+  const adminCookie = `map7e_admin_session=${createAdminSessionToken().token}`
+  const request = { method: 'GET', query: {} }
+  Object.defineProperty(request, 'headers', { value: { cookie: adminCookie }, enumerable: false })
+  const target = res()
+  await storageFiles(request, target)
+  assert.equal(target.statusCode, 200)
+  assert.deepEqual(target.body.items, [])
+})
