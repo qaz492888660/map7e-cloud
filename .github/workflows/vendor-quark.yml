@@ -1,0 +1,41 @@
+name: Vendor official Quark runtime
+
+on:
+  push:
+    branches: [feat/quark-provider]
+
+permissions:
+  contents: write
+
+jobs:
+  vendor:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/quark-provider
+      - name: Download official Quark CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --retry 8 --retry-all-errors --retry-delay 3 --connect-timeout 20 --max-time 300 -fL             -o runtime.zip "https://pdds.quark.cn/download/stfile/uu66xuuuuuvyuw8wx/quarkclouddrive-1.0.20.zip"
+          rm -rf /tmp/quark-runtime
+          mkdir -p /tmp/quark-runtime
+          unzip -q runtime.zip -d /tmp/quark-runtime
+          cli="$(find /tmp/quark-runtime -type f -name 'quark-drive.cjs' | head -1)"
+          test -n "$cli"
+          mkdir -p vendor/quark
+          cp "$cli" vendor/quark/quark-drive.cjs
+          curl --retry 4 --retry-all-errors -fsSL             "https://raw.githubusercontent.com/quark-clouddrive/quarkclouddrive_offical/main/LICENSE"             -o vendor/quark/LICENSE
+          printf '%s\n' 'Quark Cloud Drive official CLI 1.0.20-5be3987' > vendor/quark/VERSION
+      - name: Commit vendored runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add vendor/quark
+          if git diff --cached --quiet; then exit 0; fi
+          git commit -m "Vendor official Quark CLI runtime"
+          git push origin HEAD:feat/quark-provider
