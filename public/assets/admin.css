@@ -101,6 +101,15 @@ option { background: #091723; }
 .primary-button { border: 1px solid rgba(142, 204, 239, .42); background: #255775; color: #f0f9ff; }
 .primary-button:hover { background: #2e698b; }
 .quiet-button { border: 1px solid rgba(208, 228, 245, .15); background: rgba(208, 228, 245, .06); color: #d6e4ee; }
+a.quiet-button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  font-family: inherit;
+  line-height: normal;
+  text-decoration: none;
+}
 .danger-button { border: 1px solid rgba(255, 143, 147, .38); background: #7b3035; color: #fff0f0; }
 .danger-ghost { border: 1px solid rgba(255, 143, 147, .2); background: rgba(144, 50, 57, .12); color: #ffc9c7; }
 button:disabled { cursor: not-allowed; opacity: .42; }
