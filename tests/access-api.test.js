@@ -276,6 +276,24 @@ test('generic storage APIs expose providers and keep PikPak behavior compatible'
   assert.equal(response.body.error, 'storage_authorization_required')
 })
 
+test('admin root-picker directory API is routed, admin-only, and returns one folder level', async () => {
+  process.env.PIKPAK_PAT = 'test-pikpak-token-signing-key'
+  process.env.ADMIN_PASSWORD = 'separate-admin-password'
+  process.env.UPSTASH_REDIS_REST_URL = 'https://redis.test'
+  process.env.UPSTASH_REDIS_REST_TOKEN = 'test-redis-token'
+  resetFixtures()
+  setGlobal('locked')
+
+  let response = await invoke(dispatchHandler, { query: { route: 'admin-storage-files', storageId: 'pikpak-main' } })
+  assert.equal(response.statusCode, 401)
+
+  const adminCookie = `map7e_admin_session=${createAdminSessionToken().token}`
+  response = await invoke(dispatchHandler, { query: { route: 'admin-storage-files', storageId: 'pikpak-main' }, cookie: adminCookie })
+  assert.equal(response.statusCode, 200)
+  assert.equal(response.body.items.some((item) => item.id === 'public-folder'), true)
+  assert.equal(response.body.items.some((item) => item.id === 'public-file'), false, 'the picker does not read child folder contents')
+})
+
 test('direct downloads check the actual parent path and do not disclose a URL when locked', async () => {
   process.env.PIKPAK_PAT = 'test-pikpak-token-signing-key'
   process.env.CLOUD_PASSWORD = 'visitor-password'

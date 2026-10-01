@@ -12,6 +12,7 @@ const createButton = document.querySelector('#create-folder-button')
 const createDialog = document.querySelector('#create-dialog')
 const renameDialog = document.querySelector('#rename-dialog')
 const deleteDialog = document.querySelector('#delete-dialog')
+const rootFolderDialog = document.querySelector('#root-folder-dialog')
 const storageList = document.querySelector('#storage-list')
 const storageSelect = document.querySelector('#storage-select')
 
@@ -24,6 +25,11 @@ let currentItems = []
 let folderStack = [{ id: '', name: '根目录' }]
 let renameItem = null
 let deleteItem = null
+let rootPickerProvider = null
+let rootPickerStack = [{ id: '', name: '网盘根目录' }]
+let rootPickerDirectory = null
+let rootPickerLoadToken = 0
+const rootPickerCache = new Map()
 
 function showNotice(message, kind = 'info') {
   notice.textContent = message
@@ -76,6 +82,133 @@ function appendOption(select, value, label) {
   option.value = value
   option.textContent = label
   select.append(option)
+}
+
+function renderRootPickerBreadcrumb() {
+  const nav = document.querySelector('#root-picker-breadcrumb')
+  nav.replaceChildren()
+  rootPickerStack.forEach((entry, index) => {
+    const button = document.createElement('button')
+    button.type = 'button'
+    button.className = 'crumb-button'
+    button.textContent = entry.name
+    button.disabled = index === rootPickerStack.length - 1
+    button.addEventListener('click', () => {
+      rootPickerStack = rootPickerStack.slice(0, index + 1)
+      loadRootPickerDirectory()
+    })
+    nav.append(button)
+    if (index < rootPickerStack.length - 1) {
+      const divider = document.createElement('span')
+      divider.className = 'crumb-divider'
+      divider.textContent = '›'
+      nav.append(divider)
+    }
+  })
+}
+
+function renderRootPickerItems() {
+  const list = document.querySelector('#root-picker-list')
+  list.replaceChildren()
+  const folders = rootPickerDirectory?.items?.filter((item) => item.isFolder) || []
+  if (!folders.length) {
+    const empty = document.createElement('div')
+    empty.className = 'empty'
+    empty.textContent = rootPickerDirectory?.nextPageToken ? '这一页没有文件夹，可继续加载。' : '当前目录没有子文件夹。'
+    list.append(empty)
+  }
+  for (const item of folders) {
+    const row = document.createElement('article')
+    row.className = 'item-card'
+    const name = document.createElement('button')
+    name.type = 'button'
+    name.className = 'item-title item-open'
+    name.textContent = item.name || '未命名文件夹'
+    name.addEventListener('click', () => {
+      rootPickerStack = [...rootPickerStack, { id: item.id, name: item.name || '未命名文件夹' }]
+      loadRootPickerDirectory()
+    })
+    const enter = document.createElement('button')
+    enter.type = 'button'
+    enter.className = 'quiet-button'
+    enter.textContent = '进入'
+    enter.addEventListener('click', () => name.click())
+    row.append(name, enter)
+    list.append(row)
+  }
+  if (rootPickerDirectory?.nextPageToken) {
+    const more = document.createElement('button')
+    more.type = 'button'
+    more.className = 'quiet-button'
+    more.textContent = '加载更多文件夹'
+    more.addEventListener('click', () => loadRootPickerDirectory({ append: true }))
+    list.append(more)
+  }
+}
+
+async function loadRootPickerDirectory({ append = false } = {}) {
+  if (!rootPickerProvider) return
+  const token = ++rootPickerLoadToken
+  const current = rootPickerStack.at(-1)
+  const cacheKey = `${rootPickerProvider.id}\u0000${current.id}`
+  const cached = rootPickerCache.get(cacheKey)
+  if (!append && cached) {
+    rootPickerDirectory = cached
+    document.querySelector('#root-picker-message').textContent = ''
+    renderRootPickerBreadcrumb()
+    renderRootPickerItems()
+    return
+  }
+  const message = document.querySelector('#root-picker-message')
+  message.textContent = '正在读取当前目录…'
+  renderRootPickerBreadcrumb()
+  if (append && cached?.nextRequestDelayMs > 0) {
+    message.textContent = `夸克请求间隔中，等待 ${cached.nextRequestDelayMs} 毫秒…`
+    await new Promise((resolve) => window.setTimeout(resolve, cached.nextRequestDelayMs))
+    if (token !== rootPickerLoadToken) return
+  }
+  const params = new URLSearchParams({ storageId: rootPickerProvider.id })
+  if (current.id) params.set('parentId', current.id)
+  if (append && cached?.nextPageToken) params.set('pageToken', cached.nextPageToken)
+  try {
+    const payload = await apiJson(`/api/admin-storage-files?${params.toString()}`)
+    if (token !== rootPickerLoadToken) return
+    const prior = append && cached ? cached.items : []
+    rootPickerDirectory = {
+      items: [...prior, ...(Array.isArray(payload.items) ? payload.items : [])],
+      nextPageToken: payload.nextPageToken || '',
+      nextRequestDelayMs: Number(payload.nextRequestDelayMs || 0),
+    }
+    rootPickerCache.set(cacheKey, rootPickerDirectory)
+    message.textContent = ''
+    renderRootPickerItems()
+  } catch (error) {
+    if (token !== rootPickerLoadToken) return
+    message.textContent = error.message
+    rootPickerDirectory = null
+    renderRootPickerItems()
+  }
+}
+
+async function saveWebsiteRoot(rootFolderId) {
+  if (!rootPickerProvider) return
+  const button = document.querySelector('#root-picker-select')
+  button.disabled = true
+  try {
+    await apiJson('/api/admin-storages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'set-root-folder', storageId: rootPickerProvider.id, rootFolderId }),
+    })
+    rootPickerDialog.close()
+    rootPickerCache.clear()
+    await loadStorageProviders()
+    showNotice(rootFolderId ? '网站根目录已更新。' : '网站根目录已设为整个网盘。', 'success')
+  } catch (error) {
+    document.querySelector('#root-picker-message').textContent = error.message
+  } finally {
+    button.disabled = false
+  }
 }
 
 function setBusy(button, busy, busyText, normalText) {
@@ -312,6 +445,24 @@ function renderStorageProviders() {
     const hasQuota = provider.quota && Number.isFinite(provider.quota.used) && Number.isFinite(provider.quota.total)
     detail.textContent = [provider.accountInfo?.nickname, member, hasQuota ? `已用 ${formatBytes(provider.quota.used)} / ${formatBytes(provider.quota.total)}` : '容量尚不可用', provider.authStatus === 'valid' ? '认证有效' : '等待认证检查'].filter(Boolean).join(' · ')
     card.append(detail)
+    const rootSetting = document.createElement('div')
+    rootSetting.className = 'storage-root-setting'
+    const rootLabel = document.createElement('p')
+    rootLabel.className = 'muted'
+    rootLabel.textContent = `网站根目录：${provider.rootFolderId ? (provider.rootFolderName || '已指定文件夹') : '整个网盘'}`
+    const chooseRoot = document.createElement('button')
+    chooseRoot.type = 'button'
+    chooseRoot.className = 'quiet-button'
+    chooseRoot.textContent = '选择根目录'
+    chooseRoot.addEventListener('click', () => {
+      rootPickerProvider = provider
+      rootPickerStack = [{ id: '', name: '网盘根目录' }]
+      rootPickerDirectory = null
+      rootFolderDialog.showModal()
+      loadRootPickerDirectory()
+    })
+    rootSetting.append(rootLabel, chooseRoot)
+    card.append(rootSetting)
     if (provider.selectable) {
       const enter = document.createElement('a'); enter.className = 'quiet-button'; enter.textContent = '进入网盘'; enter.href = '/?storageId=' + encodeURIComponent(provider.id); card.append(enter)
       const primary = document.createElement('button'); primary.type = 'button'; primary.className = 'quiet-button'; primary.textContent = provider.default ? '当前默认盘' : '设为默认盘'; primary.disabled = provider.default
@@ -512,6 +663,13 @@ createButton.addEventListener('click', () => {
 document.querySelectorAll('[data-close-dialog]').forEach((button) => {
   button.addEventListener('click', () => button.closest('dialog').close())
 })
+
+document.querySelector('#root-picker-close').addEventListener('click', () => rootFolderDialog.close())
+document.querySelector('#root-picker-select').addEventListener('click', () => {
+  const current = rootPickerStack.at(-1)
+  saveWebsiteRoot(current.id || null)
+})
+document.querySelector('#root-picker-whole-drive').addEventListener('click', () => saveWebsiteRoot(null))
 
 document.querySelector('#create-folder-form').addEventListener('submit', async (event) => {
   event.preventDefault()

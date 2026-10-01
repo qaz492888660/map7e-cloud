@@ -12,6 +12,7 @@ const directoryMetadata = ref({})
 const manifestUpdatedAt = ref('')
 const storageProviders = ref([])
 const activeStorageId = ref('pikpak-main')
+const backgroundVideoLoaded = ref(false)
 const activeCapabilities = computed(() => storageProviders.value.find(p => p.id === activeStorageId.value)?.capabilities || {})
 const activeStorageName = computed(() => storageProviders.value.find((provider) => provider.id === activeStorageId.value)?.name || '网盘')
 const loadingLibrary = ref(true)
@@ -49,6 +50,9 @@ const newFolderAccess = ref('inherit')
 const fileNameInput = ref(null)
 let touchOrigin = null
 let pendingDeepLinkFolderId = ''
+const directoryCache = new Map()
+let storageLoadGeneration = 0
+let rootStorageResolvedGeneration = -1
 
 const activeFolder = computed(() => folderMap.value[activeFileFolder.value] || null)
 const allFiles = computed(() => {
@@ -79,7 +83,9 @@ const fileFolders = computed(() => {
   return rootFolders.value.map((folder) => ({
     ...folder,
     files: folderMap.value[folder.slug]?.files || [],
-    fileCount: (folderMap.value[folder.slug]?.files || []).filter((file) => !file.isFolder).length,
+    fileCount: folderMap.value[folder.slug]
+      ? (folderMap.value[folder.slug]?.files || []).filter((file) => !file.isFolder).length
+      : null,
   }))
 })
 const rootLooseFiles = computed(() => rootFiles.value.filter((item) => !item.isFolder))
@@ -155,7 +161,7 @@ function formatDate(value) {
   return /^\d{4}-\d{2}-\d{2}/.test(text) ? text.slice(0, 10) : ''
 }
 
-function normalizePikPakItem(file) {
+function normalizePikPakItem(file, storageId = activeStorageId.value) {
   const isFolder = Boolean(file?.isFolder)
   const extension = String(file?.extension || extensionOf(file?.name))
   const sizeBytes = file?.size === null || file?.size === undefined || file?.size === '' ? null : Number(file.size)
@@ -163,7 +169,7 @@ function normalizePikPakItem(file) {
     id: String(file?.id || ''),
     parentId: String(file?.parentId || ''),
     name: String(file?.name || '未命名文件'),
-    path: isFolder ? '' : '/api/storage-download?storageId=' + encodeURIComponent(activeStorageId.value) + '&id=' + encodeURIComponent(String(file?.id || '')) + '&parentId=' + encodeURIComponent(String(file?.parentId || '')),
+    path: isFolder ? '' : '/api/storage-download?storageId=' + encodeURIComponent(storageId) + '&id=' + encodeURIComponent(String(file?.id || '')) + '&parentId=' + encodeURIComponent(String(file?.parentId || '')),
     size: isFolder ? '' : (sizeBytes !== null && Number.isFinite(sizeBytes) && sizeBytes >= 0 ? formatBytes(sizeBytes) : ''),
     sizeBytes: !isFolder && sizeBytes !== null && Number.isFinite(sizeBytes) && sizeBytes >= 0 ? sizeBytes : null,
     rawSize: sizeBytes !== null && Number.isFinite(sizeBytes) && sizeBytes >= 0 ? sizeBytes : null,
@@ -251,82 +257,167 @@ async function apiJson(url, options = {}) {
   return payload
 }
 
-async function listPikPakItems(parentId = '') {
-  const storageId = activeStorageId.value
-  const items = []
-  let pageToken = ''
-  const seenTokens = new Set()
-  do {
-    const params = new URLSearchParams()
-    params.set('storageId', storageId)
-    if (parentId) params.set('parentId', parentId)
-    if (pageToken) params.set('pageToken', pageToken)
-    const payload = await apiJson('/api/storage-files?' + params.toString())
-    const nextRequestDelayMs = Number(payload?.nextRequestDelayMs || 0)
-    if (!Number.isFinite(nextRequestDelayMs) || nextRequestDelayMs < 0) throw new Error('网盘分页节流参数无效。')
-    if (storageId !== activeStorageId.value) throw new Error('网盘已切换，请重新读取目录。')
-    if (payload?.folder) {
-      directoryMetadata.value = { ...directoryMetadata.value, [parentId]: payload.folder }
-    }
-    items.push(...(Array.isArray(payload?.items) ? payload.items : []).map(normalizePikPakItem))
-    manifestUpdatedAt.value = formatDate(payload?.syncTime) || manifestUpdatedAt.value
-    pageToken = String(payload?.nextPageToken || '')
-    if (pageToken && seenTokens.has(pageToken)) break
-    if (pageToken) seenTokens.add(pageToken)
-    if (pageToken && nextRequestDelayMs > 0) {
-      if (nextRequestDelayMs > 1000) { const error = new Error('当前网盘请求频率受限，请稍后重试。'); error.code = 'quark_rate_limited'; throw error }
-      await new Promise((resolve) => setTimeout(resolve, nextRequestDelayMs))
-    }
-  } while (pageToken && seenTokens.size < 200)
-  return items
+function directoryKey(storageId, parentId) { return `${storageId}\u0000${parentId}` }
+
+function directoryIsCurrent(storageId, generation) {
+  return generation === storageLoadGeneration && storageId === activeStorageId.value
 }
 
-async function loadFolder(id, name = '', writable, parentId, metadata = {}) {
-  const files = await listPikPakItems(id)
+function presentDirectory(parentId, entry) {
+  if (!parentId) {
+    const previousFolders = rootFolders.value
+    rootFiles.value = entry.items.filter((item) => !item.isFolder)
+    const nextFolders = entry.items.filter((item) => item.isFolder).map(normalizeRootFolder)
+    const validIds = new Set(nextFolders.map((folder) => folder.slug))
+    rootFolders.value = nextFolders
+    if (entry.complete) {
+      for (const folder of previousFolders) {
+        if (!validIds.has(folder.slug)) clearCachedFolderTree(folder.slug)
+      }
+    }
+  } else {
+    const known = folderMap.value[parentId]
+    const root = rootFolders.value.find((folder) => folder.slug === parentId)
+    const actual = directoryMetadata.value[parentId] || {}
+    folderMap.value = {
+      ...folderMap.value,
+      [parentId]: {
+        ...(known || {}),
+        id: parentId,
+        slug: parentId,
+        name: known?.name || root?.name || actual.name || '文件夹',
+        description: activeStorageName.value + ' 实时目录',
+        updatedAt: known?.updatedAt || root?.updatedLabel || '',
+        parentId: known?.parentId ?? root?.parentId ?? actual.parentId ?? '',
+        writable: known?.writable ?? root?.writable ?? actual.writable ?? true,
+        folderType: known?.folderType ?? actual.type ?? root?.folderType ?? 'folder',
+        access: known?.access ?? actual.access ?? root?.access ?? 'inherit',
+        effectiveAccess: known?.effectiveAccess ?? actual.effectiveAccess ?? root?.effectiveAccess ?? 'public',
+        files: entry.items,
+      },
+    }
+  }
+}
+
+async function requestDirectoryPage(parentId, pageToken, requestedStorageId, generation) {
+  const params = new URLSearchParams()
+  if (requestedStorageId) params.set('storageId', requestedStorageId)
+  if (parentId) params.set('parentId', parentId)
+  if (pageToken) params.set('pageToken', pageToken)
+  const payload = await apiJson('/api/storage-files?' + params.toString())
+  const storageId = String(payload?.storageId || requestedStorageId || activeStorageId.value)
+  if (generation !== storageLoadGeneration || (requestedStorageId && storageId !== requestedStorageId)) return null
+  if (!parentId && !requestedStorageId) rootStorageResolvedGeneration = generation
+  if (!requestedStorageId && storageId !== activeStorageId.value) activeStorageId.value = storageId
+  if (!directoryIsCurrent(storageId, generation)) return null
+  const nextRequestDelayMs = Number(payload?.nextRequestDelayMs || 0)
+  if (!Number.isFinite(nextRequestDelayMs) || nextRequestDelayMs < 0) throw new Error('网盘分页节流参数无效。')
+  if (payload?.folder) directoryMetadata.value = { ...directoryMetadata.value, [parentId]: payload.folder }
+  manifestUpdatedAt.value = formatDate(payload?.syncTime) || manifestUpdatedAt.value
+  return {
+    storageId,
+    items: (Array.isArray(payload?.items) ? payload.items : []).map((item) => normalizePikPakItem(item, storageId)),
+    nextPageToken: String(payload?.nextPageToken || ''),
+    nextRequestDelayMs,
+  }
+}
+
+async function appendDirectoryPages(parentId, entry, generation) {
+  if (entry.loadingPages || entry.complete) return
+  entry.loadingPages = true
+  try {
+    while (entry.nextPageToken && entry.seenTokens.size < 200 && !entry.cancelled && directoryIsCurrent(entry.storageId, generation)) {
+      const pageToken = entry.nextPageToken
+      if (entry.seenTokens.has(pageToken)) { entry.nextPageToken = ''; break }
+      entry.seenTokens.add(pageToken)
+      if (entry.nextRequestDelayMs > 0) await new Promise((resolve) => setTimeout(resolve, entry.nextRequestDelayMs))
+      if (!directoryIsCurrent(entry.storageId, generation)) return
+      const page = await requestDirectoryPage(parentId, pageToken, entry.storageId, generation)
+      if (!page || entry.cancelled) return
+      entry.items.push(...page.items)
+      entry.nextPageToken = page.nextPageToken
+      entry.nextRequestDelayMs = page.nextRequestDelayMs
+      if (entry.nextPageToken && entry.seenTokens.has(entry.nextPageToken)) { entry.nextPageToken = ''; break }
+      presentDirectory(parentId, entry)
+    }
+    entry.complete = !entry.nextPageToken || entry.seenTokens.size >= 200
+    if (!parentId && entry.complete && directoryIsCurrent(entry.storageId, generation)) presentDirectory(parentId, entry)
+  } catch (error) {
+    if (directoryIsCurrent(entry.storageId, generation)) errorMessage.value = error instanceof Error ? error.message : '目录后续分页读取失败。'
+  } finally {
+    entry.loadingPages = false
+  }
+}
+
+async function loadDirectory(parentId = '', { force = false, requestedStorageId = activeStorageId.value, generation = storageLoadGeneration } = {}) {
+  let entry = requestedStorageId ? directoryCache.get(directoryKey(requestedStorageId, parentId)) : null
+  if (entry && !force) {
+    if (!directoryIsCurrent(requestedStorageId, generation)) return null
+    presentDirectory(parentId, entry)
+    void appendDirectoryPages(parentId, entry, generation)
+    return entry
+  }
+  if (entry && force) { entry.cancelled = true; directoryCache.delete(directoryKey(requestedStorageId, parentId)) }
+  const page = await requestDirectoryPage(parentId, '', requestedStorageId, generation)
+  if (!page || !directoryIsCurrent(page.storageId, generation)) return null
+  entry = {
+    storageId: page.storageId,
+    items: page.items,
+    nextPageToken: page.nextPageToken,
+    nextRequestDelayMs: page.nextRequestDelayMs,
+    seenTokens: new Set(),
+    loadingPages: false,
+    complete: !page.nextPageToken,
+  }
+  directoryCache.set(directoryKey(entry.storageId, parentId), entry)
+  presentDirectory(parentId, entry)
+  void appendDirectoryPages(parentId, entry, generation)
+  return entry
+}
+
+async function loadFolder(id, name = '', writable, parentId, metadata = {}, { force = false, generation = storageLoadGeneration } = {}) {
+  const entry = await loadDirectory(id, { force, requestedStorageId: activeStorageId.value, generation })
+  if (!entry) return null
   const known = folderMap.value[id]
   const root = rootFolders.value.find((folder) => folder.slug === id)
   const actual = directoryMetadata.value[id] || {}
   folderMap.value = {
     ...folderMap.value,
     [id]: {
+      ...(known || {}),
       id,
       slug: id,
       name: name || known?.name || root?.name || actual.name || '文件夹',
       description: activeStorageName.value + ' 实时目录',
-      updatedAt: root?.updatedLabel || '',
+      updatedAt: root?.updatedLabel || known?.updatedAt || '',
       parentId: parentId ?? metadata.parentId ?? root?.parentId ?? known?.parentId ?? actual.parentId ?? '',
       writable: writable ?? metadata.writable ?? root?.writable ?? known?.writable ?? actual.writable ?? true,
       folderType: metadata.folderType ?? actual.type ?? known?.folderType ?? root?.folderType ?? 'folder',
       access: metadata.access ?? actual.access ?? known?.access ?? root?.access ?? 'inherit',
-      effectiveAccess: metadata.effectiveAccess ?? actual.effectiveAccess ?? known?.effectiveAccess ?? root?.effectiveAccess ?? 'public',
-      files,
+      effectiveAccess: metadata.effectiveAccess ?? actual.effectiveAccess ?? root?.effectiveAccess ?? known?.effectiveAccess ?? 'public',
+      files: entry.items,
     },
   }
   return folderMap.value[id]
 }
 
-async function readLibraryDirectory(strictFolderReads = false) {
-  const items = await listPikPakItems()
-  rootFiles.value = items.filter((item) => !item.isFolder)
-  rootFolders.value = items.filter((item) => item.isFolder).map(normalizeRootFolder)
-  folderMap.value = {}
-  await Promise.all(rootFolders.value.map(async (folder) => {
-    try {
-      await loadFolder(folder.slug, folder.name, folder.writable, '')
-    } catch (error) {
-      if (strictFolderReads) throw error
-    }
-  }))
-  return items
+async function readLibraryDirectory({ force = false, requestedStorageId = activeStorageId.value, generation = storageLoadGeneration } = {}) {
+  const entry = await loadDirectory('', { force, requestedStorageId, generation })
+  return entry?.items || []
 }
 
-async function loadStorageProviders() {
+async function loadStorageProviders(generation = storageLoadGeneration) {
   const payload = await apiJson('/api/storage-providers')
+  if (generation !== storageLoadGeneration) return
   storageProviders.value = Array.isArray(payload?.providers) ? payload.providers : []
-  const preferred = new URLSearchParams(location.search).get('storageId') || payload.defaultStorageId
+  const urlStorageId = new URLSearchParams(location.search).get('storageId')
+  const preferred = urlStorageId || payload.defaultStorageId
   const current = storageProviders.value.find((provider) => provider.id === preferred && provider.selectable)
-  if (current) activeStorageId.value = current.id
-  if (!current) {
+  if (urlStorageId) {
+    if (current) activeStorageId.value = current.id
+  } else if (rootStorageResolvedGeneration !== generation && current) {
+    activeStorageId.value = current.id
+  } else if (!urlStorageId && rootStorageResolvedGeneration !== generation) {
     const fallback = storageProviders.value.find((provider) => provider.id === payload?.defaultStorageId && provider.selectable)
       || storageProviders.value.find((provider) => provider.selectable)
     if (fallback) activeStorageId.value = fallback.id
@@ -335,31 +426,37 @@ async function loadStorageProviders() {
 
 async function switchStorage(event) {
   if (loadingLibrary.value || uploading.value || managementBusy.value) return
+  storageLoadGeneration += 1
   activeStorageId.value = event.target.value
   rootFolders.value = []; rootFiles.value = []; folderMap.value = {}; directoryMetadata.value = {}; manifestUpdatedAt.value = ''
   closePhotoViewer(); closePreview(); selectedAction.value = null; managementDialog.value = ''; goHome()
   const url = new URL(location.href); url.searchParams.set('storageId', activeStorageId.value); url.searchParams.delete('folderId'); history.replaceState(null, '', url)
-  await loadLibrary()
+  await loadLibrary({ requestedStorageId: activeStorageId.value, generation: storageLoadGeneration })
 }
 
-async function loadLibrary() {
+async function loadLibrary({ requestedStorageId = activeStorageId.value, generation = storageLoadGeneration } = {}) {
+  if (generation !== storageLoadGeneration) return
   loadingLibrary.value = true
   errorMessage.value = ''
   uploadStatus.value = ''
   try {
-    await readLibraryDirectory()
-    authRequired.value = false
+    await readLibraryDirectory({ requestedStorageId, generation })
+    if (generation === storageLoadGeneration) authRequired.value = false
+    return generation === storageLoadGeneration
   } catch (error) {
-    rootFiles.value = []
-    rootFolders.value = []
-    folderMap.value = {}
-    if (error?.code === 'authentication_required') {
-      authRequired.value = true
-    } else {
-      errorMessage.value = error instanceof Error ? error.message : '无法读取当前网盘。'
+    if (generation === storageLoadGeneration) {
+      rootFiles.value = []
+      rootFolders.value = []
+      folderMap.value = {}
+      if (error?.code === 'authentication_required') {
+        authRequired.value = true
+      } else {
+        errorMessage.value = error instanceof Error ? error.message : '无法读取当前网盘。'
+      }
     }
+    return false
   } finally {
-    loadingLibrary.value = false
+    if (generation === storageLoadGeneration) loadingLibrary.value = false
   }
 }
 
@@ -367,7 +464,7 @@ async function refreshDirectory(parentId = '') {
   if (!parentId) {
     loadingLibrary.value = true
     try {
-      const items = await readLibraryDirectory(true)
+      const items = await readLibraryDirectory({ force: true })
       authRequired.value = false
       return items
     } finally {
@@ -376,7 +473,7 @@ async function refreshDirectory(parentId = '') {
   }
 
   const known = folderMap.value[parentId] || rootFolders.value.find((folder) => folder.slug === parentId)
-  const folder = await loadFolder(parentId, known?.name || '', known?.writable, known?.parentId)
+  const folder = await loadFolder(parentId, known?.name || '', known?.writable, known?.parentId, known || {}, { force: true })
   return folder.files
 }
 
@@ -403,10 +500,12 @@ function openFiles() {
 
 async function openFileFolder(folder) {
   if (!folder?.slug) return
+  const generation = storageLoadGeneration
   loadingLibrary.value = true
   errorMessage.value = ''
   try {
-    const data = await loadFolder(folder.slug, folder.name, folder.writable, folder.parentId, folder)
+    const data = await loadFolder(folder.slug, folder.name, folder.writable, folder.parentId, folder, { generation })
+    if (!data || generation !== storageLoadGeneration) return false
     const actualDate = formatDate(folder.updatedAt || folder.date)
     if (actualDate && !data.updatedAt) {
       folderMap.value = { ...folderMap.value, [folder.slug]: { ...data, updatedAt: actualDate } }
@@ -423,11 +522,12 @@ async function openFileFolder(folder) {
     }
     return true
   } catch (error) {
+    if (generation !== storageLoadGeneration) return false
     if (error?.code === 'authentication_required') authRequired.value = true
     else errorMessage.value = error instanceof Error ? error.message : '无法打开此文件夹。'
     return false
   } finally {
-    loadingLibrary.value = false
+    if (generation === storageLoadGeneration) loadingLibrary.value = false
   }
 }
 
@@ -488,7 +588,8 @@ async function calcGcid(file) {
 async function waitForUploadedFile(parentId, fileId, fileName) {
   for (let attempt = 0; attempt < 15; attempt += 1) {
     await new Promise((resolve) => setTimeout(resolve, 2000))
-    const items = await listPikPakItems(parentId)
+    const entry = await loadDirectory(parentId, { force: true })
+    const items = entry?.items || []
     const hit = items.find((item) => item.id === fileId || item.name === fileName)
     if (hit) return hit
   }
@@ -661,6 +762,10 @@ function clearCachedFolderTree(folderId) {
   const next = { ...folderMap.value }
   for (const id of removed) delete next[id]
   folderMap.value = next
+  for (const [key, entry] of directoryCache) {
+    const parentId = key.split('\u0000')[1]
+    if (removed.has(parentId)) directoryCache.delete(key)
+  }
 }
 
 function managementNameIsValid(value) {
@@ -964,22 +1069,43 @@ watch(modalOpen, (open) => {
   if (typeof document !== 'undefined') document.body.classList.toggle('modal-open', open)
 })
 
+function scheduleBackgroundVideo() {
+  const activate = () => {
+    backgroundVideoLoaded.value = true
+    window.setTimeout(() => {
+      const background = document.querySelector('.background-video')
+      if (!(background instanceof HTMLVideoElement)) return
+      background.muted = true
+      background.load()
+      const playAttempt = background.play()
+      if (playAttempt && typeof playAttempt.catch === 'function') playAttempt.catch(() => {})
+    }, 0)
+  }
+  if (typeof window.requestIdleCallback === 'function') window.requestIdleCallback(activate, { timeout: 1800 })
+  else window.setTimeout(activate, 1200)
+}
+
 onMounted(async () => {
   window.addEventListener('keydown', handleKeydown)
-  const background = document.querySelector('.background-video')
-  if (background instanceof HTMLVideoElement) {
-    background.muted = true
-    const playAttempt = background.play()
-    if (playAttempt && typeof playAttempt.catch === 'function') playAttempt.catch(() => {})
+  const generation = storageLoadGeneration
+  const query = new URLSearchParams(window.location.search)
+  const requestedStorageId = query.get('storageId') || null
+  if (requestedStorageId) activeStorageId.value = requestedStorageId
+  const providersTask = loadStorageProviders(generation).catch((error) => {
+    if (generation === storageLoadGeneration) errorMessage.value = error.message
+  })
+  const initialStorageId = activeStorageId.value
+  const rootTask = loadLibrary({ requestedStorageId, generation })
+  const rootLoaded = await rootTask
+  scheduleBackgroundVideo()
+  await providersTask
+  if (!requestedStorageId && !rootLoaded && activeStorageId.value !== initialStorageId) {
+    await loadLibrary({ requestedStorageId: activeStorageId.value, generation })
   }
-  try { await loadStorageProviders() } catch (error) { errorMessage.value = error.message; return }
-  const folderId = new URLSearchParams(window.location.search).get('folderId') || ''
+  const folderId = query.get('folderId') || ''
   if (folderId) {
     pendingDeepLinkFolderId = folderId
-    await loadLibrary()
     if (await openFileFolder({ slug: folderId })) pendingDeepLinkFolderId = ''
-  } else {
-    loadLibrary()
   }
 })
 
@@ -994,17 +1120,17 @@ onBeforeUnmount(() => {
     <div class="wallpaper" aria-hidden="true">
       <video
         class="background-video"
-        autoplay
         muted
         loop
         playsinline
         webkit-playsinline
-        preload="metadata"
+        preload="none"
+        poster="/assets/ocean-background.svg"
         tabindex="-1"
         aria-hidden="true"
       >
-        <source src="/assets/underwater-h264.mp4" type='video/mp4; codecs="avc1.640028"' />
-        <source :src="BLOG_VIDEO_URL" type='video/mp4; codecs="hvc1.1.6.L120.B0"' />
+        <source :src="backgroundVideoLoaded ? '/assets/underwater-h264.mp4' : undefined" type='video/mp4; codecs="avc1.640028"' />
+        <source :src="backgroundVideoLoaded ? BLOG_VIDEO_URL : undefined" type='video/mp4; codecs="hvc1.1.6.L120.B0"' />
       </video>
       <div class="wallpaper-shade" />
     </div>
@@ -1219,7 +1345,7 @@ onBeforeUnmount(() => {
                   </span>
                   <span class="row-copy">
                     <span class="row-title">{{ folder.name }}</span>
-                    <span class="row-meta">{{ folder.folderType === 'album' ? '相册' : '文件夹' }} · {{ folder.fileCount }} 个文件<span v-if="folder.effectiveAccess === 'locked'"> · 上锁</span><span v-if="dateLabel(folder.updatedAt)"> · {{ folder.updatedAt }}</span></span>
+                    <span class="row-meta">{{ folder.folderType === 'album' ? '相册' : '文件夹' }} · <span v-if="folder.fileCount !== null">{{ folder.fileCount }} 个文件</span><span v-else>点击后读取内容</span><span v-if="folder.effectiveAccess === 'locked'"> · 上锁</span><span v-if="dateLabel(folder.updatedAt)"> · {{ folder.updatedAt }}</span></span>
                   </span>
                   <svg class="row-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6" /></svg>
                 </button>

@@ -1,4 +1,5 @@
 import adminStorages from '../lib/api-handlers/admin-storages.js'
+import adminStorageFiles from '../lib/api-handlers/admin-storage-files.js'
 import quarkOAuth from '../lib/api-handlers/quark-oauth.js'
 import { storageWrite } from '../lib/api-handlers/storage-write.js'
 import adminChangePassword from '../lib/api-handlers/admin-change-password.js'
@@ -15,16 +16,11 @@ import storageDownload from '../lib/api-handlers/storage-download.js'
 import storageFiles from '../lib/api-handlers/storage-files.js'
 import storageProviders from '../lib/api-handlers/storage-providers.js'
 import pikpakAbout from '../lib/api-handlers/pikpak-about.js'
-import pikpakCreateFolder from '../lib/api-handlers/pikpak-create-folder.js'
-import pikpakDownload from '../lib/api-handlers/pikpak-download.js'
-import pikpakFiles from '../lib/api-handlers/pikpak-files.js'
-import pikpakRename from '../lib/api-handlers/pikpak-rename.js'
 import pikpakTest from '../lib/api-handlers/pikpak-test.js'
-import pikpakTrash from '../lib/api-handlers/pikpak-trash.js'
-import pikpakUploadTicket from '../lib/api-handlers/pikpak-upload-ticket.js'
 
 const handlers = new Map([
   ['admin-storages', adminStorages],
+  ['admin-storage-files', adminStorageFiles],
   ['quark-oauth', quarkOAuth],
   ['storage-create-folder', storageWrite('createFolder')],
   ['storage-rename', storageWrite('rename')],
@@ -44,14 +40,22 @@ const handlers = new Map([
   ['storage-files', storageFiles],
   ['storage-providers', storageProviders],
   ['pikpak-about', pikpakAbout],
-  ['pikpak-create-folder', pikpakCreateFolder],
-  ['pikpak-download', pikpakDownload],
-  ['pikpak-files', pikpakFiles],
-  ['pikpak-rename', pikpakRename],
+  ['pikpak-create-folder', legacyPikPak(storageWrite('createFolder'))],
+  ['pikpak-download', legacyPikPak(storageDownload)],
+  ['pikpak-files', legacyPikPak(storageFiles)],
+  ['pikpak-rename', legacyPikPak(storageWrite('rename'))],
   ['pikpak-test', pikpakTest],
-  ['pikpak-trash', pikpakTrash],
-  ['pikpak-upload-ticket', pikpakUploadTicket],
+  ['pikpak-trash', legacyPikPak(storageWrite('trash'))],
+  ['pikpak-upload-ticket', legacyPikPak(storageWrite('upload'))],
 ])
+
+function legacyPikPak(handler) {
+  return (req, res) => {
+    req.query = { ...(req.query || {}), storageId: 'pikpak-main' }
+    if (req.body && typeof req.body === 'object') req.body = { ...req.body, storageId: 'pikpak-main' }
+    return handler(req, res)
+  }
+}
 
 export default async function handler(req, res) {
   const route = req.query?.route

@@ -191,6 +191,24 @@
       </form>
     </dialog>
 
+    <dialog id="root-folder-dialog" class="admin-dialog">
+      <section class="dialog-card">
+        <div>
+          <p class="eyebrow">WEBSITE ROOT</p>
+          <h2>选择网站根目录</h2>
+          <p class="muted">网站中的 / 将映射到所选目录。这里只按需读取当前层。</p>
+        </div>
+        <nav id="root-picker-breadcrumb" class="breadcrumb" aria-label="根目录选择路径"></nav>
+        <div id="root-picker-list" class="item-list"></div>
+        <p id="root-picker-message" class="muted" role="status"></p>
+        <div class="dialog-actions">
+          <button id="root-picker-whole-drive" class="quiet-button" type="button">整个网盘</button>
+          <button id="root-picker-close" class="quiet-button" type="button">取消</button>
+          <button id="root-picker-select" class="primary-button" type="button">将当前目录设为网站根目录</button>
+        </div>
+      </section>
+    </dialog>
+
     <script type="module" src="/assets/admin.js"></script>
   </body>
 </html>
