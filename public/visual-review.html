@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="robots" content="noindex, nofollow" />
+    <title>Map7e Cloud · 临时响应式验收</title>
+    <style>
+      html, body { width: 100%; min-height: 100%; margin: 0; background: #041521; }
+      body { overflow: auto; }
+      iframe { display: block; height: 844px; margin: 0; border: 0; background: #041521; }
+      #review-state { position: fixed; right: 8px; bottom: 8px; z-index: 2; padding: 4px 8px; border-radius: 8px; background: rgba(1, 15, 25, .8); color: #bdeefa; font: 11px sans-serif; }
+    </style>
+  </head>
+  <body>
+    <iframe id="cloud-preview" title="Map7e Cloud 响应式预览"></iframe>
+    <output id="review-state">正在准备临时视觉数据…</output>
+    <script>
+      const params = new URLSearchParams(location.search)
+      const width = Math.max(320, Math.min(1920, Number(params.get('width')) || 390))
+      const height = Math.max(640, Math.min(1200, Number(params.get('height')) || (width <= 430 ? 844 : 1000)))
+      const frame = document.getElementById('cloud-preview')
+      const state = document.getElementById('review-state')
+      frame.style.width = `${width}px`
+      frame.style.height = `${height}px`
+      state.textContent = `临时验收视口 ${width} × ${height}`
+      navigator.serviceWorker.register('/visual-review-sw.js', { scope: '/' })
+        .then(async () => {
+          await navigator.serviceWorker.ready
+          if (!navigator.serviceWorker.controller) {
+            await new Promise((resolve, reject) => {
+              const timeout = setTimeout(() => reject(new Error('临时视觉数据路由未就绪')), 8000)
+              navigator.serviceWorker.addEventListener('controllerchange', () => { clearTimeout(timeout); resolve() }, { once: true })
+            })
+          }
+          frame.src = '/'
+          state.textContent = `验收中 · ${width} × ${height}`
+        })
+        .catch((error) => { state.textContent = error.message })
+    </script>
+  </body>
+</html>
