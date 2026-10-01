@@ -13,6 +13,8 @@ import { createAdminSessionToken } from '../lib/admin-auth.js'
 import storageFiles from '../lib/api-handlers/storage-files.js'
 import quarkOAuth from '../lib/api-handlers/quark-oauth.js'
 import adminStorages from '../lib/api-handlers/admin-storages.js'
+import { storageWrite } from '../lib/api-handlers/storage-write.js'
+import storageDownload from '../lib/api-handlers/storage-download.js'
 
 process.env.PIKPAK_PAT = 'primary-test-secret'
 process.env.STORAGE_ENCRYPTION_KEY = 'test-encryption-key'
@@ -343,4 +345,42 @@ await test('storage router preserves non-enumerable request headers for PikPak a
   await storageFiles(request, target)
   assert.equal(target.statusCode, 200)
   assert.deepEqual(target.body.items, [])
+})
+
+
+await test('storage write router preserves non-enumerable request headers for PikPak auth', async () => {
+  await writeConfig({ version: 1, defaultStorageId: 'pikpak-main', instances: [
+    { storageId: 'pikpak-main', provider: 'pikpak', displayName: 'PikPak', enabled: true },
+    { storageId: 'quark-main', provider: 'quark', displayName: '夸克网盘', enabled: true },
+  ] })
+  await setGlobalAccess('locked')
+  const adminCookie = `map7e_admin_session=${createAdminSessionToken().token}`
+  upstream = async url => url.pathname.endsWith('/drive/v1/files')
+    ? { file: { id: 'created-folder', parent_id: '', name: 'Created', kind: 'drive#folder' } }
+    : { status: 0, data: {} }
+  const request = { method: 'POST', query: {}, body: { name: 'Created', parentId: '' } }
+  Object.defineProperty(request, 'headers', { value: { cookie: adminCookie }, enumerable: false })
+  const target = res()
+  await storageWrite('createFolder')(request, target)
+  assert.equal(target.statusCode, 200)
+  assert.equal(target.body.item.id, 'created-folder')
+})
+
+await test('storage download router preserves non-enumerable request headers for PikPak auth', async () => {
+  await writeConfig({ version: 1, defaultStorageId: 'pikpak-main', instances: [
+    { storageId: 'pikpak-main', provider: 'pikpak', displayName: 'PikPak', enabled: true },
+    { storageId: 'quark-main', provider: 'quark', displayName: '夸克网盘', enabled: true },
+  ] })
+  await setGlobalAccess('locked')
+  const adminCookie = `map7e_admin_session=${createAdminSessionToken().token}`
+  upstream = async url => url.pathname.endsWith('/drive/v1/files/file-1')
+    ? { id: 'file-1', parent_id: '', kind: 'drive#file', links: { 'application/octet-stream': { url: 'https://download.test/file-1' } } }
+    : { status: 0, data: {} }
+  const request = { method: 'GET', query: { id: 'file-1', parentId: '' } }
+  Object.defineProperty(request, 'headers', { value: { cookie: adminCookie }, enumerable: false })
+  const target = { ...res(), end() { this.ended = true; return this } }
+  await storageDownload(request, target)
+  assert.equal(target.statusCode, 302)
+  assert.equal(target.headers.Location, 'https://download.test/file-1')
+  assert.equal(target.ended, true)
 })
