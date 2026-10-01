@@ -71,7 +71,7 @@ describe('CloudStoragePage directory loading', () => {
 
   it('loads providers and the root in parallel without requesting any child directory', async () => {
     wrapper = mount(CloudStoragePage, { attachTo: document.body })
-    await waitFor(() => expect(wrapper.find('.overview-footnote').exists()).toBe(true))
+    await waitFor(() => expect(wrapper.find('.ocean-recent-panel').exists()).toBe(true))
     expect(globalThis.fetch).toHaveBeenCalledTimes(2)
     expect(requests).toEqual([{ storageId: 'pikpak-main', parentId: '', pageToken: '' }])
     expect(wrapper.find('.background-video').attributes('preload')).toBe('none')
@@ -80,8 +80,8 @@ describe('CloudStoragePage directory loading', () => {
 
   it('requests a folder only after the user opens it and does not scan its children', async () => {
     wrapper = mount(CloudStoragePage, { attachTo: document.body })
-    await waitFor(() => expect(wrapper.find('.overview-footnote').exists()).toBe(true))
-    await wrapper.findAll('.directory-card')[1].trigger('click')
+    await waitFor(() => expect(wrapper.find('.ocean-recent-panel').exists()).toBe(true))
+    await wrapper.find('.ocean-nav--main .ocean-nav-item').trigger('click')
     await waitFor(() => expect(wrapper.find('.folder-open').exists()).toBe(true))
     await wrapper.find('.folder-open').trigger('click')
     await waitFor(() => expect(requests.some((request) => request.parentId === 'photos')).toBe(true))
@@ -89,6 +89,20 @@ describe('CloudStoragePage directory loading', () => {
       { storageId: 'pikpak-main', parentId: '', pageToken: '' },
       { storageId: 'pikpak-main', parentId: 'photos', pageToken: '' },
     ])
+  })
+
+  it('filters loaded files and folders locally without another directory request', async () => {
+    wrapper = mount(CloudStoragePage, { attachTo: document.body })
+    await waitFor(() => expect(wrapper.find('.ocean-recent-panel').exists()).toBe(true))
+    await wrapper.find('.ocean-nav--main .ocean-nav-item').trigger('click')
+    await waitFor(() => expect(wrapper.find('.folder-open').exists()).toBe(true))
+    const folderTab = wrapper.findAll('.ocean-file-category-tabs [role="tab"]').find((tab) => tab.text() === '文件夹')
+    await folderTab.trigger('click')
+    await flushPromises()
+    expect(wrapper.findAll('.folder-open')).toHaveLength(1)
+    expect(wrapper.find('.file-row').exists()).toBe(false)
+    expect(globalThis.fetch).toHaveBeenCalledTimes(2)
+    expect(requests).toEqual([{ storageId: 'pikpak-main', parentId: '', pageToken: '' }])
   })
 
   it('ignores a Quark page response that arrives after switching back to PikPak', async () => {
@@ -105,15 +119,15 @@ describe('CloudStoragePage directory loading', () => {
       return new Promise((resolve) => { resolveQuarkNext = () => resolve(jsonResponse({ ok: true, storageId: requested, items: [folder('stale-folder', '过期结果')] })) })
     })
     wrapper = mount(CloudStoragePage, { attachTo: document.body })
-    await waitFor(() => expect(wrapper.find('.overview-footnote').exists()).toBe(true))
-    await wrapper.findAll('.directory-card')[1].trigger('click')
+    await waitFor(() => expect(wrapper.find('.ocean-recent-panel').exists()).toBe(true))
+    await wrapper.find('.ocean-nav--main .ocean-nav-item').trigger('click')
     await waitFor(() => expect(wrapper.find('.folder-open').exists()).toBe(true))
     await wrapper.find('#cloud-storage-select').setValue('quark-main')
-    await waitFor(() => expect(wrapper.find('.directory-card').exists()).toBe(true))
-    await wrapper.findAll('.directory-card')[1].trigger('click')
+    await waitFor(() => expect(wrapper.find('.ocean-recent-panel').exists()).toBe(true))
+    await wrapper.find('.ocean-nav--main .ocean-nav-item').trigger('click')
     await waitFor(() => expect(requests.some((request) => request.storageId === 'quark-main' && request.pageToken === 'next')).toBe(true))
     await wrapper.find('#cloud-storage-select').setValue('pikpak-main')
-    await wrapper.findAll('.directory-card')[1].trigger('click')
+    await wrapper.find('.ocean-nav--main .ocean-nav-item').trigger('click')
     await waitFor(() => expect(wrapper.text()).toContain('图片'))
     resolveQuarkNext()
     await flushPromises()
