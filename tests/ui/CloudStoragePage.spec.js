@@ -134,4 +134,19 @@ describe('CloudStoragePage directory loading', () => {
     expect(wrapper.text()).not.toContain('过期结果')
     expect(wrapper.find('#cloud-storage-select').element.value).toBe('pikpak-main')
   })
+
+  it('shows a friendly message when Quark is temporarily unreachable', async () => {
+    globalThis.fetch = vi.fn(async (input) => {
+      const url = new URL(input, location.href)
+      if (url.pathname === '/api/storage-providers') return jsonResponse(providers)
+      const storageId = url.searchParams.get('storageId') || 'pikpak-main'
+      if (storageId === 'quark-main') return jsonResponse({ ok: false, error: 'quark_unreachable' }, 502)
+      return jsonResponse({ ok: true, storageId, items: [] })
+    })
+    wrapper = mount(CloudStoragePage, { attachTo: document.body })
+    await waitFor(() => expect(wrapper.find('.ocean-recent-panel').exists()).toBe(true))
+    await wrapper.find('#cloud-storage-select').setValue('quark-main')
+    await waitFor(() => expect(wrapper.find('.ocean-alert').text()).toContain('夸克网盘暂时无法连接'))
+    expect(wrapper.text()).not.toContain('quark_unreachable')
+  })
 })
