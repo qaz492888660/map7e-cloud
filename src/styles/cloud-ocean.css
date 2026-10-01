@@ -1664,7 +1664,7 @@
     min-height: 100dvh;
     flex-direction: column;
     gap: 0;
-    padding: max(10px, env(safe-area-inset-top, 0px)) 14px calc(88px + env(safe-area-inset-bottom, 0px));
+    padding: max(8px, env(safe-area-inset-top, 0px)) 14px calc(74px + env(safe-area-inset-bottom, 0px));
   }
 
   .ocean-sidebar { display: none; }
@@ -1676,34 +1676,34 @@
 
   .ocean-toolbar {
     display: grid;
-    min-height: 54px;
+    min-height: 48px;
     grid-template-columns: minmax(0, 1fr) auto;
-    gap: 8px;
-    margin-bottom: 12px;
+    gap: 7px;
+    margin-bottom: 8px;
   }
 
   .ocean-mobile-brand {
     display: flex;
     min-width: 0;
     align-items: center;
-    gap: 7px;
+    gap: 6px;
   }
 
-  .ocean-mobile-brand img { width: 34px; height: 34px; }
+  .ocean-mobile-brand img { width: 32px; height: 32px; }
   .ocean-mobile-brand strong { font-size: 16px; }
   .ocean-mobile-brand small { font-size: 7px; letter-spacing: 0.2em; }
   .ocean-search--desktop { display: none; }
 
   .ocean-toolbar-actions { gap: 7px; }
-  .ocean-provider-select { min-width: 104px; min-height: 38px; gap: 6px; padding: 0 9px; }
+  .ocean-provider-select { min-width: 100px; min-height: 36px; gap: 5px; padding: 0 8px; }
   .ocean-provider-select select { font-size: 10px; }
   .ocean-provider-select > svg { width: 14px; height: 14px; }
   .ocean-account-link { display: none; }
 
   .ocean-search-toggle {
     display: grid;
-    width: 38px;
-    height: 38px;
+    width: 36px;
+    height: 36px;
     place-items: center;
     border: 1px solid rgba(126, 210, 238, 0.28);
     border-radius: 50%;
@@ -1743,12 +1743,12 @@
   }
 
   .ocean-main { width: 100%; }
-  .ocean-home { gap: 12px; }
+  .ocean-home { gap: 8px; }
 
   .ocean-hero {
-    min-height: 164px;
-    padding: 17px 17px 15px;
-    border-radius: 19px;
+    min-height: 146px;
+    padding: 12px 14px 11px;
+    border-radius: 18px;
     background-position: 58% center;
   }
 
@@ -1759,57 +1759,57 @@
   }
 
   .ocean-hero-copy { width: 76%; }
-  .ocean-kicker { margin-bottom: 5px; font-size: 7px; letter-spacing: 0.18em; }
-  .ocean-hero h1 { font-size: 28px; }
-  .ocean-hero h2 { margin-top: 4px; font-size: 13px; }
-  .ocean-hero-note { margin: 6px 0 8px; font-size: 9px; }
+  .ocean-kicker { margin-bottom: 3px; font-size: 7px; letter-spacing: 0.18em; }
+  .ocean-hero h1 { font-size: 26px; line-height: 1.04; }
+  .ocean-hero h2 { margin-top: 3px; font-size: 12px; line-height: 1.2; }
+  .ocean-hero-note { margin: 4px 0 6px; font-size: 8px; line-height: 1.25; }
   .ocean-hero-quota { width: min(100%, 235px); }
-  .ocean-quota-value { gap: 5px; font-size: 10px; }
-  .ocean-quota-value strong { font-size: 15px; }
-  .ocean-quota-value--unknown strong { font-size: 10px; }
-  .ocean-quota-track--hero { height: 6px; margin-top: 6px; }
-  .ocean-hero-quota small { margin-top: 4px; font-size: 8px; }
-  .ocean-hero-provider { top: 10px; right: 10px; gap: 6px; padding: 6px 8px; font-size: 8px; }
+  .ocean-quota-value { gap: 4px; font-size: 9px; }
+  .ocean-quota-value strong { font-size: 14px; }
+  .ocean-quota-value--unknown strong { font-size: 9px; }
+  .ocean-quota-track--hero { height: 5px; margin-top: 4px; }
+  .ocean-hero-quota small { margin-top: 2px; font-size: 7px; }
+  .ocean-hero-provider { top: 8px; right: 8px; gap: 5px; padding: 5px 7px; font-size: 7px; }
   .ocean-hero-provider .provider-status-dot { width: 6px; height: 6px; }
-  .ocean-hero-link { right: 10px; bottom: 11px; min-height: 30px; gap: 4px; padding: 0 9px; font-size: 8px; }
-  .ocean-hero-link svg { width: 13px; height: 13px; }
+  .ocean-hero-link { right: 9px; bottom: 9px; min-height: 28px; gap: 3px; padding: 0 8px; font-size: 8px; }
+  .ocean-hero-link svg { width: 12px; height: 12px; }
 
-  .ocean-section { border-radius: 17px; }
-  .ocean-categories { padding: 12px 10px 9px; }
-  .ocean-section-heading { gap: 7px; margin-bottom: 9px; }
-  .ocean-section-heading h2 { font-size: 14px; }
+  .ocean-section { border-radius: 16px; }
+  .ocean-categories { padding: 9px 8px 6px; }
+  .ocean-section-heading { gap: 5px; margin-bottom: 6px; }
+  .ocean-section-heading h2 { font-size: 13px; }
   .ocean-section-heading > span,
-  .ocean-section-heading > div > span { font-size: 8px; text-align: right; }
-  .ocean-section-heading .ocean-kicker { margin-bottom: 2px; font-size: 7px; }
+  .ocean-section-heading > div > span { font-size: 7px; line-height: 1.2; text-align: right; }
+  .ocean-section-heading .ocean-kicker { margin-bottom: 1px; font-size: 7px; }
 
   .ocean-category-grid {
     grid-template-columns: repeat(3, minmax(0, 1fr));
-    gap: 7px;
+    gap: 6px;
   }
 
   .ocean-category-card {
-    min-height: 96px;
-    padding: 5px 4px 8px;
-    border-radius: 13px;
+    min-height: 82px;
+    padding: 4px 3px 6px;
+    border-radius: 12px;
   }
 
-  .ocean-category-icon { width: 58px; height: 58px; }
-  .ocean-category-icon .map7e-category-art { width: 56px; height: 56px; }
-  .ocean-category-title { margin-top: 1px; font-size: 10px; }
-  .ocean-category-card small { margin-top: 3px; font-size: 7px; }
-  .ocean-data-note { margin-top: 7px; font-size: 8px; line-height: 1.45; }
+  .ocean-category-icon { width: 52px; height: 52px; }
+  .ocean-category-icon .map7e-category-art { width: 50px; height: 50px; }
+  .ocean-category-title { margin-top: 0; font-size: 10px; }
+  .ocean-category-card small { margin-top: 2px; font-size: 7px; }
+  .ocean-data-note { margin-top: 4px; font-size: 7px; line-height: 1.3; }
 
-  .ocean-recent-panel { padding: 12px 10px 7px; }
-  .ocean-section-heading--recent { margin-bottom: 8px; }
+  .ocean-recent-panel { padding: 9px 8px 6px; }
+  .ocean-section-heading--recent { margin-bottom: 5px; }
   .ocean-section-heading--recent .ocean-kicker { display: none; }
-  .ocean-section-heading--recent > div > span { margin-top: 3px; text-align: left; }
+  .ocean-section-heading--recent > div > span { margin-top: 2px; text-align: left; }
   .ocean-section-heading--recent h2 { font-size: 14px; }
-  .ocean-more-button { min-height: 29px; gap: 3px; padding: 0 8px; font-size: 9px; }
-  .ocean-more-button svg { width: 14px; height: 14px; }
+  .ocean-more-button { min-height: 27px; gap: 3px; padding: 0 7px; font-size: 8px; }
+  .ocean-more-button svg { width: 13px; height: 13px; }
 
-  .ocean-recent-toolbar { gap: 5px; margin-bottom: 6px; }
+  .ocean-recent-toolbar { gap: 4px; margin-bottom: 4px; }
   .ocean-filter-tabs { flex: 1; gap: 1px; }
-  .ocean-filter-tabs button { min-height: 25px; padding: 0 8px; font-size: 8px; }
+  .ocean-filter-tabs button { min-height: 24px; padding: 0 7px; font-size: 8px; }
   .ocean-layout-switch { display: none; }
   .ocean-table-wrap,
   .ocean-recent-grid { display: none !important; }
@@ -1818,20 +1818,20 @@
   .ocean-mobile-file-row {
     display: flex;
     min-width: 0;
-    min-height: 61px;
+    min-height: 55px;
     align-items: center;
     gap: 4px;
     border-bottom: 1px solid rgba(123, 184, 210, 0.1);
   }
 
   .ocean-mobile-file-row:last-child { border-bottom: 0; }
-  .ocean-mobile-file-row .ocean-file-open { gap: 9px; padding: 5px 0; }
-  .ocean-mobile-file-row .ocean-file-thumb { width: 38px; height: 38px; border-radius: 9px; }
-  .ocean-mobile-file-copy { display: grid; min-width: 0; flex: 1; gap: 4px; }
-  .ocean-mobile-file-copy strong { overflow: hidden; color: #eaf8ff; font-size: 10px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
-  .ocean-mobile-file-copy small { overflow: hidden; color: rgba(179, 214, 231, 0.63); font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }
+  .ocean-mobile-file-row .ocean-file-open { gap: 7px; padding: 4px 0; }
+  .ocean-mobile-file-row .ocean-file-thumb { width: 35px; height: 35px; border-radius: 8px; }
+  .ocean-mobile-file-copy { display: grid; min-width: 0; flex: 1; gap: 2px; }
+  .ocean-mobile-file-copy strong { overflow: hidden; color: #eaf8ff; font-size: 9.5px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+  .ocean-mobile-file-copy small { overflow: hidden; color: rgba(179, 214, 231, 0.63); font-size: 7.5px; line-height: 1.2; text-overflow: ellipsis; white-space: nowrap; }
   .ocean-mobile-file-size { max-width: 52px; overflow: hidden; color: rgba(185, 218, 234, 0.66); font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }
-  .ocean-mobile-file-row .ocean-row-action { width: 27px; height: 30px; font-size: 15px; }
+  .ocean-mobile-file-row .ocean-row-action { width: 40px; height: 44px; font-size: 15px; }
 
   .ocean-empty { min-height: 117px; gap: 6px; padding: 14px; }
   .ocean-empty > .map7e-category-art { width: 40px; height: 40px; }
@@ -1869,10 +1869,10 @@
     bottom: 0;
     left: 0;
     display: grid;
-    min-height: 62px;
+    min-height: 56px;
     grid-template-columns: repeat(5, minmax(0, 1fr));
     align-items: center;
-    padding: 5px 11px calc(6px + env(safe-area-inset-bottom, 0px));
+    padding: 4px 10px calc(4px + env(safe-area-inset-bottom, 0px));
     border-top: 1px solid rgba(132, 207, 233, 0.18);
     background: rgba(3, 19, 32, 0.87);
     box-shadow: 0 -10px 30px rgba(0, 5, 12, 0.23);
@@ -1908,14 +1908,14 @@
   .ocean-mobile-nav .map7e-category-art { width: 24px; height: 24px; }
   .ocean-mobile-nav > .is-active { color: #7be8f4; }
   .ocean-mobile-nav .ocean-mobile-create {
-    width: 43px;
-    height: 43px;
+    width: 38px;
+    height: 38px;
     justify-self: center;
     place-items: center;
     border: 1px solid rgba(164, 247, 250, 0.72);
-    border-radius: 15px;
+    border-radius: 13px;
     background: linear-gradient(145deg, #55e7e4, #2db4d7 58%, #448bd5);
-    box-shadow: 0 0 20px rgba(57, 202, 224, 0.34), inset 0 1px 0 rgba(255, 255, 255, 0.43);
+    box-shadow: 0 0 14px rgba(57, 202, 224, 0.23), inset 0 1px 0 rgba(255, 255, 255, 0.36);
     color: #032739;
   }
   .ocean-mobile-nav .ocean-mobile-create svg { width: 22px; height: 22px; stroke-width: 2; }
@@ -1924,13 +1924,35 @@
 }
 
 @media (max-width: 430px) {
-  .ocean-layout { padding-right: 12px; padding-left: 12px; }
-  .ocean-hero { min-height: 158px; background-position: 61% center; }
+  .ocean-layout { padding-right: 12px; padding-left: 12px; padding-bottom: calc(70px + env(safe-area-inset-bottom, 0px)); }
+  .ocean-hero { min-height: 136px; padding: 11px 12px 10px; background-position: 61% center; }
+  .ocean-hero h1 { font-size: 25px; }
+  .ocean-hero-note { margin: 3px 0 5px; }
+  .ocean-hero-link { min-height: 27px; }
   .ocean-hero-copy { width: 79%; }
-  .ocean-hero-provider { max-width: 97px; overflow: hidden; white-space: nowrap; }
+  .ocean-hero-provider { max-width: 97px; overflow: hidden; padding: 4px 6px; white-space: nowrap; }
+  .ocean-categories { padding: 8px 7px 5px; }
+  .ocean-section-heading { margin-bottom: 5px; }
+  .ocean-section-heading > span { max-width: 45%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .ocean-category-grid { gap: 5px; }
+  .ocean-category-card { min-height: 72px; padding: 3px 2px 5px; }
+  .ocean-category-icon { width: 48px; height: 48px; }
+  .ocean-category-icon .map7e-category-art { width: 46px; height: 46px; }
+  .ocean-category-title { font-size: 9px; }
+  .ocean-category-card small { margin-top: 1px; font-size: 6px; }
+  .ocean-data-note { margin-top: 3px; font-size: 6.5px; }
+  .ocean-recent-panel { padding: 8px 7px 5px; }
+  .ocean-section-heading--recent { margin-bottom: 4px; }
+  .ocean-recent-toolbar { margin-bottom: 3px; }
   .ocean-section-heading--recent > div > span { max-width: 190px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .ocean-mobile-file-row { min-height: 52px; }
+  .ocean-mobile-file-row .ocean-file-open { gap: 6px; padding: 3px 0; }
+  .ocean-mobile-file-row .ocean-file-thumb { width: 33px; height: 33px; }
+  .ocean-mobile-file-copy strong { font-size: 9px; }
+  .ocean-mobile-file-copy small { font-size: 7px; }
   .ocean-mobile-file-size { display: none; }
   .ocean-mobile-nav { padding-right: 8px; padding-left: 8px; }
+  .ocean-mobile-nav .ocean-mobile-create { width: 37px; height: 37px; }
 }
 
 @media (max-width: 360px) {
@@ -1940,10 +1962,10 @@
   .ocean-mobile-brand strong { font-size: 14px; }
   .ocean-mobile-brand small { font-size: 6px; }
   .ocean-provider-select { min-width: 95px; }
-  .ocean-category-grid { gap: 5px; }
-  .ocean-category-card { min-height: 101px; }
-  .ocean-category-icon { width: 52px; height: 52px; }
-  .ocean-category-icon .map7e-category-art { width: 51px; height: 51px; }
+  .ocean-category-grid { gap: 4px; }
+  .ocean-category-card { min-height: 68px; }
+  .ocean-category-icon { width: 44px; height: 44px; }
+  .ocean-category-icon .map7e-category-art { width: 42px; height: 42px; }
   .ocean-filter-tabs button { padding: 0 6px; }
   .ocean-section-heading--recent > div > span { max-width: 154px; }
 }
