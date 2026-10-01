@@ -341,7 +341,9 @@ async function apiJson(url, options = {}) {
     const providerAuthFailure = code === 'storage_token_expired' || code === 'storage_authorization_required'
     const message = providerAuthFailure
       ? '当前网盘授权已失效，请在管理后台重新授权。'
-      : (response.status === 401 && code === 'authentication_required' ? '需要先登录云盘。' : (payload?.message || payload?.error || ('HTTP ' + response.status)))
+      : (code === 'quark_unreachable'
+          ? '夸克网盘暂时无法连接，请稍后重试。'
+          : (response.status === 401 && code === 'authentication_required' ? '需要先登录云盘。' : (payload?.message || payload?.error || ('HTTP ' + response.status))))
     const error = new Error(message)
     error.code = code
     error.status = response.status
