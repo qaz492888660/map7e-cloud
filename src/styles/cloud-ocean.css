@@ -1935,8 +1935,8 @@
   .ocean-section-heading { margin-bottom: 5px; }
   .ocean-section-heading > span { max-width: 45%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .ocean-category-grid { gap: 5px; }
-  .ocean-category-card { min-height: 72px; padding: 3px 2px 5px; }
-  .ocean-category-icon { width: 48px; height: 48px; }
+  .ocean-category-card { min-height: 72px; padding: 1px 2px 3px; }
+  .ocean-category-icon { width: 46px; height: 46px; }
   .ocean-category-icon .map7e-category-art { width: 46px; height: 46px; }
   .ocean-category-title { font-size: 9px; }
   .ocean-category-card small { margin-top: 1px; font-size: 6px; }
