@@ -1647,6 +1647,16 @@
 }
 
 @media (max-width: 800px) {
+  html,
+  body {
+    scrollbar-width: none;
+  }
+
+  html::-webkit-scrollbar,
+  body::-webkit-scrollbar {
+    display: none;
+  }
+
   .ocean-layout {
     display: flex;
     width: 100%;
@@ -1778,7 +1788,7 @@
   }
 
   .ocean-category-card {
-    min-height: 108px;
+    min-height: 96px;
     padding: 5px 4px 8px;
     border-radius: 13px;
   }
