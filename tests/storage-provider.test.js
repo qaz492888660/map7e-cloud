@@ -28,6 +28,7 @@ process.env.VERCEL_ENV = 'production'
 const redis = new Map(), calls = [], redisReads = new Map()
 let upstream = async () => ({ status: 0, data: {} })
 const response = (payload, status = 200) => new Response(JSON.stringify(payload), { status, headers: { 'Content-Type': 'application/json' } })
+function quarkSuffix(value) { const fid = String(value || ''), separator = fid.lastIndexOf('|'); return separator >= 0 && separator < fid.length - 1 ? fid.slice(separator + 1) : fid }
 globalThis.fetch = async (url, options = {}) => {
   if (String(url).startsWith('https://redis.test')) {
     return response(JSON.parse(options.body).map(([op, key, value, ...args]) => {
@@ -316,6 +317,72 @@ await test('Quark info response wrappers normalize root and nested item parents 
 
   const path = await folderPathWithinRoot(provider, 'folder', '0')
   assert.deepEqual(path.map(item => item.id), ['root', 'folder'], 'a configured Quark root 0 is the same as an empty project root')
+})
+
+await test('Quark FID suffix identity supports live info prefixes through nested listing and download checks', async () => {
+  await writeConfig({ version: 1, defaultStorageId: 'quark-main', instances: [
+    { storageId: 'pikpak-main', provider: 'pikpak', displayName: 'PikPak', enabled: true },
+    { storageId: 'quark-main', provider: 'quark', displayName: '夸克网盘', enabled: true, rootFolderId: '0' },
+  ] })
+  await writeAuth('quark-main', { accessToken: 'fid-access', refreshToken: 'fid-refresh', userId: 'fid-user', deviceId: 'fid-device' })
+  await setGlobalAccess('public')
+  const listedOuter = 'listed-outer-prefix|outer-key'
+  const listedInner = 'listed-inner-prefix|inner-key'
+  const listedFile = 'listed-file-prefix|file-key'
+  const listParents = [], downloadLinkCalls = []
+  upstream = async (url, options = {}) => {
+    if (url.pathname.endsWith('/file/list')) {
+      const parent = JSON.parse(options.body).parent_fid
+      listParents.push(parent)
+      if (parent === '0') return { status: 0, data: { file_list: [{ fid: listedOuter, pdir_fid: 'list-root-alias|drive-key', file_type: '0', filename: '夸克云盘' }], last_page: true } }
+      if (quarkSuffix(parent) === 'outer-key') return { status: 0, data: { file_list: [{ fid: listedInner, pdir_fid: 'other-outer-prefix|outer-key', file_type: '0', filename: '旅行照片' }], last_page: true } }
+      if (quarkSuffix(parent) === 'inner-key') return { status: 0, data: { file_list: [{ fid: listedFile, pdir_fid: 'other-inner-prefix|inner-key', file_type: '1', filename: 'photo.jpg', size: '2048' }], last_page: true } }
+      return { status: 0, data: { file_list: [], last_page: true } }
+    }
+    if (url.pathname.endsWith('/file/info')) {
+      const key = quarkSuffix(url.searchParams.get('fid'))
+      const records = {
+        'outer-key': { fid: 'info-outer-prefix|outer-key', parent_fid: 'info-root-alias|drive-key', file_type: '0', filename: '夸克云盘' },
+        'inner-key': { fid: 'info-inner-prefix|inner-key', parent_fid: 'info-outer-prefix|outer-key', file_type: '0', filename: '旅行照片' },
+        'file-key': { fid: 'info-file-prefix|file-key', parent_fid: 'info-inner-prefix|inner-key', file_type: '1', filename: 'photo.jpg' },
+        'drive-key': { fid: 'canonical-root-prefix|drive-key', parent_fid: '0', file_type: '0', filename: '根目录' },
+      }
+      return records[key] ? { status: 0, data: records[key] } : { status: 1, error_info: 'missing' }
+    }
+    if (url.pathname.endsWith('/file/get_download_url')) {
+      downloadLinkCalls.push(JSON.parse(options.body).fid)
+      return { status: 0, data: { download_url: 'https://download.example/live-quark-file' } }
+    }
+    if (url.hostname === 'download.example') return new Response(null, { status: 206, headers: { 'Content-Range': 'bytes 0-0/1' } })
+    return { status: 0, data: {} }
+  }
+
+  const root = res()
+  await storageFiles({ method: 'GET', query: { storageId: 'quark-main' }, headers: {} }, root)
+  assert.equal(root.statusCode, 200)
+  assert.equal(root.body.items[0].id, listedOuter)
+
+  const firstLevel = res()
+  await storageFiles({ method: 'GET', query: { storageId: 'quark-main', parentId: listedOuter }, headers: {} }, firstLevel)
+  assert.equal(firstLevel.statusCode, 200, JSON.stringify(firstLevel.body))
+  assert.equal(firstLevel.body.items[0].id, listedInner)
+
+  const secondLevel = res()
+  await storageFiles({ method: 'GET', query: { storageId: 'quark-main', parentId: listedInner }, headers: {} }, secondLevel)
+  assert.equal(secondLevel.statusCode, 200, JSON.stringify(secondLevel.body))
+  assert.equal(secondLevel.body.items[0].id, listedFile)
+
+  const downloaded = res()
+  await storageDownload({ method: 'GET', query: { storageId: 'quark-main', id: listedFile, parentId: secondLevel.body.items[0].parentId }, headers: {} }, downloaded)
+  assert.equal(downloaded.statusCode, 302, JSON.stringify(downloaded.body))
+  assert.equal(downloaded.headers.Location, 'https://download.example/live-quark-file')
+  assert.equal(downloadLinkCalls[0], listedFile, 'the original full FID is preserved for Quark download calls')
+
+  const falseParent = res()
+  await storageDownload({ method: 'GET', query: { storageId: 'quark-main', id: listedFile, parentId: 'wrong-prefix|wrong-key' }, headers: {} }, falseParent)
+  assert.equal(falseParent.statusCode, 404, 'a different identity suffix remains rejected')
+  assert.equal(downloadLinkCalls.length, 1, 'a mismatched parent never requests a download URL')
+  assert.deepEqual(listParents.slice(0, 3), ['0', listedOuter, listedInner])
 })
 
 await test('Quark nested folder reads and storage downloads accept normalized real item parents', async () => {

@@ -597,27 +597,6 @@ async function loadDashboard() {
   }
 }
 
-let quarkDiagnosticsStarted = false
-async function runQuarkDiagnostics() {
-  if (quarkDiagnosticsStarted || new URLSearchParams(location.search).get('quarkDiagnostics') !== '1') return
-  quarkDiagnosticsStarted = true
-  const panel = document.createElement('section')
-  panel.className = 'panel'
-  const heading = document.createElement('h2')
-  heading.textContent = 'Quark 只读 API 检查（管理员）'
-  const output = document.createElement('pre')
-  output.setAttribute('aria-live', 'polite')
-  output.textContent = '正在读取脱敏后的 Quark list/info 响应…'
-  panel.append(heading, output)
-  dashboard.append(panel)
-  try {
-    const result = await apiJson('/api/admin-quark-diagnostics?storageId=quark-main')
-    output.textContent = JSON.stringify(result, null, 2)
-  } catch (error) {
-    output.textContent = JSON.stringify({ error: error.code || error.message, status: error.status || null }, null, 2)
-  }
-}
-
 function openFolder(item) {
   currentFolderId = item.id
   folderStack.push({ id: item.id, name: item.name || '未命名文件夹' })
@@ -776,7 +755,6 @@ document.querySelector('#login-form').addEventListener('submit', async (event) =
     loginPanel.hidden = true
     dashboard.hidden = false
     await loadDashboard()
-    await runQuarkDiagnostics()
   } catch (error) {
     passwordInput.value = ''
     showNotice(error.message, 'error')
@@ -832,7 +810,6 @@ async function initialize() {
     await apiJson('/api/admin-session')
     dashboard.hidden = false
     await loadDashboard()
-    await runQuarkDiagnostics()
   } catch (error) {
     loginPanel.hidden = false
     if (error.code === 'admin_auth_not_configured') {
