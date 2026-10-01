@@ -71,6 +71,17 @@ function redisResponse(commands) {
     if (name === 'EVAL') {
       const script = String(command[1])
       const recordKey = String(command[3])
+      if (script.includes('map7e-provider-snapshot')) {
+        const raw = redis.get(recordKey) ?? null
+        const configured = {}
+        if (raw) {
+          const config = JSON.parse(raw)
+          for (const instance of config.instances || []) {
+            if (instance.storageId !== String(command[4])) configured[instance.storageId] = redis.has(`${command[5]}${instance.storageId}`)
+          }
+        }
+        return { result: [raw, JSON.stringify(configured)] }
+      }
       if (script.includes('map7e-bootstrap-admin-auth')) {
         if (redis.has(recordKey)) return { result: 0 }
         redis.set(recordKey, String(command[4]))

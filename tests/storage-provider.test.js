@@ -1,8 +1,9 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import crypto from 'node:crypto'
-import { seal, unseal, metadataId, writeAuth, readAuth, readConfig, writeConfig, withLock, clearStorageCachesForTests } from '../lib/storage/store.js'
+import { seal, unseal, metadataId, writeAuth, readAuth, readConfig, readStorageProviderSnapshot, writeConfig, withLock, clearStorageCachesForTests } from '../lib/storage/store.js'
 import { storageDescriptors, resolveStorage } from '../lib/storage/registry.js'
+import { withProviderPerf } from '../lib/storage/provider-perf.js'
 import { safeDirectUrl } from '../lib/storage/errors.js'
 import { createPikPakProvider } from '../lib/storage/providers/pikpak.js'
 import { createQuarkProvider, quarkHeaders, beginQuarkAuthorization, finishQuarkAuthorization } from '../lib/storage/providers/quark.js'
@@ -22,15 +23,31 @@ process.env.UPSTASH_REDIS_REST_URL = 'https://redis.test'
 process.env.UPSTASH_REDIS_REST_TOKEN = 'redis-test-secret'
 process.env.VERCEL_ENV = 'production'
 const redis = new Map(), calls = [], redisReads = new Map()
+let redisPipelineRequests = 0
 let upstream = async () => ({ status: 0, data: {} })
 const response = (payload, status = 200) => new Response(JSON.stringify(payload), { status, headers: { 'Content-Type': 'application/json' } })
 globalThis.fetch = async (url, options = {}) => {
   if (String(url).startsWith('https://redis.test')) {
+    redisPipelineRequests += 1
     return response(JSON.parse(options.body).map(([op, key, value, ...args]) => {
       if (op === 'GET') { redisReads.set(key, (redisReads.get(key) || 0) + 1); return { result: redis.get(key) ?? null } }
       if (op === 'SET') { if (args.includes('NX') && redis.has(key)) return { result: null }; redis.set(key, value); return { result: 'OK' } }
       if (op === 'DEL') return { result: Number(redis.delete(key)) }
-      if (op === 'EVAL') { const lockKey = args[0], owner = args[1]; return { result: redis.get(lockKey) === owner ? Number(redis.delete(lockKey)) : 0 } }
+      if (op === 'EVAL') {
+        if (String(key).includes('map7e-provider-snapshot')) {
+          const raw = redis.get(args[0]) ?? null
+          const configured = {}
+          if (raw) {
+            const config = JSON.parse(raw)
+            for (const instance of config.instances || []) {
+              if (instance.storageId !== args[1]) configured[instance.storageId] = redis.has(`${args[2]}${instance.storageId}`)
+            }
+          }
+          return { result: [raw, JSON.stringify(configured)] }
+        }
+        const lockKey = args[0], owner = args[1]
+        return { result: redis.get(lockKey) === owner ? Number(redis.delete(lockKey)) : 0 }
+      }
       throw Error(`Unsupported Redis fixture: ${op}`)
     }))
   }
@@ -409,6 +426,73 @@ await test('Storage config and auth reads are coalesced and writes invalidate th
   redisReads.delete(authKey)
   assert.equal((await readAuth('quark-main')).accessToken, 'cache-access-2')
   assert.equal(redisReads.get(authKey), 1, 'writing credentials invalidates the cached value')
+})
+
+await test('Provider snapshot reads auth existence without decrypting and invalidates on auth/config writes', async () => {
+  clearStorageCachesForTests()
+  redis.delete('map7e-cloud:storage:auth:v1:quark-main')
+  await writeConfig({ version: 1, defaultStorageId: 'quark-main', instances: [
+    { storageId: 'pikpak-main', provider: 'pikpak', displayName: 'PikPak', enabled: true },
+    { storageId: 'quark-main', provider: 'quark', displayName: '夸克网盘', enabled: true },
+  ] })
+  clearStorageCachesForTests()
+  redisPipelineRequests = 0
+  const first = await readStorageProviderSnapshot()
+  assert.equal(first.config.defaultStorageId, 'quark-main')
+  assert.equal(first.authConfigured['quark-main'], false)
+  assert.equal(redisPipelineRequests, 1, 'cold provider state uses one Redis pipeline for config and all auth existence checks')
+
+  await readStorageProviderSnapshot()
+  assert.equal(redisPipelineRequests, 1, 'provider snapshot is cached for its short TTL')
+
+  const credentials = { accessToken: 'snapshot-access-secret', refreshToken: 'snapshot-refresh-secret', deviceId: 'snapshot-device' }
+  await writeAuth('quark-main', credentials)
+  redisPipelineRequests = 0
+  let metrics
+  const afterAuthorization = await withProviderPerf(async current => {
+    metrics = current
+    return readStorageProviderSnapshot()
+  })
+  assert.equal(afterAuthorization.authConfigured['quark-main'], true)
+  assert.equal(redisPipelineRequests, 1, 'successful authorization invalidates status cache and reads current Redis state')
+  assert.equal(metrics.events.some(event => event.name === 'aesDecrypt'), false, 'provider status does not decrypt stored credentials')
+
+  await writeConfig({ ...afterAuthorization.config, defaultStorageId: 'pikpak-main' })
+  redisPipelineRequests = 0
+  const afterConfigChange = await readStorageProviderSnapshot()
+  assert.equal(afterConfigChange.config.defaultStorageId, 'pikpak-main')
+  assert.equal(redisPipelineRequests, 1, 'configuration writes invalidate the provider snapshot')
+  assert.equal(JSON.stringify(afterAuthorization).includes(credentials.accessToken), false)
+})
+
+await test('Lightweight provider descriptors cache selectors and never probe storage accounts', async () => {
+  clearStorageCachesForTests()
+  await writeConfig({ version: 1, defaultStorageId: 'quark-main', instances: [
+    { storageId: 'pikpak-main', provider: 'pikpak', displayName: 'PikPak', enabled: true },
+    { storageId: 'quark-main', provider: 'quark', displayName: '夸克网盘', enabled: true },
+  ] })
+  await writeAuth('quark-main', { accessToken: 'descriptor-access-secret', refreshToken: 'descriptor-refresh-secret', deviceId: 'descriptor-device' })
+  clearStorageCachesForTests()
+  calls.length = 0
+  redisPipelineRequests = 0
+  let firstMetrics
+  const first = await withProviderPerf(async metrics => {
+    firstMetrics = metrics
+    return storageDescriptors({ lightweight: true, fresh: true })
+  })
+  assert.equal(first.providers.find(provider => provider.id === 'quark-main').selectable, true)
+  assert.equal(redisPipelineRequests, 1)
+  assert.equal(calls.length, 0, 'the provider selector does not call PikPak or Quark APIs')
+  assert.equal(firstMetrics.events.some(event => event.name === 'aesDecrypt' || event.name === 'readAuth'), false)
+  assert.equal(firstMetrics.upstreamRequests, 0)
+
+  let secondMetrics
+  await withProviderPerf(async metrics => {
+    secondMetrics = metrics
+    return storageDescriptors({ lightweight: true })
+  })
+  assert.equal(redisPipelineRequests, 1, 'the warm descriptor cache avoids additional Upstash requests')
+  assert.equal(secondMetrics.events.some(event => event.name === 'providerDescriptorCache' && event.hit), true)
 })
 
 await test('Quark website root maps to one folder and blocks out-of-tree reads and writes', async () => {
