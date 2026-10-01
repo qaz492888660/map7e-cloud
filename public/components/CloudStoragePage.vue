@@ -12,6 +12,7 @@ const directoryMetadata = ref({})
 const manifestUpdatedAt = ref('')
 const storageProviders = ref([])
 const activeStorageId = ref('pikpak-main')
+const activeCapabilities = computed(() => storageProviders.value.find(p => p.id === activeStorageId.value)?.capabilities || {})
 const activeStorageName = computed(() => storageProviders.value.find((provider) => provider.id === activeStorageId.value)?.name || '网盘')
 const loadingLibrary = ref(true)
 const errorMessage = ref('')
@@ -236,25 +237,34 @@ async function apiJson(url, options = {}) {
     ...options,
   })
   const payload = await response.json().catch(() => ({}))
-  if (response.status === 401) {
-    const error = new Error('需要先登录云盘。')
-    error.code = 'authentication_required'
+  if (!response.ok || payload?.ok === false) {
+    const code = String(payload?.error || (response.status === 401 ? 'authentication_required' : 'http_error'))
+    const providerAuthFailure = code === 'storage_token_expired' || code === 'storage_authorization_required'
+    const message = providerAuthFailure
+      ? '当前网盘授权已失效，请在管理后台重新授权。'
+      : (response.status === 401 && code === 'authentication_required' ? '需要先登录云盘。' : (payload?.message || payload?.error || ('HTTP ' + response.status)))
+    const error = new Error(message)
+    error.code = code
+    error.status = response.status
     throw error
   }
-  if (!response.ok || payload?.ok === false) throw new Error(payload?.message || payload?.error || ('HTTP ' + response.status))
   return payload
 }
 
 async function listPikPakItems(parentId = '') {
+  const storageId = activeStorageId.value
   const items = []
   let pageToken = ''
   const seenTokens = new Set()
   do {
     const params = new URLSearchParams()
-    params.set('storageId', activeStorageId.value)
+    params.set('storageId', storageId)
     if (parentId) params.set('parentId', parentId)
     if (pageToken) params.set('pageToken', pageToken)
     const payload = await apiJson('/api/storage-files?' + params.toString())
+    const nextRequestDelayMs = Number(payload?.nextRequestDelayMs || 0)
+    if (!Number.isFinite(nextRequestDelayMs) || nextRequestDelayMs < 0) throw new Error('网盘分页节流参数无效。')
+    if (storageId !== activeStorageId.value) throw new Error('网盘已切换，请重新读取目录。')
     if (payload?.folder) {
       directoryMetadata.value = { ...directoryMetadata.value, [parentId]: payload.folder }
     }
@@ -263,6 +273,10 @@ async function listPikPakItems(parentId = '') {
     pageToken = String(payload?.nextPageToken || '')
     if (pageToken && seenTokens.has(pageToken)) break
     if (pageToken) seenTokens.add(pageToken)
+    if (pageToken && nextRequestDelayMs > 0) {
+      if (nextRequestDelayMs > 1000) { const error = new Error('当前网盘请求频率受限，请稍后重试。'); error.code = 'quark_rate_limited'; throw error }
+      await new Promise((resolve) => setTimeout(resolve, nextRequestDelayMs))
+    }
   } while (pageToken && seenTokens.size < 200)
   return items
 }
@@ -309,12 +323,23 @@ async function readLibraryDirectory(strictFolderReads = false) {
 async function loadStorageProviders() {
   const payload = await apiJson('/api/storage-providers')
   storageProviders.value = Array.isArray(payload?.providers) ? payload.providers : []
-  const current = storageProviders.value.find((provider) => provider.id === activeStorageId.value && provider.selectable)
+  const preferred = new URLSearchParams(location.search).get('storageId') || payload.defaultStorageId
+  const current = storageProviders.value.find((provider) => provider.id === preferred && provider.selectable)
+  if (current) activeStorageId.value = current.id
   if (!current) {
     const fallback = storageProviders.value.find((provider) => provider.id === payload?.defaultStorageId && provider.selectable)
       || storageProviders.value.find((provider) => provider.selectable)
     if (fallback) activeStorageId.value = fallback.id
   }
+}
+
+async function switchStorage(event) {
+  if (loadingLibrary.value || uploading.value || managementBusy.value) return
+  activeStorageId.value = event.target.value
+  rootFolders.value = []; rootFiles.value = []; folderMap.value = {}; directoryMetadata.value = {}; manifestUpdatedAt.value = ''
+  closePhotoViewer(); closePreview(); selectedAction.value = null; managementDialog.value = ''; goHome()
+  const url = new URL(location.href); url.searchParams.set('storageId', activeStorageId.value); url.searchParams.delete('folderId'); history.replaceState(null, '', url)
+  await loadLibrary()
 }
 
 async function loadLibrary() {
@@ -484,10 +509,10 @@ async function handleUpload(event) {
   try {
     const hash = await calcGcid(file)
     uploadStatus.value = '正在申请 PikPak 上传凭证…'
-    const ticket = await apiJson('/api/pikpak-upload-ticket', {
+    const ticket = await apiJson('/api/storage-upload-ticket', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: file.name, size: file.size, hash, parentId }),
+      body: JSON.stringify({ storageId: activeStorageId.value, name: file.name, size: file.size, hash, parentId }),
     })
     if (!ticket.instant) {
       uploadStatus.value = '正在直接上传到 PikPak…'
@@ -681,10 +706,10 @@ async function submitManagementDialog() {
         ? (folderMap.value[parentId]?.files || [])
         : [...rootFolders.value, ...rootFiles.value]
       const previousIds = new Set(before.map((entry) => entry.id))
-      const result = await apiJson('/api/pikpak-create-folder', {
+      const result = await apiJson('/api/storage-create-folder', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+        body: JSON.stringify({ storageId: activeStorageId.value,
           name: requestedName,
           parentId,
           type: newFolderType.value,
@@ -710,10 +735,10 @@ async function submitManagementDialog() {
     if (!item?.id) throw new Error('缺少 PikPak 项目 ID，无法执行操作。')
 
     if (mode === 'rename') {
-      await apiJson('/api/pikpak-rename', {
+      await apiJson('/api/storage-rename', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id: item.id, parentId, name: requestedName }),
+        body: JSON.stringify({ storageId: activeStorageId.value, id: item.id, parentId, name: requestedName }),
       })
       requestAccepted = true
       const items = await refreshDirectory(parentId)
@@ -729,10 +754,10 @@ async function submitManagementDialog() {
       return
     }
 
-    await apiJson('/api/pikpak-trash', {
+    await apiJson('/api/storage-trash', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ id: item.id, parentId }),
+      body: JSON.stringify({ storageId: activeStorageId.value, id: item.id, parentId }),
     })
     requestAccepted = true
     const items = await refreshDirectory(parentId)
@@ -775,7 +800,7 @@ async function loginCloud() {
     await apiJson('/api/cloud-login', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ password: authPassword.value }),
+      body: JSON.stringify({ storageId: activeStorageId.value, password: authPassword.value }),
     })
     authPassword.value = ''
     authRequired.value = false
@@ -947,7 +972,7 @@ onMounted(async () => {
     const playAttempt = background.play()
     if (playAttempt && typeof playAttempt.catch === 'function') playAttempt.catch(() => {})
   }
-  await loadStorageProviders()
+  try { await loadStorageProviders() } catch (error) { errorMessage.value = error.message; return }
   const folderId = new URLSearchParams(window.location.search).get('folderId') || ''
   if (folderId) {
     pendingDeepLinkFolderId = folderId
@@ -1008,11 +1033,17 @@ onBeforeUnmount(() => {
           <div v-if="errorMessage" class="error-banner" role="alert">{{ errorMessage }}</div>
           <div v-if="managementStatus" class="operation-status" role="status">{{ managementStatus }}</div>
 
+          <label class="cloud-storage-picker" for="cloud-storage-select">
+            <span>当前网盘</span>
+            <select id="cloud-storage-select" :value="activeStorageId" :disabled="loadingLibrary || uploading || managementBusy" @change="switchStorage">
+              <option v-for="storage in storageProviders" :key="storage.id" :value="storage.id" :disabled="!storage.selectable">{{ storage.name }}{{ storage.selectable ? '' : '（待授权）' }}</option>
+            </select>
+          </label>
           <section v-if="authRequired" class="auth-gate" aria-labelledby="auth-title">
             <div class="auth-mark"><img src="/assets/logo.png" alt="" /></div>
             <p class="eyebrow">Map7e Cloud</p>
             <h1 id="auth-title">登录私人云盘</h1>
-            <p class="auth-copy">输入云盘访问密码以读取 PikPak 目录。</p>
+            <p class="auth-copy">输入云盘访问密码以读取 {{ activeStorageName }} 目录。</p>
             <form class="auth-form" @submit.prevent="loginCloud">
               <input v-model="authPassword" type="password" autocomplete="current-password" placeholder="云盘访问密码" aria-label="云盘访问密码" />
               <button class="auth-submit" type="submit" :disabled="!authPassword || authenticating">
@@ -1057,7 +1088,7 @@ onBeforeUnmount(() => {
                     <span><i class="legend-dot legend-dot--file" />文件 {{ fileCount }}</span>
                   </div>
                 </div>
-                <p class="overview-footnote">统计已读取的 PikPak 目录项目，不包含未展开子文件夹中的内容。</p>
+                <p class="overview-footnote">统计已读取的 {{ activeStorageName }} 目录项目，不包含未展开子文件夹中的内容。</p>
               </template>
             </section>
 
@@ -1115,7 +1146,7 @@ onBeforeUnmount(() => {
                 class="photo-tile"
               >
                 <button class="photo-open" type="button" :aria-label="'查看图片 ' + photo.name" @click="openPhotoViewer(photo, visiblePhotos)">
-                  <span class="photo-thumb"><img :src="photo.thumbnail || photo.path" :alt="photo.name" loading="lazy" decoding="async" /></span>
+                  <span class="photo-thumb"><img v-if="photo.thumbnail" :src="photo.thumbnail" :alt="photo.name" loading="lazy" decoding="async" /><span v-else class="photo-placeholder">图片</span></span>
                   <span class="photo-name">{{ photo.name }}</span>
                 </button>
                 <button class="photo-more" type="button" :aria-label="'图片操作：' + photo.name" @click.stop="openItemActions(photo, 'albums')">···</button>
@@ -1164,11 +1195,11 @@ onBeforeUnmount(() => {
             </div>
 
             <div v-if="activeDirectoryWritable" class="upload-toolbar manage-toolbar">
-              <button class="upload-button" type="button" :disabled="managementBusy || uploading" @click="openCreateFolderDialog">
+              <button class="upload-button" type="button" :disabled="managementBusy || uploading || !activeCapabilities.createFolder" @click="openCreateFolderDialog">
                 <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>
                 <span>新建文件夹</span>
               </button>
-              <template v-if="activeFileFolderData">
+              <template v-if="activeFileFolderData && activeCapabilities.upload">
                 <input ref="uploadInput" class="visually-hidden" type="file" @change="handleUpload" />
                 <button class="upload-button" type="button" :disabled="uploading || managementBusy" @click="selectUploadFile">
                   <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15V4m0 0L8 8m4-4 4 4M5 14v5h14v-5" /></svg>
@@ -1218,7 +1249,7 @@ onBeforeUnmount(() => {
               <div v-if="activeFileFolderData.folderType === 'album' && visibleAlbumFolderPhotos.length" class="photo-grid folder-photo-grid">
                 <article v-for="photo in visibleAlbumFolderPhotos" :key="photo.id || photo.path" class="photo-tile">
                   <button class="photo-open" type="button" :aria-label="'查看图片 ' + photo.name" @click="openPhotoViewer(photo, visibleAlbumFolderPhotos)">
-                    <span class="photo-thumb"><img :src="photo.thumbnail || photo.path" :alt="photo.name" loading="lazy" decoding="async" /></span>
+                    <span class="photo-thumb"><img v-if="photo.thumbnail" :src="photo.thumbnail" :alt="photo.name" loading="lazy" decoding="async" /><span v-else class="photo-placeholder">图片</span></span>
                     <span class="photo-name">{{ photo.name }}</span>
                   </button>
                   <button class="photo-more" type="button" :aria-label="'图片操作：' + photo.name" @click.stop="openItemActions(photo)">···</button>
@@ -1347,8 +1378,8 @@ onBeforeUnmount(() => {
             {{ selectedAction.item.isFolder ? '打开' : (selectedAction.source === 'albums' ? '查看' : '预览') }}
           </button>
           <a v-if="!selectedAction.item.isFolder" class="sheet-action" :href="selectedAction.item.path" :download="selectedAction.item.name" @click="closeItemActions">下载</a>
-          <button v-if="selectedAction.writable" class="sheet-action" type="button" @click="chooseItemAction('rename')">重命名</button>
-          <button v-if="selectedAction.writable" class="sheet-action sheet-action--danger" type="button" @click="chooseItemAction('trash')">删除</button>
+          <button v-if="selectedAction.writable && activeCapabilities.rename" class="sheet-action" type="button" @click="chooseItemAction('rename')">重命名</button>
+          <button v-if="selectedAction.writable && activeCapabilities.trash" class="sheet-action sheet-action--danger" type="button" @click="chooseItemAction('trash')">删除</button>
           <button class="sheet-cancel" type="button" @click="closeItemActions">取消</button>
         </section>
       </div>

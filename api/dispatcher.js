@@ -1,3 +1,6 @@
+import adminStorages from '../lib/api-handlers/admin-storages.js'
+import quarkOAuth from '../lib/api-handlers/quark-oauth.js'
+import { storageWrite } from '../lib/api-handlers/storage-write.js'
 import adminChangePassword from '../lib/api-handlers/admin-change-password.js'
 import adminConfig from '../lib/api-handlers/admin-config.js'
 import adminFileMetadata from '../lib/api-handlers/admin-file-metadata.js'
@@ -21,6 +24,12 @@ import pikpakTrash from '../lib/api-handlers/pikpak-trash.js'
 import pikpakUploadTicket from '../lib/api-handlers/pikpak-upload-ticket.js'
 
 const handlers = new Map([
+  ['admin-storages', adminStorages],
+  ['quark-oauth', quarkOAuth],
+  ['storage-create-folder', storageWrite('createFolder')],
+  ['storage-rename', storageWrite('rename')],
+  ['storage-trash', storageWrite('trash')],
+  ['storage-upload-ticket', storageWrite('upload')],
   ['admin-change-password', adminChangePassword],
   ['admin-config', adminConfig],
   ['admin-file-metadata', adminFileMetadata],
