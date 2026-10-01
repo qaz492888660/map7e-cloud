@@ -1,10 +1,32 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import CloudCategoryIcon from './CloudCategoryIcon.vue'
 
 const BLOG_VIDEO_URL = 'https://blog.map7e.com/videos/underwater.mp4'
 const TEXT_EXTENSIONS = ['txt', 'md', 'markdown', 'json', 'csv', 'xml', 'yaml', 'yml', 'log', 'ini']
 const IMAGE_EXTENSIONS = ['jpg', 'jpeg', 'png', 'webp', 'gif', 'avif', 'svg']
 const VIDEO_EXTENSIONS = ['mp4', 'webm', 'mov', 'm4v']
+const AUDIO_EXTENSIONS = ['mp3', 'm4a', 'aac', 'flac', 'wav', 'ogg', 'opus', 'wma']
+const NOVEL_EXTENSIONS = ['txt', 'epub', 'mobi', 'azw', 'azw3']
+const RECENT_FILTER_TABS = [
+  { id: 'all', label: '全部' },
+  { id: 'video', label: '视频' },
+  { id: 'image', label: '图片' },
+  { id: 'document', label: '文档' },
+  { id: 'audio', label: '音频' },
+  { id: 'novel', label: '小说' },
+  { id: 'other', label: '其他' },
+]
+const FILE_CATEGORY_TABS = [
+  { id: 'all', label: '全部' },
+  { id: 'video', label: '视频' },
+  { id: 'image', label: '图片' },
+  { id: 'document', label: '文档' },
+  { id: 'audio', label: '音频' },
+  { id: 'novel', label: '小说' },
+  { id: 'folder', label: '文件夹' },
+  { id: 'private', label: '私密' },
+]
 const rootFolders = ref([])
 const folderMap = ref({})
 const rootFiles = ref([])
@@ -12,8 +34,23 @@ const directoryMetadata = ref({})
 const manifestUpdatedAt = ref('')
 const storageProviders = ref([])
 const activeStorageId = ref('pikpak-main')
+const selectedCategory = ref('all')
+const recentFilter = ref('all')
+const recentLayout = ref('list')
+const quickActionsOpen = ref(false)
+const mobileSearchOpen = ref(false)
+const backgroundVideoLoaded = ref(false)
 const activeCapabilities = computed(() => storageProviders.value.find(p => p.id === activeStorageId.value)?.capabilities || {})
 const activeStorageName = computed(() => storageProviders.value.find((provider) => provider.id === activeStorageId.value)?.name || '网盘')
+const activeStorageInfo = computed(() => storageProviders.value.find((provider) => provider.id === activeStorageId.value) || null)
+const activeQuota = computed(() => {
+  const quota = activeStorageInfo.value?.quota
+  const used = Number(quota?.used)
+  const total = Number(quota?.total)
+  if (!Number.isFinite(used) || !Number.isFinite(total) || used < 0 || total <= 0) return null
+  return { used, total }
+})
+const quotaPercent = computed(() => activeQuota.value ? Math.min(100, Math.max(0, activeQuota.value.used / activeQuota.value.total * 100)) : 0)
 const loadingLibrary = ref(true)
 const errorMessage = ref('')
 const authRequired = ref(false)
@@ -49,6 +86,9 @@ const newFolderAccess = ref('inherit')
 const fileNameInput = ref(null)
 let touchOrigin = null
 let pendingDeepLinkFolderId = ''
+const directoryCache = new Map()
+let storageLoadGeneration = 0
+let rootStorageResolvedGeneration = -1
 
 const activeFolder = computed(() => folderMap.value[activeFileFolder.value] || null)
 const allFiles = computed(() => {
@@ -57,6 +97,29 @@ const allFiles = computed(() => {
     .filter((item) => !item.isFolder)
     .forEach((item) => unique.set(item.id || item.path, item))
   return [...unique.values()]
+})
+const recentFiles = computed(() => [...allFiles.value]
+  .sort((a, b) => recentTimestamp(b) - recentTimestamp(a))
+  .slice(0, 8))
+const filteredRecentFiles = computed(() => {
+  const query = searchQuery.value.trim().toLocaleLowerCase()
+  return recentFiles.value.filter((file) => {
+    const matchesSearch = !query || file.name.toLocaleLowerCase().includes(query)
+    return matchesSearch && matchesCategory(file, recentFilter.value)
+  })
+})
+const categoryCards = computed(() => {
+  const count = (category) => allFiles.value.filter((file) => matchesCategory(file, category)).length
+  const privateCount = rootFolders.value.filter(isPrivateItem).length
+  return [
+    { id: 'video', label: '视频', icon: 'video', meta: `${count('video')} 项已读取`, enabled: true },
+    { id: 'image', label: '相册', icon: 'photos', meta: `${count('image')} 项已读取`, enabled: true },
+    { id: 'document', label: '文档', icon: 'documents', meta: `${count('document')} 项已读取`, enabled: true },
+    { id: 'audio', label: '音频', icon: 'audio', meta: `${count('audio')} 项已读取`, enabled: true },
+    { id: 'novel', label: '小说', icon: 'novel', meta: `${count('novel')} 项已读取`, enabled: true },
+    { id: 'private', label: '私密空间', icon: 'private', meta: `${privateCount} 个已标记私密`, enabled: true },
+    { id: 'trash', label: '回收站', icon: 'trash', meta: activeCapabilities.value.trash ? '列表暂未接入' : '当前网盘不支持', enabled: false },
+  ]
 })
 const albumFiles = computed(() => allFiles.value)
 const albumPhotos = computed(() => albumFiles.value.filter(isImageFile))
@@ -79,7 +142,9 @@ const fileFolders = computed(() => {
   return rootFolders.value.map((folder) => ({
     ...folder,
     files: folderMap.value[folder.slug]?.files || [],
-    fileCount: (folderMap.value[folder.slug]?.files || []).filter((file) => !file.isFolder).length,
+    fileCount: folderMap.value[folder.slug]
+      ? (folderMap.value[folder.slug]?.files || []).filter((file) => !file.isFolder).length
+      : null,
   }))
 })
 const rootLooseFiles = computed(() => rootFiles.value.filter((item) => !item.isFolder))
@@ -96,13 +161,13 @@ const managementSubmitDisabled = computed(() => {
 const currentFileItems = computed(() => activeFileFolderData.value?.files || [])
 const visibleCurrentFiles = computed(() => {
   const query = searchQuery.value.trim().toLocaleLowerCase()
-  return currentFileItems.value.filter((file) => !file.isFolder && (!query || file.name.toLocaleLowerCase().includes(query)))
+  return currentFileItems.value.filter((file) => !file.isFolder && (!query || file.name.toLocaleLowerCase().includes(query)) && matchesCategory(file, selectedCategory.value))
 })
 const visibleAlbumFolderPhotos = computed(() => visibleCurrentFiles.value.filter(isImageFile))
 const visibleNonImageFolderFiles = computed(() => visibleCurrentFiles.value.filter((file) => !isImageFile(file)))
 const visibleCurrentFolders = computed(() => {
   const query = searchQuery.value.trim().toLocaleLowerCase()
-  return currentFileItems.value.filter((file) => file.isFolder && (!query || file.name.toLocaleLowerCase().includes(query)))
+  return currentFileItems.value.filter((file) => file.isFolder && (!query || file.name.toLocaleLowerCase().includes(query)) && (selectedCategory.value === 'all' || selectedCategory.value === 'folder' || (selectedCategory.value === 'private' && isPrivateItem(file))))
 })
 const visibleFileFolders = computed(() => {
   const query = searchQuery.value.trim().toLocaleLowerCase()
@@ -111,8 +176,11 @@ const visibleFileFolders = computed(() => {
 })
 const rootFileSearchResults = computed(() => {
   const query = searchQuery.value.trim().toLocaleLowerCase()
-  if (!query) return rootLooseFiles.value
-  return rootLooseFiles.value.filter((file) => file.name.toLocaleLowerCase().includes(query))
+  return rootLooseFiles.value.filter((file) => (!query || file.name.toLocaleLowerCase().includes(query)) && matchesCategory(file, selectedCategory.value))
+})
+const visibleRootFolders = computed(() => {
+  const query = searchQuery.value.trim().toLocaleLowerCase()
+  return fileFolders.value.filter((folder) => (!query || folder.name.toLocaleLowerCase().includes(query)) && (selectedCategory.value === 'all' || selectedCategory.value === 'folder' || (selectedCategory.value === 'private' && isPrivateItem(folder))))
 })
 const locationLabel = computed(() => {
   if (currentView.value === 'home') return '家 / Map7e'
@@ -123,7 +191,7 @@ const backLabel = computed(() => currentView.value === 'files' && activeFileFold
 const currentHeading = computed(() => {
   if (currentView.value === 'albums') return '相册目录'
   if (activeFileFolderData.value) return activeFileFolderData.value.name
-  return '文件目录'
+  return selectedCategory.value === 'all' ? '全部文件' : ({ video: '视频', image: '相册', document: '文档', audio: '音频', novel: '小说', private: '私密空间' }[selectedCategory.value] || '文件目录')
 })
 const currentFileCount = computed(() => activeFileFolderData.value ? activeFileFolderData.value.files.filter((file) => !file.isFolder).length : rootLooseFiles.value.length)
 const photoCounter = computed(() => viewerItems.value.length > 1 ? (viewerIndex.value + 1) + ' / ' + viewerItems.value.length : '图片预览')
@@ -144,9 +212,35 @@ function classifyType(item) {
   const ext = String(item?.extension || extensionOf(item?.name)).toLowerCase()
   if (mime.startsWith('image/')) return 'image'
   if (mime.startsWith('video/')) return 'video'
+  if (mime.startsWith('audio/') || AUDIO_EXTENSIONS.includes(ext)) return 'audio'
+  if (NOVEL_EXTENSIONS.includes(ext)) return 'novel'
   if (['zip', 'rar', '7z', 'tar', 'gz', 'bz2', 'xz'].includes(ext)) return 'archive'
   if (mime.startsWith('text/') || ['pdf', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'txt', 'md', 'json', 'csv'].includes(ext)) return 'document'
   return 'other'
+}
+
+function matchesCategory(file, category) {
+  if (!category || category === 'all') return true
+  if (category === 'private') return isPrivateItem(file)
+  if (category === 'folder') return Boolean(file?.isFolder)
+  if (file?.isFolder) return false
+  return classifyType(file) === category
+}
+
+function isPrivateItem(item) {
+  return item?.access === 'locked' || item?.effectiveAccess === 'locked'
+}
+
+function recentTimestamp(file) {
+  const value = file?.modifiedAt || file?.createdAt || file?.date || ''
+  const parsed = Date.parse(value)
+  return Number.isFinite(parsed) ? parsed : 0
+}
+
+function recentTimeLabel(file) {
+  if (file?.modifiedAt) return formatDate(file.modifiedAt) ? `更新于 ${formatDate(file.modifiedAt)}` : '更新时间未知'
+  if (file?.createdAt) return formatDate(file.createdAt) ? `创建于 ${formatDate(file.createdAt)}` : '创建时间未知'
+  return '时间未知'
 }
 
 function formatDate(value) {
@@ -155,7 +249,7 @@ function formatDate(value) {
   return /^\d{4}-\d{2}-\d{2}/.test(text) ? text.slice(0, 10) : ''
 }
 
-function normalizePikPakItem(file) {
+function normalizePikPakItem(file, storageId = activeStorageId.value) {
   const isFolder = Boolean(file?.isFolder)
   const extension = String(file?.extension || extensionOf(file?.name))
   const sizeBytes = file?.size === null || file?.size === undefined || file?.size === '' ? null : Number(file.size)
@@ -163,12 +257,13 @@ function normalizePikPakItem(file) {
     id: String(file?.id || ''),
     parentId: String(file?.parentId || ''),
     name: String(file?.name || '未命名文件'),
-    path: isFolder ? '' : '/api/storage-download?storageId=' + encodeURIComponent(activeStorageId.value) + '&id=' + encodeURIComponent(String(file?.id || '')) + '&parentId=' + encodeURIComponent(String(file?.parentId || '')),
+    path: isFolder ? '' : '/api/storage-download?storageId=' + encodeURIComponent(storageId) + '&id=' + encodeURIComponent(String(file?.id || '')) + '&parentId=' + encodeURIComponent(String(file?.parentId || '')),
     size: isFolder ? '' : (sizeBytes !== null && Number.isFinite(sizeBytes) && sizeBytes >= 0 ? formatBytes(sizeBytes) : ''),
     sizeBytes: !isFolder && sizeBytes !== null && Number.isFinite(sizeBytes) && sizeBytes >= 0 ? sizeBytes : null,
     rawSize: sizeBytes !== null && Number.isFinite(sizeBytes) && sizeBytes >= 0 ? sizeBytes : null,
     date: formatDate(file?.modifiedAt || file?.createdAt),
-    modifiedAt: file?.modifiedAt || file?.createdAt || '',
+    modifiedAt: file?.modifiedAt || '',
+    createdAt: file?.createdAt || '',
     type: classifyType(file),
     mimeType: String(file?.mimeType || ''),
     description: '',
@@ -212,8 +307,10 @@ function fileSizeLabel(file) {
 
 function fileTypeLabel(file) {
   if (file.isFolder) return '文件夹'
+  const typeLabels = { image: '图片', video: '视频', document: '文档', audio: '音频', novel: '小说', archive: '压缩包' }
+  if (typeLabels[file.type]) return typeLabels[file.type]
   if (file.extension) return file.extension.toLocaleUpperCase()
-  const labels = { archive: '压缩包', document: '文档', image: '图片', video: '视频', other: '文件' }
+  const labels = { other: '文件' }
   return labels[file.type] || labels.other
 }
 
@@ -222,6 +319,8 @@ function fileIconClass(file) {
   if (file.type === 'archive') return 'file-icon--archive'
   if (isImageFile(file)) return 'file-icon--image'
   if (file.type === 'video' || VIDEO_EXTENSIONS.includes(file.extension)) return 'file-icon--video'
+  if (file.type === 'audio') return 'file-icon--audio'
+  if (file.type === 'novel') return 'file-icon--novel'
   if (file.extension === 'json') return 'file-icon--code'
   return 'file-icon--document'
 }
@@ -251,82 +350,167 @@ async function apiJson(url, options = {}) {
   return payload
 }
 
-async function listPikPakItems(parentId = '') {
-  const storageId = activeStorageId.value
-  const items = []
-  let pageToken = ''
-  const seenTokens = new Set()
-  do {
-    const params = new URLSearchParams()
-    params.set('storageId', storageId)
-    if (parentId) params.set('parentId', parentId)
-    if (pageToken) params.set('pageToken', pageToken)
-    const payload = await apiJson('/api/storage-files?' + params.toString())
-    const nextRequestDelayMs = Number(payload?.nextRequestDelayMs || 0)
-    if (!Number.isFinite(nextRequestDelayMs) || nextRequestDelayMs < 0) throw new Error('网盘分页节流参数无效。')
-    if (storageId !== activeStorageId.value) throw new Error('网盘已切换，请重新读取目录。')
-    if (payload?.folder) {
-      directoryMetadata.value = { ...directoryMetadata.value, [parentId]: payload.folder }
-    }
-    items.push(...(Array.isArray(payload?.items) ? payload.items : []).map(normalizePikPakItem))
-    manifestUpdatedAt.value = formatDate(payload?.syncTime) || manifestUpdatedAt.value
-    pageToken = String(payload?.nextPageToken || '')
-    if (pageToken && seenTokens.has(pageToken)) break
-    if (pageToken) seenTokens.add(pageToken)
-    if (pageToken && nextRequestDelayMs > 0) {
-      if (nextRequestDelayMs > 1000) { const error = new Error('当前网盘请求频率受限，请稍后重试。'); error.code = 'quark_rate_limited'; throw error }
-      await new Promise((resolve) => setTimeout(resolve, nextRequestDelayMs))
-    }
-  } while (pageToken && seenTokens.size < 200)
-  return items
+function directoryKey(storageId, parentId) { return `${storageId}\u0000${parentId}` }
+
+function directoryIsCurrent(storageId, generation) {
+  return generation === storageLoadGeneration && storageId === activeStorageId.value
 }
 
-async function loadFolder(id, name = '', writable, parentId, metadata = {}) {
-  const files = await listPikPakItems(id)
+function presentDirectory(parentId, entry) {
+  if (!parentId) {
+    const previousFolders = rootFolders.value
+    rootFiles.value = entry.items.filter((item) => !item.isFolder)
+    const nextFolders = entry.items.filter((item) => item.isFolder).map(normalizeRootFolder)
+    const validIds = new Set(nextFolders.map((folder) => folder.slug))
+    rootFolders.value = nextFolders
+    if (entry.complete) {
+      for (const folder of previousFolders) {
+        if (!validIds.has(folder.slug)) clearCachedFolderTree(folder.slug)
+      }
+    }
+  } else {
+    const known = folderMap.value[parentId]
+    const root = rootFolders.value.find((folder) => folder.slug === parentId)
+    const actual = directoryMetadata.value[parentId] || {}
+    folderMap.value = {
+      ...folderMap.value,
+      [parentId]: {
+        ...(known || {}),
+        id: parentId,
+        slug: parentId,
+        name: known?.name || root?.name || actual.name || '文件夹',
+        description: activeStorageName.value + ' 实时目录',
+        updatedAt: known?.updatedAt || root?.updatedLabel || '',
+        parentId: known?.parentId ?? root?.parentId ?? actual.parentId ?? '',
+        writable: known?.writable ?? root?.writable ?? actual.writable ?? true,
+        folderType: known?.folderType ?? actual.type ?? root?.folderType ?? 'folder',
+        access: known?.access ?? actual.access ?? root?.access ?? 'inherit',
+        effectiveAccess: known?.effectiveAccess ?? actual.effectiveAccess ?? root?.effectiveAccess ?? 'public',
+        files: entry.items,
+      },
+    }
+  }
+}
+
+async function requestDirectoryPage(parentId, pageToken, requestedStorageId, generation) {
+  const params = new URLSearchParams()
+  if (requestedStorageId) params.set('storageId', requestedStorageId)
+  if (parentId) params.set('parentId', parentId)
+  if (pageToken) params.set('pageToken', pageToken)
+  const payload = await apiJson('/api/storage-files?' + params.toString())
+  const storageId = String(payload?.storageId || requestedStorageId || activeStorageId.value)
+  if (generation !== storageLoadGeneration || (requestedStorageId && storageId !== requestedStorageId)) return null
+  if (!parentId && !requestedStorageId) rootStorageResolvedGeneration = generation
+  if (!requestedStorageId && storageId !== activeStorageId.value) activeStorageId.value = storageId
+  if (!directoryIsCurrent(storageId, generation)) return null
+  const nextRequestDelayMs = Number(payload?.nextRequestDelayMs || 0)
+  if (!Number.isFinite(nextRequestDelayMs) || nextRequestDelayMs < 0) throw new Error('网盘分页节流参数无效。')
+  if (payload?.folder) directoryMetadata.value = { ...directoryMetadata.value, [parentId]: payload.folder }
+  manifestUpdatedAt.value = formatDate(payload?.syncTime) || manifestUpdatedAt.value
+  return {
+    storageId,
+    items: (Array.isArray(payload?.items) ? payload.items : []).map((item) => normalizePikPakItem(item, storageId)),
+    nextPageToken: String(payload?.nextPageToken || ''),
+    nextRequestDelayMs,
+  }
+}
+
+async function appendDirectoryPages(parentId, entry, generation) {
+  if (entry.loadingPages || entry.complete) return
+  entry.loadingPages = true
+  try {
+    while (entry.nextPageToken && entry.seenTokens.size < 200 && !entry.cancelled && directoryIsCurrent(entry.storageId, generation)) {
+      const pageToken = entry.nextPageToken
+      if (entry.seenTokens.has(pageToken)) { entry.nextPageToken = ''; break }
+      entry.seenTokens.add(pageToken)
+      if (entry.nextRequestDelayMs > 0) await new Promise((resolve) => setTimeout(resolve, entry.nextRequestDelayMs))
+      if (!directoryIsCurrent(entry.storageId, generation)) return
+      const page = await requestDirectoryPage(parentId, pageToken, entry.storageId, generation)
+      if (!page || entry.cancelled) return
+      entry.items.push(...page.items)
+      entry.nextPageToken = page.nextPageToken
+      entry.nextRequestDelayMs = page.nextRequestDelayMs
+      if (entry.nextPageToken && entry.seenTokens.has(entry.nextPageToken)) { entry.nextPageToken = ''; break }
+      presentDirectory(parentId, entry)
+    }
+    entry.complete = !entry.nextPageToken || entry.seenTokens.size >= 200
+    if (!parentId && entry.complete && directoryIsCurrent(entry.storageId, generation)) presentDirectory(parentId, entry)
+  } catch (error) {
+    if (directoryIsCurrent(entry.storageId, generation)) errorMessage.value = error instanceof Error ? error.message : '目录后续分页读取失败。'
+  } finally {
+    entry.loadingPages = false
+  }
+}
+
+async function loadDirectory(parentId = '', { force = false, requestedStorageId = activeStorageId.value, generation = storageLoadGeneration } = {}) {
+  let entry = requestedStorageId ? directoryCache.get(directoryKey(requestedStorageId, parentId)) : null
+  if (entry && !force) {
+    if (!directoryIsCurrent(requestedStorageId, generation)) return null
+    presentDirectory(parentId, entry)
+    void appendDirectoryPages(parentId, entry, generation)
+    return entry
+  }
+  if (entry && force) { entry.cancelled = true; directoryCache.delete(directoryKey(requestedStorageId, parentId)) }
+  const page = await requestDirectoryPage(parentId, '', requestedStorageId, generation)
+  if (!page || !directoryIsCurrent(page.storageId, generation)) return null
+  entry = {
+    storageId: page.storageId,
+    items: page.items,
+    nextPageToken: page.nextPageToken,
+    nextRequestDelayMs: page.nextRequestDelayMs,
+    seenTokens: new Set(),
+    loadingPages: false,
+    complete: !page.nextPageToken,
+  }
+  directoryCache.set(directoryKey(entry.storageId, parentId), entry)
+  presentDirectory(parentId, entry)
+  void appendDirectoryPages(parentId, entry, generation)
+  return entry
+}
+
+async function loadFolder(id, name = '', writable, parentId, metadata = {}, { force = false, generation = storageLoadGeneration } = {}) {
+  const entry = await loadDirectory(id, { force, requestedStorageId: activeStorageId.value, generation })
+  if (!entry) return null
   const known = folderMap.value[id]
   const root = rootFolders.value.find((folder) => folder.slug === id)
   const actual = directoryMetadata.value[id] || {}
   folderMap.value = {
     ...folderMap.value,
     [id]: {
+      ...(known || {}),
       id,
       slug: id,
       name: name || known?.name || root?.name || actual.name || '文件夹',
       description: activeStorageName.value + ' 实时目录',
-      updatedAt: root?.updatedLabel || '',
+      updatedAt: root?.updatedLabel || known?.updatedAt || '',
       parentId: parentId ?? metadata.parentId ?? root?.parentId ?? known?.parentId ?? actual.parentId ?? '',
       writable: writable ?? metadata.writable ?? root?.writable ?? known?.writable ?? actual.writable ?? true,
       folderType: metadata.folderType ?? actual.type ?? known?.folderType ?? root?.folderType ?? 'folder',
       access: metadata.access ?? actual.access ?? known?.access ?? root?.access ?? 'inherit',
-      effectiveAccess: metadata.effectiveAccess ?? actual.effectiveAccess ?? known?.effectiveAccess ?? root?.effectiveAccess ?? 'public',
-      files,
+      effectiveAccess: metadata.effectiveAccess ?? actual.effectiveAccess ?? root?.effectiveAccess ?? known?.effectiveAccess ?? 'public',
+      files: entry.items,
     },
   }
   return folderMap.value[id]
 }
 
-async function readLibraryDirectory(strictFolderReads = false) {
-  const items = await listPikPakItems()
-  rootFiles.value = items.filter((item) => !item.isFolder)
-  rootFolders.value = items.filter((item) => item.isFolder).map(normalizeRootFolder)
-  folderMap.value = {}
-  await Promise.all(rootFolders.value.map(async (folder) => {
-    try {
-      await loadFolder(folder.slug, folder.name, folder.writable, '')
-    } catch (error) {
-      if (strictFolderReads) throw error
-    }
-  }))
-  return items
+async function readLibraryDirectory({ force = false, requestedStorageId = activeStorageId.value, generation = storageLoadGeneration } = {}) {
+  const entry = await loadDirectory('', { force, requestedStorageId, generation })
+  return entry?.items || []
 }
 
-async function loadStorageProviders() {
+async function loadStorageProviders(generation = storageLoadGeneration) {
   const payload = await apiJson('/api/storage-providers')
+  if (generation !== storageLoadGeneration) return
   storageProviders.value = Array.isArray(payload?.providers) ? payload.providers : []
-  const preferred = new URLSearchParams(location.search).get('storageId') || payload.defaultStorageId
+  const urlStorageId = new URLSearchParams(location.search).get('storageId')
+  const preferred = urlStorageId || payload.defaultStorageId
   const current = storageProviders.value.find((provider) => provider.id === preferred && provider.selectable)
-  if (current) activeStorageId.value = current.id
-  if (!current) {
+  if (urlStorageId) {
+    if (current) activeStorageId.value = current.id
+  } else if (rootStorageResolvedGeneration !== generation && current) {
+    activeStorageId.value = current.id
+  } else if (!urlStorageId && rootStorageResolvedGeneration !== generation) {
     const fallback = storageProviders.value.find((provider) => provider.id === payload?.defaultStorageId && provider.selectable)
       || storageProviders.value.find((provider) => provider.selectable)
     if (fallback) activeStorageId.value = fallback.id
@@ -335,31 +519,37 @@ async function loadStorageProviders() {
 
 async function switchStorage(event) {
   if (loadingLibrary.value || uploading.value || managementBusy.value) return
+  storageLoadGeneration += 1
   activeStorageId.value = event.target.value
   rootFolders.value = []; rootFiles.value = []; folderMap.value = {}; directoryMetadata.value = {}; manifestUpdatedAt.value = ''
   closePhotoViewer(); closePreview(); selectedAction.value = null; managementDialog.value = ''; goHome()
   const url = new URL(location.href); url.searchParams.set('storageId', activeStorageId.value); url.searchParams.delete('folderId'); history.replaceState(null, '', url)
-  await loadLibrary()
+  await loadLibrary({ requestedStorageId: activeStorageId.value, generation: storageLoadGeneration })
 }
 
-async function loadLibrary() {
+async function loadLibrary({ requestedStorageId = activeStorageId.value, generation = storageLoadGeneration } = {}) {
+  if (generation !== storageLoadGeneration) return
   loadingLibrary.value = true
   errorMessage.value = ''
   uploadStatus.value = ''
   try {
-    await readLibraryDirectory()
-    authRequired.value = false
+    await readLibraryDirectory({ requestedStorageId, generation })
+    if (generation === storageLoadGeneration) authRequired.value = false
+    return generation === storageLoadGeneration
   } catch (error) {
-    rootFiles.value = []
-    rootFolders.value = []
-    folderMap.value = {}
-    if (error?.code === 'authentication_required') {
-      authRequired.value = true
-    } else {
-      errorMessage.value = error instanceof Error ? error.message : '无法读取当前网盘。'
+    if (generation === storageLoadGeneration) {
+      rootFiles.value = []
+      rootFolders.value = []
+      folderMap.value = {}
+      if (error?.code === 'authentication_required') {
+        authRequired.value = true
+      } else {
+        errorMessage.value = error instanceof Error ? error.message : '无法读取当前网盘。'
+      }
     }
+    return false
   } finally {
-    loadingLibrary.value = false
+    if (generation === storageLoadGeneration) loadingLibrary.value = false
   }
 }
 
@@ -367,7 +557,7 @@ async function refreshDirectory(parentId = '') {
   if (!parentId) {
     loadingLibrary.value = true
     try {
-      const items = await readLibraryDirectory(true)
+      const items = await readLibraryDirectory({ force: true })
       authRequired.value = false
       return items
     } finally {
@@ -376,7 +566,7 @@ async function refreshDirectory(parentId = '') {
   }
 
   const known = folderMap.value[parentId] || rootFolders.value.find((folder) => folder.slug === parentId)
-  const folder = await loadFolder(parentId, known?.name || '', known?.writable, known?.parentId)
+  const folder = await loadFolder(parentId, known?.name || '', known?.writable, known?.parentId, known || {}, { force: true })
   return folder.files
 }
 
@@ -385,28 +575,76 @@ function goHome() {
   activeFileFolder.value = ''
   folderTrail.value = []
   searchQuery.value = ''
+  selectedCategory.value = 'all'
+  recentFilter.value = 'all'
+  quickActionsOpen.value = false
+  mobileSearchOpen.value = false
   uploadStatus.value = ''
 }
 
 function openAlbums() {
   currentView.value = 'albums'
   activeFileFolder.value = ''
+  selectedCategory.value = 'all'
+  mobileSearchOpen.value = false
   searchQuery.value = ''
 }
 
-function openFiles() {
+function openFiles(category = 'all') {
   currentView.value = 'files'
   activeFileFolder.value = ''
   folderTrail.value = []
+  selectedCategory.value = category
+  mobileSearchOpen.value = false
   searchQuery.value = ''
+}
+
+function openCategory(category) {
+  if (category === 'image') {
+    openAlbums()
+    return
+  }
+  if (category === 'trash') return
+  openFiles(category)
+}
+
+function submitGlobalSearch() {
+  const query = searchQuery.value
+  if (currentView.value === 'home') openFiles()
+  searchQuery.value = query
+}
+
+function toggleMobileSearch() {
+  mobileSearchOpen.value = !mobileSearchOpen.value
+}
+
+function closeQuickActions() {
+  quickActionsOpen.value = false
+}
+
+function createFolderFromQuickActions() {
+  closeQuickActions()
+  openCreateFolderDialog()
+}
+
+function uploadFromQuickActions() {
+  closeQuickActions()
+  if (!activeFileFolder.value) {
+    openFiles()
+    errorMessage.value = '打开一个可写入的文件夹后即可上传。'
+    return
+  }
+  selectUploadFile()
 }
 
 async function openFileFolder(folder) {
   if (!folder?.slug) return
+  const generation = storageLoadGeneration
   loadingLibrary.value = true
   errorMessage.value = ''
   try {
-    const data = await loadFolder(folder.slug, folder.name, folder.writable, folder.parentId, folder)
+    const data = await loadFolder(folder.slug, folder.name, folder.writable, folder.parentId, folder, { generation })
+    if (!data || generation !== storageLoadGeneration) return false
     const actualDate = formatDate(folder.updatedAt || folder.date)
     if (actualDate && !data.updatedAt) {
       folderMap.value = { ...folderMap.value, [folder.slug]: { ...data, updatedAt: actualDate } }
@@ -423,11 +661,12 @@ async function openFileFolder(folder) {
     }
     return true
   } catch (error) {
+    if (generation !== storageLoadGeneration) return false
     if (error?.code === 'authentication_required') authRequired.value = true
     else errorMessage.value = error instanceof Error ? error.message : '无法打开此文件夹。'
     return false
   } finally {
-    loadingLibrary.value = false
+    if (generation === storageLoadGeneration) loadingLibrary.value = false
   }
 }
 
@@ -488,7 +727,8 @@ async function calcGcid(file) {
 async function waitForUploadedFile(parentId, fileId, fileName) {
   for (let attempt = 0; attempt < 15; attempt += 1) {
     await new Promise((resolve) => setTimeout(resolve, 2000))
-    const items = await listPikPakItems(parentId)
+    const entry = await loadDirectory(parentId, { force: true })
+    const items = entry?.items || []
     const hit = items.find((item) => item.id === fileId || item.name === fileName)
     if (hit) return hit
   }
@@ -568,10 +808,10 @@ function openItemActions(item, source = 'files') {
   const isRootItem = rootFiles.value.some((file) => file.id === item.id) || rootFolders.value.some((folder) => folder.id === item.id)
   const parentId = source === 'albums'
     ? (isRootItem ? '' : String(item.parentId || ''))
-    : activeFileFolder.value
+    : (source === 'recent' ? String(item.parentId || '') : activeFileFolder.value)
   const parentWritable = source === 'albums'
     ? (isRootItem || folderMap.value[parentId]?.writable !== false)
-    : activeDirectoryWritable.value
+    : (source === 'recent' ? (folderMap.value[parentId]?.writable !== false) : activeDirectoryWritable.value)
   selectedAction.value = { item, source, parentId, writable: item.writable !== false && parentWritable }
 }
 
@@ -661,6 +901,10 @@ function clearCachedFolderTree(folderId) {
   const next = { ...folderMap.value }
   for (const id of removed) delete next[id]
   folderMap.value = next
+  for (const [key, entry] of directoryCache) {
+    const parentId = key.split('\u0000')[1]
+    if (removed.has(parentId)) directoryCache.delete(key)
+  }
 }
 
 function managementNameIsValid(value) {
@@ -964,22 +1208,43 @@ watch(modalOpen, (open) => {
   if (typeof document !== 'undefined') document.body.classList.toggle('modal-open', open)
 })
 
+function scheduleBackgroundVideo() {
+  const activate = () => {
+    backgroundVideoLoaded.value = true
+    window.setTimeout(() => {
+      const background = document.querySelector('.background-video')
+      if (!(background instanceof HTMLVideoElement)) return
+      background.muted = true
+      background.load()
+      const playAttempt = background.play()
+      if (playAttempt && typeof playAttempt.catch === 'function') playAttempt.catch(() => {})
+    }, 0)
+  }
+  if (typeof window.requestIdleCallback === 'function') window.requestIdleCallback(activate, { timeout: 1800 })
+  else window.setTimeout(activate, 1200)
+}
+
 onMounted(async () => {
   window.addEventListener('keydown', handleKeydown)
-  const background = document.querySelector('.background-video')
-  if (background instanceof HTMLVideoElement) {
-    background.muted = true
-    const playAttempt = background.play()
-    if (playAttempt && typeof playAttempt.catch === 'function') playAttempt.catch(() => {})
+  const generation = storageLoadGeneration
+  const query = new URLSearchParams(window.location.search)
+  const requestedStorageId = query.get('storageId') || null
+  if (requestedStorageId) activeStorageId.value = requestedStorageId
+  const providersTask = loadStorageProviders(generation).catch((error) => {
+    if (generation === storageLoadGeneration) errorMessage.value = error.message
+  })
+  const initialStorageId = activeStorageId.value
+  const rootTask = loadLibrary({ requestedStorageId, generation })
+  const rootLoaded = await rootTask
+  scheduleBackgroundVideo()
+  await providersTask
+  if (!requestedStorageId && !rootLoaded && activeStorageId.value !== initialStorageId) {
+    await loadLibrary({ requestedStorageId: activeStorageId.value, generation })
   }
-  try { await loadStorageProviders() } catch (error) { errorMessage.value = error.message; return }
-  const folderId = new URLSearchParams(window.location.search).get('folderId') || ''
+  const folderId = query.get('folderId') || ''
   if (folderId) {
     pendingDeepLinkFolderId = folderId
-    await loadLibrary()
     if (await openFileFolder({ slug: folderId })) pendingDeepLinkFolderId = ''
-  } else {
-    loadLibrary()
   }
 })
 
@@ -990,56 +1255,145 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="app-root" :class="{ 'app-root--browse': currentView !== 'home' }">
+  <div class="app-root ocean-cloud" :class="{ 'app-root--browse': currentView !== 'home', 'app-root--auth': authRequired }">
     <div class="wallpaper" aria-hidden="true">
       <video
         class="background-video"
-        autoplay
         muted
         loop
         playsinline
         webkit-playsinline
-        preload="metadata"
+        preload="none"
+        poster="/assets/ocean-background.svg"
         tabindex="-1"
         aria-hidden="true"
       >
-        <source src="/assets/underwater-h264.mp4" type='video/mp4; codecs="avc1.640028"' />
-        <source :src="BLOG_VIDEO_URL" type='video/mp4; codecs="hvc1.1.6.L120.B0"' />
+        <source :src="backgroundVideoLoaded ? '/assets/underwater-h264.mp4' : undefined" type='video/mp4; codecs="avc1.640028"' />
+        <source :src="backgroundVideoLoaded ? BLOG_VIDEO_URL : undefined" type='video/mp4; codecs="hvc1.1.6.L120.B0"' />
       </video>
       <div class="wallpaper-shade" />
     </div>
 
-    <div class="app-shell">
-      <div class="content-width">
-        <header v-if="currentView === 'home'" class="home-header">
-          <div class="brand-lockup">
-            <img class="brand-symbol" src="/assets/logo.png" alt="" />
-            <span class="brand-name">Map7e</span>
-          </div>
-          <div class="location-chip" aria-label="当前位置">
-            <span>家</span><span class="location-separator">/</span><span>Map7e</span>
-          </div>
-        </header>
+    <div class="ocean-layout">
+      <aside v-if="!authRequired" class="ocean-sidebar" aria-label="云盘导航">
+        <button class="ocean-brand" type="button" aria-label="Map7e 首页" @click="goHome">
+          <img src="/assets/logo.png" alt="" />
+          <span class="ocean-brand-copy">
+            <strong>Map7e</strong>
+            <small>CLOUD STORAGE</small>
+          </span>
+        </button>
 
-        <header v-else class="inner-header">
-          <button class="back-button" type="button" @click="goBack" :aria-label="'返回' + backLabel">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6" /></svg>
-            <span>{{ backLabel }}</span>
+        <nav class="ocean-nav ocean-nav--main" aria-label="主要分类">
+          <button class="ocean-nav-item" :class="{ 'is-active': currentView === 'home' || (currentView === 'files' && selectedCategory === 'all') }" type="button" @click="openFiles()">
+            <CloudCategoryIcon name="files" :size="34" /><span>全部文件</span>
           </button>
-          <span class="inner-location">{{ locationLabel }}</span>
-        </header>
+          <button class="ocean-nav-item" :class="{ 'is-active': currentView === 'files' && selectedCategory === 'video' }" type="button" @click="openCategory('video')">
+            <CloudCategoryIcon name="video" :size="32" /><span>视频</span>
+          </button>
+          <button class="ocean-nav-item" :class="{ 'is-active': currentView === 'albums' || (currentView === 'files' && selectedCategory === 'image') }" type="button" @click="openAlbums">
+            <CloudCategoryIcon name="photos" :size="32" /><span>相册</span>
+          </button>
+          <button class="ocean-nav-item" :class="{ 'is-active': currentView === 'files' && selectedCategory === 'document' }" type="button" @click="openCategory('document')">
+            <CloudCategoryIcon name="documents" :size="32" /><span>文档</span>
+          </button>
+          <button class="ocean-nav-item" :class="{ 'is-active': currentView === 'files' && selectedCategory === 'audio' }" type="button" @click="openCategory('audio')">
+            <CloudCategoryIcon name="audio" :size="32" /><span>音频</span>
+          </button>
+          <button class="ocean-nav-item" :class="{ 'is-active': currentView === 'files' && selectedCategory === 'novel' }" type="button" @click="openCategory('novel')">
+            <CloudCategoryIcon name="novel" :size="32" /><span>小说</span>
+          </button>
+        </nav>
 
-        <main>
-          <div v-if="errorMessage" class="error-banner" role="alert">{{ errorMessage }}</div>
-          <div v-if="managementStatus" class="operation-status" role="status">{{ managementStatus }}</div>
+        <div class="ocean-nav-divider" />
 
-          <label class="cloud-storage-picker" for="cloud-storage-select">
-            <span>当前网盘</span>
-            <select id="cloud-storage-select" :value="activeStorageId" :disabled="loadingLibrary || uploading || managementBusy" @change="switchStorage">
+        <nav class="ocean-nav ocean-nav--secondary" aria-label="其他空间">
+          <button class="ocean-nav-item" :class="{ 'is-active': currentView === 'files' && selectedCategory === 'private' }" type="button" @click="openCategory('private')">
+            <CloudCategoryIcon name="private" :size="32" /><span>私密空间</span>
+          </button>
+          <button class="ocean-nav-item ocean-nav-item--disabled" type="button" disabled :title="activeCapabilities.trash ? '当前接口尚未提供回收站列表' : '当前网盘不支持回收站'">
+            <CloudCategoryIcon name="trash" :size="32" /><span>回收站</span><small>未接入</small>
+          </button>
+        </nav>
+
+        <section class="ocean-sidebar-storage" aria-label="当前网盘与容量">
+          <span class="ocean-sidebar-caption">当前网盘</span>
+          <label class="ocean-sidebar-select">
+            <span class="storage-provider-glyph" aria-hidden="true">✦</span>
+            <select id="sidebar-storage-select" :value="activeStorageId" :disabled="loadingLibrary || uploading || managementBusy" aria-label="侧栏选择网盘" @change="switchStorage">
               <option v-for="storage in storageProviders" :key="storage.id" :value="storage.id" :disabled="!storage.selectable">{{ storage.name }}{{ storage.selectable ? '' : '（待授权）' }}</option>
             </select>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 10 5 5 5-5" /></svg>
           </label>
-          <section v-if="authRequired" class="auth-gate" aria-labelledby="auth-title">
+          <template v-if="activeQuota">
+            <div class="ocean-sidebar-quota-label"><strong>{{ formatBytes(activeQuota.used) }}</strong><span>/ {{ formatBytes(activeQuota.total) }}</span></div>
+            <div class="ocean-quota-track"><i :style="{ width: quotaPercent + '%' }" /></div>
+          </template>
+          <p v-else class="ocean-quota-unknown">容量信息暂不可用</p>
+        </section>
+
+        <div class="ocean-sidebar-actions">
+          <a class="ocean-nav-item ocean-nav-link" href="/admin">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7.5 12 3l8 4.5v9L12 21l-8-4.5v-9Z" /><path d="m8 10 4-2 4 2v4l-4 2-4-2v-4Z" /></svg>
+            <span>空间管理</span>
+          </a>
+        </div>
+      </aside>
+
+      <div class="ocean-workspace">
+        <header class="ocean-toolbar">
+          <div class="ocean-mobile-brand">
+            <img src="/assets/logo.png" alt="" />
+            <span><strong>Map7e</strong><small>CLOUD STORAGE</small></span>
+          </div>
+
+          <label class="ocean-search ocean-search--desktop">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.8" cy="10.8" r="6.8" /><path d="m16 16 4.5 4.5" /></svg>
+            <input
+              v-model.trim="searchQuery"
+              type="search"
+              :placeholder="currentView === 'home' ? '搜索已读取的文件、文件夹…' : (currentView === 'albums' ? '搜索图片…' : '搜索当前目录…')"
+              aria-label="搜索文件、文件夹或内容"
+              @keydown.enter.prevent="submitGlobalSearch"
+            />
+            <kbd>⌘ K</kbd>
+          </label>
+
+          <label v-if="mobileSearchOpen" class="ocean-search ocean-search--mobile">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.8" cy="10.8" r="6.8" /><path d="m16 16 4.5 4.5" /></svg>
+            <input
+              v-model.trim="searchQuery"
+              type="search"
+              autofocus
+              :placeholder="currentView === 'home' ? '搜索已读取的文件…' : '搜索当前目录…'"
+              aria-label="搜索文件、文件夹或内容"
+              @keydown.enter.prevent="submitGlobalSearch"
+            />
+            <button v-if="searchQuery" class="ocean-search-clear" type="button" aria-label="清除搜索" @click="searchQuery = ''">×</button>
+          </label>
+
+          <div class="ocean-toolbar-actions">
+            <label class="ocean-provider-select">
+              <span class="provider-status-dot" :class="{ 'is-ready': activeStorageInfo?.selectable }" aria-hidden="true" />
+              <select id="cloud-storage-select" :value="activeStorageId" :disabled="loadingLibrary || uploading || managementBusy" aria-label="当前网盘" @change="switchStorage">
+                <option v-for="storage in storageProviders" :key="storage.id" :value="storage.id" :disabled="!storage.selectable">{{ storage.name }}{{ storage.selectable ? '' : '（待授权）' }}</option>
+              </select>
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 10 5 5 5-5" /></svg>
+            </label>
+            <button class="ocean-search-toggle" type="button" aria-label="搜索" :aria-expanded="mobileSearchOpen" @click="toggleMobileSearch">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.8" cy="10.8" r="6.8" /><path d="m16 16 4.5 4.5" /></svg>
+            </button>
+            <a class="ocean-account-link" href="/admin" aria-label="打开空间管理">
+              <img src="/assets/logo.png" alt="" />
+            </a>
+          </div>
+        </header>
+
+        <main id="main-content" class="ocean-main">
+          <div v-if="errorMessage" class="error-banner ocean-alert" role="alert">{{ errorMessage }}</div>
+          <div v-if="managementStatus" class="operation-status ocean-alert ocean-alert--success" role="status">{{ managementStatus }}</div>
+
+          <section v-if="authRequired" class="auth-gate ocean-auth" aria-labelledby="auth-title">
             <div class="auth-mark"><img src="/assets/logo.png" alt="" /></div>
             <p class="eyebrow">Map7e Cloud</p>
             <h1 id="auth-title">登录私人云盘</h1>
@@ -1052,246 +1406,314 @@ onBeforeUnmount(() => {
             </form>
           </section>
 
-          <section v-else-if="currentView === 'home'" class="home-view" aria-labelledby="overview-title">
-            <section class="overview-card">
-              <div class="overview-topline">
-                <div class="overview-brand">
-                  <img class="overview-symbol" src="/assets/logo.png" alt="" />
-                  <div>
-                    <p class="eyebrow">Cloud Storage</p>
-                    <h1 id="overview-title">Map7e</h1>
+          <section v-else-if="currentView === 'home'" class="ocean-home" aria-labelledby="overview-title">
+            <section class="ocean-hero">
+              <div class="ocean-hero-copy">
+                <p class="ocean-kicker">MAP7E · CLOUD STORAGE</p>
+                <h1 id="overview-title">Map7e</h1>
+                <h2>私人云端空间</h2>
+                <p class="ocean-hero-note">重要的内容，始终在你身边</p>
+                <div class="ocean-hero-quota">
+                  <div v-if="activeQuota" class="ocean-quota-value">
+                    <strong>{{ formatBytes(activeQuota.used) }}</strong><span>/ {{ formatBytes(activeQuota.total) }}</span>
                   </div>
+                  <div v-else class="ocean-quota-value ocean-quota-value--unknown">
+                    <strong>{{ activeStorageInfo ? '容量信息暂不可用' : '正在读取空间状态…' }}</strong>
+                  </div>
+                  <div v-if="activeQuota" class="ocean-quota-track ocean-quota-track--hero" aria-label="已用空间">
+                    <i :style="{ width: quotaPercent + '%' }" />
+                  </div>
+                  <small v-if="activeQuota">已用 {{ formatBytes(activeQuota.used) }} · 剩余 {{ formatBytes(Math.max(0, activeQuota.total - activeQuota.used)) }}</small>
+                  <small v-else>容量仅在网盘接口返回真实数据时显示</small>
                 </div>
-                <span class="private-label">私人空间</span>
               </div>
-              <p class="overview-subtitle">私人云端空间</p>
-
-              <div v-if="loadingLibrary" class="stats-loading">正在读取空间目录…</div>
-              <template v-else>
-                <div class="overview-stats">
-                  <div class="stat-block">
-                    <span class="stat-value">{{ photoCount }}</span>
-                    <span class="stat-label">图片</span>
-                  </div>
-                  <div class="stat-block">
-                    <span class="stat-value">{{ fileCount }}</span>
-                    <span class="stat-label">文件</span>
-                  </div>
-                </div>
-                <div class="content-composition" aria-label="图片与文件数量构成">
-                  <div class="composition-bar">
-                    <span class="composition-photos" :style="{ width: photoRatio + '%' }" />
-                    <span class="composition-files" :style="{ width: (100 - photoRatio) + '%' }" />
-                  </div>
-                  <div class="composition-labels">
-                    <span><i class="legend-dot legend-dot--photo" />图片 {{ photoCount }}</span>
-                    <span><i class="legend-dot legend-dot--file" />文件 {{ fileCount }}</span>
-                  </div>
-                </div>
-                <p class="overview-footnote">统计已读取的 {{ activeStorageName }} 目录项目，不包含未展开子文件夹中的内容。</p>
-              </template>
+              <div class="ocean-hero-provider">
+                <span class="provider-status-dot" :class="{ 'is-ready': activeStorageInfo?.selectable }" />
+                <span>{{ activeStorageName }}{{ activeStorageInfo?.selectable ? ' 已连接' : '' }}</span>
+              </div>
+              <button class="ocean-hero-link" type="button" @click="openFiles()">
+                <span>空间详情</span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h13M13 6l6 6-6 6" /></svg>
+              </button>
             </section>
 
-            <div class="directory-list" aria-label="目录">
-              <button class="directory-card" type="button" @click="openAlbums">
-                <span class="directory-icon directory-icon--photos" aria-hidden="true">
-                  <svg viewBox="0 0 24 24"><rect x="3.5" y="4" width="17" height="16" rx="3" /><circle cx="9" cy="9" r="1.4" /><path d="m5 17 4.2-4.2a1.8 1.8 0 0 1 2.6 0l2 2 1.6-1.6a1.8 1.8 0 0 1 2.6 0L20 16.2" /></svg>
-                </span>
-                <span class="directory-copy">
-                  <span class="directory-title">相册目录</span>
-                  <span class="directory-meta">{{ albumPhotos.length }} 张图片<span v-if="albumUpdatedAt"> · 更新于 {{ albumUpdatedAt }}</span></span>
-                </span>
-                <svg class="directory-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6" /></svg>
-              </button>
+            <section class="ocean-section ocean-categories" aria-labelledby="categories-title">
+              <div class="ocean-section-heading">
+                <div><p class="ocean-kicker">EXPLORE YOUR SPACE</p><h2 id="categories-title">云端分类</h2></div>
+                <span>分类数量只统计本次已读取的目录</span>
+              </div>
+              <div class="ocean-category-grid">
+                <button
+                  v-for="category in categoryCards"
+                  :key="category.id"
+                  class="ocean-category-card"
+                  :class="{ 'is-unavailable': !category.enabled }"
+                  type="button"
+                  :disabled="!category.enabled"
+                  :aria-label="category.label + '，' + category.meta"
+                  @click="openCategory(category.id)"
+                >
+                  <span class="ocean-category-icon"><CloudCategoryIcon :name="category.icon" :size="72" /></span>
+                  <span class="ocean-category-title">{{ category.label }}</span>
+                  <small>{{ category.meta }}</small>
+                </button>
+              </div>
+              <p class="ocean-data-note">尚未打开的文件夹不会被后台扫描；进入文件夹后，页面才会把其中真实项目加入已读取统计。</p>
+            </section>
 
-              <button class="directory-card" type="button" @click="openFiles">
-                <span class="directory-icon directory-icon--files" aria-hidden="true">
-                  <svg viewBox="0 0 24 24"><path d="M4.5 6.5h6l2 2h7A1.5 1.5 0 0 1 21 10v7.5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a1.5 1.5 0 0 1 1.5-1.5Z" /><path d="M3.5 10h17" /></svg>
-                </span>
-                <span class="directory-copy">
-                  <span class="directory-title">文件目录</span>
-                  <span class="directory-meta">{{ fileCount }} 个文件<span v-if="latestFileDate"> · 更新于 {{ latestFileDate }}</span></span>
-                </span>
-                <svg class="directory-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6" /></svg>
-              </button>
-            </div>
+            <section class="ocean-section ocean-recent-panel" aria-labelledby="recent-title">
+              <div class="ocean-section-heading ocean-section-heading--recent">
+                <div><p class="ocean-kicker">YOUR CLOUD ACTIVITY</p><h2 id="recent-title">最近更新</h2><span>依据文件的真实更新时间或创建时间</span></div>
+                <button class="ocean-more-button" type="button" @click="openFiles()">更多 <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h13M13 6l6 6-6 6" /></svg></button>
+              </div>
+
+              <div class="ocean-recent-toolbar">
+                <div class="ocean-filter-tabs" role="tablist" aria-label="最近文件筛选">
+                  <button
+                    v-for="filter in RECENT_FILTER_TABS"
+                    :key="filter.id"
+                    type="button"
+                    role="tab"
+                    :aria-selected="recentFilter === filter.id"
+                    :class="{ 'is-active': recentFilter === filter.id }"
+                    @click="recentFilter = filter.id"
+                  >{{ filter.label }}</button>
+                </div>
+                <div class="ocean-layout-switch" aria-label="最近文件显示方式">
+                  <button type="button" :class="{ 'is-active': recentLayout === 'list' }" aria-label="列表视图" :aria-pressed="recentLayout === 'list'" @click="recentLayout = 'list'">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 6h12M8 12h12M8 18h12" /><circle cx="4" cy="6" r=".8" fill="currentColor" /><circle cx="4" cy="12" r=".8" fill="currentColor" /><circle cx="4" cy="18" r=".8" fill="currentColor" /></svg>
+                  </button>
+                  <button type="button" :class="{ 'is-active': recentLayout === 'grid' }" aria-label="网格视图" :aria-pressed="recentLayout === 'grid'" @click="recentLayout = 'grid'">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1.5" /><rect x="14" y="3" width="7" height="7" rx="1.5" /><rect x="3" y="14" width="7" height="7" rx="1.5" /><rect x="14" y="14" width="7" height="7" rx="1.5" /></svg>
+                  </button>
+                </div>
+              </div>
+
+              <div v-if="loadingLibrary" class="ocean-empty ocean-empty--loading">正在读取 {{ activeStorageName }} 目录…</div>
+              <template v-else-if="filteredRecentFiles.length">
+                <div v-if="recentLayout === 'list'" class="ocean-table-wrap">
+                  <table class="ocean-recent-table">
+                    <thead><tr><th scope="col">名称</th><th scope="col">类型</th><th scope="col">来源</th><th scope="col">最近更新时间</th><th scope="col">大小</th><th scope="col">操作</th></tr></thead>
+                    <tbody>
+                      <tr v-for="file in filteredRecentFiles" :key="file.id || file.path">
+                        <td>
+                          <button class="ocean-file-open" type="button" @click="openFile(file)">
+                            <span class="ocean-file-thumb">
+                              <img v-if="file.thumbnail" :src="file.thumbnail" :alt="file.name" loading="lazy" decoding="async" />
+                              <span v-else class="ocean-file-kind" :class="fileIconClass(file)"><span>{{ fileTypeLabel(file) }}</span></span>
+                            </span>
+                            <span class="ocean-file-name">{{ file.name }}</span>
+                          </button>
+                        </td>
+                        <td><span class="ocean-type-label">{{ fileTypeLabel(file) }}</span></td>
+                        <td>{{ activeStorageName }}</td>
+                        <td>{{ recentTimeLabel(file) }}</td>
+                        <td>{{ fileSizeLabel(file) }}</td>
+                        <td><button class="ocean-row-action" type="button" :aria-label="'文件操作：' + file.name" @click="openItemActions(file, 'recent')">···</button></td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+
+                <div v-else class="ocean-recent-grid">
+                  <article v-for="file in filteredRecentFiles" :key="file.id || file.path" class="ocean-recent-card">
+                    <button class="ocean-recent-card-open" type="button" @click="openFile(file)">
+                      <span class="ocean-file-thumb ocean-file-thumb--card">
+                        <img v-if="file.thumbnail" :src="file.thumbnail" :alt="file.name" loading="lazy" decoding="async" />
+                        <span v-else class="ocean-file-kind" :class="fileIconClass(file)"><span>{{ fileTypeLabel(file) }}</span></span>
+                      </span>
+                      <strong>{{ file.name }}</strong><small>{{ recentTimeLabel(file) }} · {{ activeStorageName }}</small>
+                    </button>
+                    <button class="ocean-row-action" type="button" :aria-label="'文件操作：' + file.name" @click="openItemActions(file, 'recent')">···</button>
+                  </article>
+                </div>
+              </template>
+              <div v-else class="ocean-empty">
+                <CloudCategoryIcon name="files" :size="56" />
+                <strong>{{ searchQuery || recentFilter !== 'all' ? '没有找到符合条件的已读取文件' : '还没有可显示的最近文件' }}</strong>
+                <span>{{ searchQuery || recentFilter !== 'all' ? '换一个筛选条件试试。' : '打开文件夹后，真实文件会按更新时间显示在这里。' }}</span>
+              </div>
+
+              <div v-if="!loadingLibrary" class="ocean-recent-mobile">
+                <article v-for="file in filteredRecentFiles" :key="file.id || file.path" class="ocean-mobile-file-row">
+                  <button class="ocean-file-open" type="button" @click="openFile(file)">
+                    <span class="ocean-file-thumb">
+                      <img v-if="file.thumbnail" :src="file.thumbnail" :alt="file.name" loading="lazy" decoding="async" />
+                      <span v-else class="ocean-file-kind" :class="fileIconClass(file)"><span>{{ fileTypeLabel(file) }}</span></span>
+                    </span>
+                    <span class="ocean-mobile-file-copy"><strong>{{ file.name }}</strong><small>{{ recentTimeLabel(file) }} · {{ activeStorageName }}</small></span>
+                    <small class="ocean-mobile-file-size">{{ fileSizeLabel(file) }}</small>
+                  </button>
+                  <button class="ocean-row-action" type="button" :aria-label="'文件操作：' + file.name" @click="openItemActions(file, 'recent')">···</button>
+                </article>
+              </div>
+            </section>
           </section>
 
-          <section v-else-if="currentView === 'albums'" class="browse-view" aria-labelledby="album-title">
-            <div class="section-heading">
-              <div>
-                <p class="eyebrow">照片</p>
-                <h1 id="album-title">相册目录</h1>
+          <section v-else-if="currentView === 'albums'" class="ocean-browse-panel">
+            <div class="browse-view ocean-browse-view" aria-labelledby="album-title">
+              <div class="section-heading">
+                <div><p class="eyebrow">照片</p><h1 id="album-title">相册目录</h1></div>
+                <span class="result-count">{{ visiblePhotos.length }} 张</span>
               </div>
-              <span class="result-count">{{ visiblePhotos.length }} 张</span>
-            </div>
-
-            <label class="search-box">
-              <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.8" cy="10.8" r="6.8" /><path d="m16 16 4.5 4.5" /></svg>
-              <input v-model.trim="searchQuery" type="search" placeholder="搜索图片" aria-label="搜索相册中的图片" />
-              <button v-if="searchQuery" class="clear-search" type="button" aria-label="清除搜索" @click="searchQuery = ''">×</button>
-            </label>
-
-            <div class="collection-meta">
-              <span>{{ albumPhotos.length }} 张图片</span>
-              <span v-if="albumUpdatedAt" class="meta-divider">·</span>
-              <span v-if="albumUpdatedAt">更新于 {{ albumUpdatedAt }}</span>
-            </div>
-
-            <div v-if="loadingLibrary" class="loading-state">正在加载相册…</div>
-            <div v-else-if="visiblePhotos.length" class="photo-grid">
-              <article
-                v-for="photo in visiblePhotos"
-                :key="photo.id || photo.path"
-                class="photo-tile"
-              >
-                <button class="photo-open" type="button" :aria-label="'查看图片 ' + photo.name" @click="openPhotoViewer(photo, visiblePhotos)">
-                  <span class="photo-thumb"><img v-if="photo.thumbnail" :src="photo.thumbnail" :alt="photo.name" loading="lazy" decoding="async" /><span v-else class="photo-placeholder">图片</span></span>
-                  <span class="photo-name">{{ photo.name }}</span>
-                </button>
-                <button class="photo-more" type="button" :aria-label="'图片操作：' + photo.name" @click.stop="openItemActions(photo, 'albums')">···</button>
-              </article>
-            </div>
-            <div v-else class="empty-state">
-              <span class="empty-icon" aria-hidden="true">
-                <svg viewBox="0 0 24 24"><rect x="3.5" y="4" width="17" height="16" rx="3" /><circle cx="9" cy="9" r="1.4" /><path d="m5 17 4.2-4.2a1.8 1.8 0 0 1 2.6 0l2 2 1.6-1.6a1.8 1.8 0 0 1 2.6 0L20 16.2" /></svg>
-              </span>
-              <strong>{{ searchQuery ? '没有找到匹配的图片' : '相册还是空的' }}</strong>
-              <span>{{ searchQuery ? '试试其他文件名。' : '添加图片后会在这里按网格显示。' }}</span>
-            </div>
-          </section>
-
-          <section v-else class="browse-view file-browser" aria-labelledby="files-title">
-            <div class="section-heading">
-              <div>
-                <p class="eyebrow">{{ activeFileFolderData ? (activeFileFolderData.folderType === 'album' ? '相册' : '文件夹') : '云端文件' }}</p>
-                <h1 id="files-title">{{ currentHeading }}</h1>
-              </div>
-              <span class="result-count">{{ activeFileFolderData ? currentFileCount + ' 个文件' : fileCount + ' 个文件' }}</span>
-            </div>
-
-            <label class="search-box">
-              <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.8" cy="10.8" r="6.8" /><path d="m16 16 4.5 4.5" /></svg>
-              <input
-                v-model.trim="searchQuery"
-                type="search"
-                :placeholder="activeFileFolderData ? '搜索此文件夹' : '搜索文件或文件夹'"
-                aria-label="搜索当前文件目录"
-              />
-              <button v-if="searchQuery" class="clear-search" type="button" aria-label="清除搜索" @click="searchQuery = ''">×</button>
-            </label>
-
-            <div class="collection-meta">
-              <template v-if="activeFileFolderData">
-                <span>{{ currentFileCount }} 个文件</span>
-                <span v-if="dateLabel(activeFileFolderData.updatedAt)" class="meta-divider">·</span>
-                <span v-if="dateLabel(activeFileFolderData.updatedAt)">更新于 {{ activeFileFolderData.updatedAt }}</span>
-              </template>
-              <template v-else>
-                <span>{{ fileFolders.length }} 个文件夹</span>
-                <span class="meta-divider">·</span>
-                <span>{{ fileCount }} 个文件</span>
-              </template>
-            </div>
-
-            <div v-if="activeDirectoryWritable" class="upload-toolbar manage-toolbar">
-              <button class="upload-button" type="button" :disabled="managementBusy || uploading || !activeCapabilities.createFolder" @click="openCreateFolderDialog">
-                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>
-                <span>新建文件夹</span>
-              </button>
-              <template v-if="activeFileFolderData && activeCapabilities.upload">
-                <input ref="uploadInput" class="visually-hidden" type="file" @change="handleUpload" />
-                <button class="upload-button" type="button" :disabled="uploading || managementBusy" @click="selectUploadFile">
-                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15V4m0 0L8 8m4-4 4 4M5 14v5h14v-5" /></svg>
-                  <span>{{ uploading ? '上传中…' : '上传文件' }}</span>
-                </button>
-              </template>
-              <span v-if="uploadStatus" class="upload-status" role="status">{{ uploadStatus }}</span>
-            </div>
-            <div v-else class="read-only-note">此目录为只读，不能新建文件夹或上传文件。</div>
-
-            <div v-if="loadingLibrary" class="loading-state">正在加载文件…</div>
-            <div v-else-if="!activeFileFolderData" class="file-list">
-              <article v-for="folder in visibleFileFolders" :key="folder.slug" class="folder-row">
-                <button class="folder-open" type="button" @click="openFileFolder(folder)">
-                  <span class="folder-row-icon" aria-hidden="true">
-                    <svg viewBox="0 0 24 24"><path d="M3.5 7.5A1.5 1.5 0 0 1 5 6h5l2 2h7A1.5 1.5 0 0 1 20.5 9.5v8A1.5 1.5 0 0 1 19 19H5a1.5 1.5 0 0 1-1.5-1.5Z" /><path d="M3.5 10h17" /></svg>
-                  </span>
-                  <span class="row-copy">
-                    <span class="row-title">{{ folder.name }}</span>
-                    <span class="row-meta">{{ folder.folderType === 'album' ? '相册' : '文件夹' }} · {{ folder.fileCount }} 个文件<span v-if="folder.effectiveAccess === 'locked'"> · 上锁</span><span v-if="dateLabel(folder.updatedAt)"> · {{ folder.updatedAt }}</span></span>
-                  </span>
-                  <svg class="row-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6" /></svg>
-                </button>
-                <button class="item-more" type="button" :aria-label="'文件夹操作：' + folder.name" @click.stop="openItemActions(folder)">···</button>
-              </article>
-
-              <article v-for="file in rootFileSearchResults" :key="'root-' + file.id" class="file-row">
-                <button class="file-open" type="button" :aria-label="'预览 ' + file.name" @click="openFile(file)">
-                  <span class="file-type-icon" :class="fileIconClass(file)"><span>{{ fileTypeLabel(file) }}</span></span>
-                  <span class="row-copy">
-                    <span class="row-title">{{ file.name }}</span>
-                    <span class="row-meta">{{ fileTypeLabel(file) }} · {{ fileSizeLabel(file) }}<span v-if="dateLabel(file.date)"> · {{ file.date }}</span></span>
-                  </span>
-                </button>
-                <button class="item-more" type="button" :aria-label="'文件操作：' + file.name" @click.stop="openItemActions(file)">···</button>
-              </article>
-
-              <div v-if="searchQuery && !visibleFileFolders.length && !rootFileSearchResults.length" class="empty-state empty-state--compact">
-                <strong>没有找到匹配的文件</strong><span>试试其他文件名。</span>
-              </div>
-              <div v-if="!searchQuery && !fileFolders.length && !rootLooseFiles.length" class="empty-state empty-state--compact">
-                <strong>文件目录为空</strong><span>当前没有可浏览的文件夹。</span>
-              </div>
-            </div>
-
-            <div v-else class="file-list">
-              <div v-if="activeFileFolderData.folderType === 'album' && visibleAlbumFolderPhotos.length" class="photo-grid folder-photo-grid">
-                <article v-for="photo in visibleAlbumFolderPhotos" :key="photo.id || photo.path" class="photo-tile">
-                  <button class="photo-open" type="button" :aria-label="'查看图片 ' + photo.name" @click="openPhotoViewer(photo, visibleAlbumFolderPhotos)">
+              <label class="search-box">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.8" cy="10.8" r="6.8" /><path d="m16 16 4.5 4.5" /></svg>
+                <input v-model.trim="searchQuery" type="search" placeholder="搜索图片" aria-label="搜索相册中的图片" />
+                <button v-if="searchQuery" class="clear-search" type="button" aria-label="清除搜索" @click="searchQuery = ''">×</button>
+              </label>
+              <div class="collection-meta"><span>{{ albumPhotos.length }} 张图片</span><span v-if="albumUpdatedAt" class="meta-divider">·</span><span v-if="albumUpdatedAt">更新于 {{ albumUpdatedAt }}</span></div>
+              <div v-if="loadingLibrary" class="loading-state">正在加载相册…</div>
+              <div v-else-if="visiblePhotos.length" class="photo-grid">
+                <article v-for="photo in visiblePhotos" :key="photo.id || photo.path" class="photo-tile">
+                  <button class="photo-open" type="button" :aria-label="'查看图片 ' + photo.name" @click="openPhotoViewer(photo, visiblePhotos)">
                     <span class="photo-thumb"><img v-if="photo.thumbnail" :src="photo.thumbnail" :alt="photo.name" loading="lazy" decoding="async" /><span v-else class="photo-placeholder">图片</span></span>
                     <span class="photo-name">{{ photo.name }}</span>
                   </button>
-                  <button class="photo-more" type="button" :aria-label="'图片操作：' + photo.name" @click.stop="openItemActions(photo)">···</button>
+                  <button class="photo-more" type="button" :aria-label="'图片操作：' + photo.name" @click.stop="openItemActions(photo, 'albums')">···</button>
                 </article>
               </div>
-              <article v-for="folder in visibleCurrentFolders" :key="folder.id" class="folder-row">
-                <button class="folder-open" type="button" @click="openNestedFolder(folder)">
-                  <span class="folder-row-icon" aria-hidden="true">
-                    <svg viewBox="0 0 24 24"><path d="M3.5 7.5A1.5 1.5 0 0 1 5 6h5l2 2h7A1.5 1.5 0 0 1 20.5 9.5v8A1.5 1.5 0 0 1 19 19H5a1.5 1.5 0 0 1-1.5-1.5Z" /><path d="M3.5 10h17" /></svg>
-                  </span>
-                  <span class="row-copy">
-                    <span class="row-title">{{ folder.name }}</span>
-                    <span class="row-meta">{{ folder.folderType === 'album' ? '相册' : '文件夹' }}<span v-if="folder.effectiveAccess === 'locked'"> · 上锁</span><span v-if="dateLabel(folder.date)"> · {{ folder.date }}</span></span>
-                  </span>
-                  <svg class="row-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6" /></svg>
-                </button>
-                <button class="item-more" type="button" :aria-label="'文件夹操作：' + folder.name" @click.stop="openItemActions(folder)">···</button>
-              </article>
-              <article v-for="file in (activeFileFolderData.folderType === 'album' ? visibleNonImageFolderFiles : visibleCurrentFiles)" :key="file.id" class="file-row">
-                <button class="file-open" type="button" :aria-label="'预览 ' + file.name" @click="openFile(file)">
-                  <span class="file-type-icon" :class="fileIconClass(file)"><span>{{ fileTypeLabel(file) }}</span></span>
-                  <span class="row-copy">
-                    <span class="row-title">{{ file.name }}</span>
-                    <span class="row-meta">{{ fileTypeLabel(file) }} · {{ fileSizeLabel(file) }}<span v-if="dateLabel(file.date)"> · {{ file.date }}</span></span>
-                  </span>
-                </button>
-                <button class="item-more" type="button" :aria-label="'文件操作：' + file.name" @click.stop="openItemActions(file)">···</button>
-              </article>
-              <div v-if="searchQuery && !visibleCurrentFiles.length && !visibleCurrentFolders.length" class="empty-state empty-state--compact">
-                <strong>没有找到匹配的文件</strong><span>试试其他文件名。</span>
-              </div>
-              <div v-if="!searchQuery && !currentFileItems.length" class="empty-state empty-state--compact">
-                <strong>这个文件夹是空的</strong><span>当前没有可下载的文件。</span>
+              <div v-else class="empty-state">
+                <span class="empty-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="3.5" y="4" width="17" height="16" rx="3" /><circle cx="9" cy="9" r="1.4" /><path d="m5 17 4.2-4.2a1.8 1.8 0 0 1 2.6 0l2 2 1.6-1.6a1.8 1.8 0 0 1 2.6 0L20 16.2" /></svg></span>
+                <strong>{{ searchQuery ? '没有找到匹配的图片' : '相册还是空的' }}</strong><span>{{ searchQuery ? '试试其他文件名。' : '添加图片后会在这里按网格显示。' }}</span>
               </div>
             </div>
           </section>
+
+          <section v-else class="ocean-browse-panel">
+            <div class="browse-view file-browser ocean-browse-view" aria-labelledby="files-title">
+              <div class="section-heading">
+                <div>
+                  <p class="eyebrow">{{ activeFileFolderData ? (activeFileFolderData.folderType === 'album' ? '相册' : '文件夹') : '云端文件' }}</p>
+                  <h1 id="files-title">{{ currentHeading }}</h1>
+                </div>
+                <span class="result-count">{{ activeFileFolderData ? currentFileCount + ' 个文件' : fileCount + ' 个文件' }}</span>
+              </div>
+              <label class="search-box">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.8" cy="10.8" r="6.8" /><path d="m16 16 4.5 4.5" /></svg>
+                <input v-model.trim="searchQuery" type="search" :placeholder="activeFileFolderData ? '搜索此文件夹' : '搜索文件或文件夹'" aria-label="搜索当前文件目录" />
+                <button v-if="searchQuery" class="clear-search" type="button" aria-label="清除搜索" @click="searchQuery = ''">×</button>
+              </label>
+              <div class="collection-meta">
+                <template v-if="activeFileFolderData">
+                  <span>{{ currentFileCount }} 个文件</span><span v-if="dateLabel(activeFileFolderData.updatedAt)" class="meta-divider">·</span><span v-if="dateLabel(activeFileFolderData.updatedAt)">更新于 {{ activeFileFolderData.updatedAt }}</span>
+                </template>
+                <template v-else><span>{{ fileFolders.length }} 个文件夹</span><span class="meta-divider">·</span><span>{{ fileCount }} 个文件</span></template>
+              </div>
+
+              <div v-if="!activeFileFolderData" class="ocean-file-category-tabs" role="tablist" aria-label="文件分类">
+                <button v-for="filter in FILE_CATEGORY_TABS" :key="filter.id" type="button" role="tab" :aria-selected="selectedCategory === filter.id" :class="{ 'is-active': selectedCategory === filter.id }" @click="selectedCategory = filter.id">{{ filter.label }}</button>
+              </div>
+
+              <div v-if="activeDirectoryWritable" class="upload-toolbar manage-toolbar">
+                <button class="upload-button" type="button" :disabled="managementBusy || uploading || !activeCapabilities.createFolder" @click="openCreateFolderDialog">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg><span>新建文件夹</span>
+                </button>
+                <template v-if="activeFileFolderData && activeCapabilities.upload">
+                  <input ref="uploadInput" class="visually-hidden" type="file" @change="handleUpload" />
+                  <button class="upload-button" type="button" :disabled="uploading || managementBusy" @click="selectUploadFile">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15V4m0 0L8 8m4-4 4 4M5 14v5h14v-5" /></svg><span>{{ uploading ? '上传中…' : '上传文件' }}</span>
+                  </button>
+                </template>
+                <span v-if="uploadStatus" class="upload-status" role="status">{{ uploadStatus }}</span>
+              </div>
+              <div v-else class="read-only-note">此目录为只读，不能新建文件夹或上传文件。</div>
+
+              <div v-if="loadingLibrary" class="loading-state">正在加载文件…</div>
+              <div v-else-if="!activeFileFolderData" class="file-list">
+                <article v-for="folder in visibleRootFolders" :key="folder.slug" class="folder-row">
+                  <button class="folder-open" type="button" @click="openFileFolder(folder)">
+                    <span class="folder-row-icon" aria-hidden="true"><CloudCategoryIcon name="files" :size="34" /></span>
+                    <span class="row-copy">
+                      <span class="row-title">{{ folder.name }}</span>
+                      <span class="row-meta">{{ folder.folderType === 'album' ? '相册' : '文件夹' }} · <span v-if="folder.fileCount !== null">{{ folder.fileCount }} 个文件</span><span v-else>点击后读取内容</span><span v-if="folder.effectiveAccess === 'locked'"> · 上锁</span><span v-if="dateLabel(folder.updatedAt)"> · {{ folder.updatedAt }}</span></span>
+                    </span>
+                    <svg class="row-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6" /></svg>
+                  </button>
+                  <button class="item-more" type="button" :aria-label="'文件夹操作：' + folder.name" @click.stop="openItemActions(folder)">···</button>
+                </article>
+                <article v-for="file in rootFileSearchResults" :key="'root-' + file.id" class="file-row">
+                  <button class="file-open" type="button" :aria-label="'预览 ' + file.name" @click="openFile(file)">
+                    <span class="file-type-icon" :class="fileIconClass(file)"><span>{{ fileTypeLabel(file) }}</span></span>
+                    <span class="row-copy"><span class="row-title">{{ file.name }}</span><span class="row-meta">{{ fileTypeLabel(file) }} · {{ fileSizeLabel(file) }}<span v-if="dateLabel(file.date)"> · {{ file.date }}</span></span></span>
+                  </button>
+                  <button class="item-more" type="button" :aria-label="'文件操作：' + file.name" @click.stop="openItemActions(file)">···</button>
+                </article>
+                <div v-if="!visibleRootFolders.length && !rootFileSearchResults.length" class="empty-state empty-state--compact">
+                  <strong>{{ searchQuery ? '没有找到匹配的项目' : (selectedCategory === 'private' ? '没有已读取的私密项目' : '此分类暂无已读取项目') }}</strong>
+                  <span>{{ selectedCategory === 'private' ? '只有已标记为私密的当前目录项目会显示在这里。' : '打开相关文件夹后，页面会读取其中的真实文件。' }}</span>
+                </div>
+              </div>
+
+              <div v-else class="file-list">
+                <div v-if="activeFileFolderData.folderType === 'album' && visibleAlbumFolderPhotos.length" class="photo-grid folder-photo-grid">
+                  <article v-for="photo in visibleAlbumFolderPhotos" :key="photo.id || photo.path" class="photo-tile">
+                    <button class="photo-open" type="button" :aria-label="'查看图片 ' + photo.name" @click="openPhotoViewer(photo, visibleAlbumFolderPhotos)">
+                      <span class="photo-thumb"><img v-if="photo.thumbnail" :src="photo.thumbnail" :alt="photo.name" loading="lazy" decoding="async" /><span v-else class="photo-placeholder">图片</span></span><span class="photo-name">{{ photo.name }}</span>
+                    </button>
+                    <button class="photo-more" type="button" :aria-label="'图片操作：' + photo.name" @click.stop="openItemActions(photo)">···</button>
+                  </article>
+                </div>
+                <article v-for="folder in visibleCurrentFolders" :key="folder.id" class="folder-row">
+                  <button class="folder-open" type="button" @click="openNestedFolder(folder)">
+                    <span class="folder-row-icon" aria-hidden="true"><CloudCategoryIcon name="files" :size="34" /></span>
+                    <span class="row-copy"><span class="row-title">{{ folder.name }}</span><span class="row-meta">{{ folder.folderType === 'album' ? '相册' : '文件夹' }}<span v-if="folder.effectiveAccess === 'locked'"> · 上锁</span><span v-if="dateLabel(folder.date)"> · {{ folder.date }}</span></span></span>
+                    <svg class="row-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6" /></svg>
+                  </button>
+                  <button class="item-more" type="button" :aria-label="'文件夹操作：' + folder.name" @click.stop="openItemActions(folder)">···</button>
+                </article>
+                <article v-for="file in (activeFileFolderData.folderType === 'album' ? visibleNonImageFolderFiles : visibleCurrentFiles)" :key="file.id" class="file-row">
+                  <button class="file-open" type="button" :aria-label="'预览 ' + file.name" @click="openFile(file)">
+                    <span class="file-type-icon" :class="fileIconClass(file)"><span>{{ fileTypeLabel(file) }}</span></span>
+                    <span class="row-copy"><span class="row-title">{{ file.name }}</span><span class="row-meta">{{ fileTypeLabel(file) }} · {{ fileSizeLabel(file) }}<span v-if="dateLabel(file.date)"> · {{ file.date }}</span></span></span>
+                  </button>
+                  <button class="item-more" type="button" :aria-label="'文件操作：' + file.name" @click.stop="openItemActions(file)">···</button>
+                </article>
+                <div v-if="!visibleCurrentFiles.length && !visibleCurrentFolders.length && !visibleAlbumFolderPhotos.length" class="empty-state empty-state--compact">
+                  <strong>{{ searchQuery ? '没有找到匹配的项目' : '这个文件夹没有符合条件的项目' }}</strong><span>{{ searchQuery ? '试试其他文件名。' : '当前分类会在这里筛选已读取的内容。' }}</span>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <footer class="ocean-page-footer">© 2026 Map7e Cloud</footer>
         </main>
 
-        <footer class="page-footer">© 2026 Map7e</footer>
+        <nav v-if="!authRequired" class="ocean-mobile-nav" aria-label="手机端导航">
+          <button type="button" :class="{ 'is-active': currentView === 'home' }" @click="goHome">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m3 10 9-7 9 7v10a1 1 0 0 1-1 1h-5v-7H9v7H4a1 1 0 0 1-1-1V10Z" /></svg><span>首页</span>
+          </button>
+          <button type="button" :class="{ 'is-active': currentView === 'files' }" @click="openFiles()">
+            <CloudCategoryIcon name="files" :size="25" /><span>文件</span>
+          </button>
+          <button class="ocean-mobile-create" type="button" aria-label="新建或上传" @click="quickActionsOpen = true">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>
+          </button>
+          <button type="button" :class="{ 'is-active': currentView === 'albums' }" @click="openAlbums">
+            <CloudCategoryIcon name="photos" :size="25" /><span>相册</span>
+          </button>
+          <a href="/admin" aria-label="空间管理">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="3.5" /><path d="M4.5 20a7.5 7.5 0 0 1 15 0" /></svg><span>管理</span>
+          </a>
+        </nav>
       </div>
     </div>
 
+    <div v-if="quickActionsOpen" class="ocean-quick-backdrop" @click.self="closeQuickActions">
+      <section class="ocean-quick-sheet" role="dialog" aria-modal="true" aria-label="新建或上传">
+        <span class="ocean-sheet-grabber" />
+        <p class="ocean-kicker">QUICK ACTIONS</p>
+        <h2>添加到云端</h2>
+        <button type="button" :disabled="!activeCapabilities.createFolder || !activeDirectoryWritable" @click="createFolderFromQuickActions">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3.5 7.5A1.5 1.5 0 0 1 5 6h5l2 2h7A1.5 1.5 0 0 1 20.5 9.5v8A1.5 1.5 0 0 1 19 19H5a1.5 1.5 0 0 1-1.5-1.5Z" /><path d="M12 11v6m-3-3h6" /></svg>
+          新建文件夹
+        </button>
+        <button type="button" :disabled="!activeFileFolder || !activeCapabilities.upload || !activeDirectoryWritable || uploading || managementBusy" @click="uploadFromQuickActions">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15V4m0 0L8 8m4-4 4 4M5 14v5h14v-5" /></svg>
+          {{ uploading ? '上传中…' : '上传文件' }}
+        </button>
+        <p v-if="!activeFileFolder">上传前先进入一个可写入的文件夹。</p>
+        <button class="ocean-quick-cancel" type="button" @click="closeQuickActions">取消</button>
+      </section>
+    </div>
     <Transition name="viewer-fade">
       <div v-if="viewerImage" class="photo-viewer" role="dialog" aria-modal="true" :aria-label="'图片预览：' + viewerImage.name" @click.self="closePhotoViewer">
         <div class="viewer-layout">

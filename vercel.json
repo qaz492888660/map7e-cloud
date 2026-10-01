@@ -1,4 +1,6 @@
 {
+  "buildCommand": "npm run build",
+  "outputDirectory": "dist",
   "rewrites": [
     {
       "source": "/api/:route*",
@@ -10,23 +12,7 @@
     },
     {
       "source": "/",
-      "destination": "/public/index.html"
-    },
-    {
-      "source": "/assets/:path*",
-      "destination": "/public/assets/:path*"
-    },
-    {
-      "source": "/components/:path*",
-      "destination": "/public/components/:path*"
-    },
-    {
-      "source": "/files/:path*",
-      "destination": "/public/files/:path*"
-    },
-    {
-      "source": "/downloads/:path*",
-      "destination": "/public/downloads/:path*"
+      "destination": "/index.html"
     }
   ]
 }

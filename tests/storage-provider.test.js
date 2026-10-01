@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import crypto from 'node:crypto'
-import { seal, unseal, metadataId, writeAuth, readAuth, readConfig, writeConfig, withLock } from '../lib/storage/store.js'
+import { seal, unseal, metadataId, writeAuth, readAuth, readConfig, writeConfig, withLock, clearStorageCachesForTests } from '../lib/storage/store.js'
 import { storageDescriptors, resolveStorage } from '../lib/storage/registry.js'
 import { safeDirectUrl } from '../lib/storage/errors.js'
 import { createPikPakProvider } from '../lib/storage/providers/pikpak.js'
@@ -21,13 +21,13 @@ process.env.STORAGE_ENCRYPTION_KEY = 'test-encryption-key'
 process.env.UPSTASH_REDIS_REST_URL = 'https://redis.test'
 process.env.UPSTASH_REDIS_REST_TOKEN = 'redis-test-secret'
 process.env.VERCEL_ENV = 'production'
-const redis = new Map(), calls = []
+const redis = new Map(), calls = [], redisReads = new Map()
 let upstream = async () => ({ status: 0, data: {} })
 const response = (payload, status = 200) => new Response(JSON.stringify(payload), { status, headers: { 'Content-Type': 'application/json' } })
 globalThis.fetch = async (url, options = {}) => {
   if (String(url).startsWith('https://redis.test')) {
     return response(JSON.parse(options.body).map(([op, key, value, ...args]) => {
-      if (op === 'GET') return { result: redis.get(key) ?? null }
+      if (op === 'GET') { redisReads.set(key, (redisReads.get(key) || 0) + 1); return { result: redis.get(key) ?? null } }
       if (op === 'SET') { if (args.includes('NX') && redis.has(key)) return { result: null }; redis.set(key, value); return { result: 'OK' } }
       if (op === 'DEL') return { result: Number(redis.delete(key)) }
       if (op === 'EVAL') { const lockKey = args[0], owner = args[1]; return { result: redis.get(lockKey) === owner ? Number(redis.delete(lockKey)) : 0 } }
@@ -383,4 +383,158 @@ await test('storage download router preserves non-enumerable request headers for
   assert.equal(target.statusCode, 302)
   assert.equal(target.headers.Location, 'https://download.test/file-1')
   assert.equal(target.ended, true)
+})
+
+await test('Storage config and auth reads are coalesced and writes invalidate their short cache', async () => {
+  clearStorageCachesForTests()
+  const configKey = 'map7e-cloud:storage:config:v1:'
+  const authKey = 'map7e-cloud:storage:auth:v1:quark-main'
+  redisReads.delete(configKey)
+  redisReads.delete(authKey)
+  const [configA, configB] = await Promise.all([readConfig(), readConfig()])
+  assert.deepEqual(configA, configB)
+  assert.equal(redisReads.get(configKey), 1, 'parallel config reads share one Upstash GET')
+
+  await writeAuth('quark-main', { accessToken: 'cache-access-1', refreshToken: 'cache-refresh-1', deviceId: 'cache-device' })
+  redisReads.delete(authKey)
+  const [authA, authB] = await Promise.all([readAuth('quark-main'), readAuth('quark-main')])
+  assert.deepEqual(authA, authB)
+  assert.equal(redisReads.get(authKey), 1, 'parallel auth reads share one Upstash GET')
+
+  await writeConfig({ ...configA, defaultStorageId: 'pikpak-main' })
+  redisReads.delete(configKey)
+  await readConfig()
+  assert.equal(redisReads.get(configKey), 1, 'writing config invalidates the cached value')
+  await writeAuth('quark-main', { accessToken: 'cache-access-2', refreshToken: 'cache-refresh-2', deviceId: 'cache-device' })
+  redisReads.delete(authKey)
+  assert.equal((await readAuth('quark-main')).accessToken, 'cache-access-2')
+  assert.equal(redisReads.get(authKey), 1, 'writing credentials invalidates the cached value')
+})
+
+await test('Quark website root maps to one folder and blocks out-of-tree reads and writes', async () => {
+  await writeConfig({ version: 1, defaultStorageId: 'quark-main', instances: [
+    { storageId: 'pikpak-main', provider: 'pikpak', displayName: 'PikPak', enabled: true },
+    { storageId: 'quark-main', provider: 'quark', displayName: 'Quark', enabled: true, rootFolderId: 'map-root', rootFolderName: 'Map7e' },
+  ] })
+  await writeAuth('quark-main', { accessToken: 'root-access', refreshToken: 'root-refresh', userId: 'root-user', deviceId: 'root-device' })
+  await setGlobalAccess('public')
+  const listParents = [], createdParents = [], downloadRequests = []
+  upstream = async (url, options = {}) => {
+    if (url.pathname.endsWith('/file/list')) {
+      const body = JSON.parse(options.body)
+      listParents.push(body.parent_fid)
+      return { status: 0, data: { file_list: [{ fid: 'photos', pdir_fid: 'map-root', file_type: 0, file_name: '图片' }], last_page: true } }
+    }
+    if (url.pathname.endsWith('/file/info')) {
+      const id = url.searchParams.get('fid')
+      const items = {
+        'map-root': { fid: 'map-root', pdir_fid: 'outside-parent', file_type: 0, file_name: 'Map7e' },
+        outside: { fid: 'outside', pdir_fid: '0', file_type: 0, file_name: 'Backup' },
+        'outside-file': { fid: 'outside-file', pdir_fid: 'outside', file_type: 2, file_name: 'secret.txt' },
+      }
+      return items[id] ? { status: 0, data: items[id] } : { status: 1, error_info: 'missing' }
+    }
+    if (url.pathname.endsWith('/file/get_download_url')) { downloadRequests.push(url.pathname); return { status: 0, data: { download_url: 'https://download.example/secret.txt' } } }
+    if (url.pathname.endsWith('/dir')) {
+      createdParents.push(JSON.parse(options.body).pdir_fid)
+      return { status: 0, data: { fid: 'created-at-root' } }
+    }
+    return { status: 0, data: {} }
+  }
+
+  const rootListing = res()
+  await storageFiles({ method: 'GET', query: { storageId: 'quark-main' }, headers: {} }, rootListing)
+  assert.equal(rootListing.statusCode, 200)
+  assert.equal(rootListing.body.storageId, 'quark-main')
+  assert.equal(rootListing.body.parentId, null, 'the configured folder appears as virtual /')
+  assert.deepEqual(listParents, ['map-root'], 'Quark lists only the selected root')
+
+  const escapedListing = res()
+  await storageFiles({ method: 'GET', query: { storageId: 'quark-main', parentId: 'outside' }, headers: {} }, escapedListing)
+  assert.equal(escapedListing.statusCode, 404)
+  assert.deepEqual(listParents, ['map-root'], 'an outside folder never reaches the list endpoint')
+
+  const escapedDownload = res()
+  await storageDownload({ method: 'GET', query: { storageId: 'quark-main', id: 'outside-file', parentId: 'outside' }, headers: {} }, escapedDownload)
+  assert.equal(escapedDownload.statusCode, 404)
+  assert.equal(escapedDownload.headers.Location, undefined)
+  assert.deepEqual(downloadRequests, [], 'an outside file never receives a download URL')
+
+  const adminCookie = `map7e_admin_session=${createAdminSessionToken().token}`
+  const createAtVirtualRoot = res()
+  await storageWrite('createFolder')({ method: 'POST', query: {}, body: { storageId: 'quark-main', name: 'New folder', parentId: '' }, headers: { cookie: adminCookie } }, createAtVirtualRoot)
+  assert.equal(createAtVirtualRoot.statusCode, 200)
+  assert.deepEqual(createdParents, ['map-root'], 'creating at / writes inside the selected root')
+
+  const createOutside = res()
+  await storageWrite('createFolder')({ method: 'POST', query: {}, body: { storageId: 'quark-main', name: 'Bad folder', parentId: 'outside' }, headers: { cookie: adminCookie } }, createOutside)
+  assert.equal(createOutside.statusCode, 404)
+  assert.deepEqual(createdParents, ['map-root'], 'an outside parent never reaches Quark create')
+
+  await writeConfig({ version: 1, defaultStorageId: 'quark-main', instances: [
+    { storageId: 'pikpak-main', provider: 'pikpak', displayName: 'PikPak', enabled: true },
+    { storageId: 'quark-main', provider: 'quark', displayName: 'Quark', enabled: true },
+  ] })
+  listParents.length = 0
+  const wholeDrive = res()
+  await storageFiles({ method: 'GET', query: { storageId: 'quark-main' }, headers: {} }, wholeDrive)
+  assert.equal(wholeDrive.statusCode, 200)
+  assert.equal(wholeDrive.body.parentId, null)
+  assert.deepEqual(listParents, ['0'], 'null root configuration preserves whole-drive mode')
+
+  process.env.ADMIN_PASSWORD = 'root-picker-admin-password'
+  const rootSelectionAdminCookie = `map7e_admin_session=${createAdminSessionToken().token}`
+  const selectedRoot = res()
+  await adminStorages({ method: 'POST', body: { action: 'set-root-folder', storageId: 'quark-main', rootFolderId: 'map-root' }, headers: { cookie: rootSelectionAdminCookie } }, selectedRoot)
+  assert.equal(selectedRoot.statusCode, 200)
+  assert.equal(selectedRoot.body.providers.find((provider) => provider.id === 'quark-main').rootFolderId, 'map-root')
+  assert.equal(selectedRoot.body.providers.find((provider) => provider.id === 'quark-main').rootFolderName, 'Map7e')
+})
+
+await test('PikPak scoped root preserves create and rename inside the tree and rejects outside parents', async () => {
+  await writeConfig({ version: 1, defaultStorageId: 'pikpak-main', instances: [
+    { storageId: 'pikpak-main', provider: 'pikpak', displayName: 'PikPak', enabled: true, rootFolderId: 'map-root' },
+    { storageId: 'quark-main', provider: 'quark', displayName: 'Quark', enabled: true },
+  ] })
+  const adminCookie = `map7e_admin_session=${createAdminSessionToken().token}`
+  const writes = []
+  upstream = async (url, options = {}) => {
+    const id = decodeURIComponent(url.pathname.split('/').pop())
+    if (options.method === 'POST' && url.pathname.endsWith('/drive/v1/files')) {
+      const body = JSON.parse(options.body)
+      writes.push(['create', body.parent_id])
+      return { file: { id: 'inside-created', name: body.name, parent_id: body.parent_id, kind: 'drive#folder' } }
+    }
+    if (options.method === 'PATCH') {
+      writes.push(['rename', id])
+      return { id, name: JSON.parse(options.body).name, parent_id: 'map-root', kind: 'drive#file' }
+    }
+    const items = {
+      'map-root': { id: 'map-root', name: 'Map7e', parent_id: '', kind: 'drive#folder', writable: true },
+      outside: { id: 'outside', name: 'Backup', parent_id: '', kind: 'drive#folder', writable: true },
+      'inside-file': { id: 'inside-file', name: 'old.txt', parent_id: 'map-root', kind: 'drive#file', writable: true },
+      'outside-file': { id: 'outside-file', name: 'old.txt', parent_id: 'outside', kind: 'drive#file', writable: true },
+    }
+    return items[id] || { error: 'not found' }
+  }
+
+  const create = res()
+  await storageWrite('createFolder')({ method: 'POST', query: {}, body: { name: 'New folder', parentId: '' }, headers: { cookie: adminCookie } }, create)
+  assert.equal(create.statusCode, 200)
+  assert.deepEqual(writes, [['create', 'map-root']], 'empty parent maps to the configured PikPak root')
+
+  const outsideCreate = res()
+  await storageWrite('createFolder')({ method: 'POST', query: {}, body: { name: 'Outside', parentId: 'outside' }, headers: { cookie: adminCookie } }, outsideCreate)
+  assert.equal(outsideCreate.statusCode, 404)
+  assert.deepEqual(writes, [['create', 'map-root']])
+
+  const outsideRename = res()
+  await storageWrite('rename')({ method: 'POST', query: {}, body: { id: 'outside-file', parentId: 'outside', name: 'renamed.txt' }, headers: { cookie: adminCookie } }, outsideRename)
+  assert.equal(outsideRename.statusCode, 404)
+  assert.deepEqual(writes, [['create', 'map-root']])
+
+  const insideRename = res()
+  await storageWrite('rename')({ method: 'POST', query: {}, body: { id: 'inside-file', parentId: 'map-root', name: 'renamed.txt' }, headers: { cookie: adminCookie } }, insideRename)
+  assert.equal(insideRename.statusCode, 200)
+  assert.deepEqual(writes, [['create', 'map-root'], ['rename', 'inside-file']])
 })

@@ -1,26 +1,29 @@
 # Map7e Cloud
 
-Map7e Cloud is a mobile-first web interface for browsing a protected PikPak drive. Static files under public/ provide the app shell and underwater background; routes under api/ handle authenticated directory, download, and upload requests.
+Map7e Cloud is a mobile-first multi-storage web interface. Vite compiles the Vue application into production assets; routes under api/ handle authenticated storage, permission, download, and upload requests.
 
 ## Interface
 
-- The home screen has a non-clickable Map7e space overview and real image/file counts from directory entries the app has loaded. Counts do not include unopened nested folders.
+- Startup reads the selected storage root only. Folder contents load when opened, and later pages append in sequence while respecting provider pacing. Counts cover directory entries loaded in this page session; unopened folders are not scanned.
 - Albums are searchable in a three-column mobile grid. Images open in an in-page viewer with swipe navigation, zoom, available metadata, and an original-download action.
 - Files appear as folder and file rows. Folders open the next directory level; current-directory search filters its files and folders.
 - File rows support downloads and browser previews for image, PDF, text, and video types when the browser and PikPak download response allow them.
 - Uploads use the protected direct-upload ticket API and submit file content to PikPak.
+- Each storage instance can use the full drive or an administrator-selected website root folder. The public API maps `/` to that folder and rejects parent IDs outside its tree.
 - The video background is the same source clip served by https://blog.map7e.com/videos/underwater.mp4. A 1080p H.264 copy converted from that clip is loaded first; the blog's original HEVC video is the fallback source.
 - Scrolling stays in document flow. The layout uses dynamic viewport sizing and iOS safe-area insets.
 
 ## Key Paths
 
-- public/index.html: browser entrypoint and mobile viewport settings
-- public/components/CloudStoragePage.vue: home, albums, file browser, viewer, previews, login, and upload interface
+- index.html and src/main.js: Vite application entrypoint
+- src/components/CloudStoragePage.vue: home, albums, file browser, viewer, previews, login, and upload interface
+- lib/storage/root.js: storage-root ancestry checks
+- public/admin.html and public/assets/admin.js: storage management and root-folder picker
 - api/cloud-login.js, api/cloud-logout.js, lib/cloud-auth.js: protected cloud session
 - api/pikpak-files.js, api/pikpak-download.js, api/pikpak-upload-ticket.js: authenticated PikPak operations
 - public/assets/underwater-h264.mp4: browser-compatible copy of the blog video
 - public/files/library.json: retained static sample manifest; the live interface reads PikPak through the API
-- vercel.json: static path rewrites; Vercel also serves the API functions
+- vite.config.js and vercel.json: production build output and Vercel API/static routing
 
 ## Configuration
 
@@ -45,14 +48,6 @@ Keep the existing `PIKPAK_PAT` and `CLOUD_PASSWORD` configured as before. Deploy
 
 When the global policy is locked, only explicitly public top-level folders are listed to unauthenticated visitors. The admin folder list also provides a direct `?folderId=...` link for explicitly public nested folders. Opening inherited or locked content and downloading its files requires the existing cloud password session. These checks run in the serverless API routes as well as in the UI.
 
-## Local Preview
+## Local Development and Tests
 
-The UI assets can be served with any static server, but live directory, login, download, and upload actions require the Vercel API runtime and environment variables.
-
-Run:
-
-    python3 -m http.server 8080 --directory public
-
-Backend and permission tests can be run without installing dependencies:
-
-    node --test tests/*.test.js
+Run `npm run dev` for Vite development, `npm run build` for the production bundle, and `npm test` for backend/storage and Vue interaction tests. Live directory, login, download, and upload actions require the Vercel API runtime and environment variables.
