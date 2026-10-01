@@ -15,6 +15,7 @@ import cloudLogout from '../lib/api-handlers/cloud-logout.js'
 import storageDownload from '../lib/api-handlers/storage-download.js'
 import storageFiles from '../lib/api-handlers/storage-files.js'
 import storageProviders from '../lib/api-handlers/storage-providers.js'
+import storageAbout from '../lib/api-handlers/storage-about.js'
 import pikpakAbout from '../lib/api-handlers/pikpak-about.js'
 import pikpakTest from '../lib/api-handlers/pikpak-test.js'
 
@@ -38,6 +39,7 @@ const handlers = new Map([
   ['cloud-logout', cloudLogout],
   ['storage-download', storageDownload],
   ['storage-files', storageFiles],
+  ['storage-about', storageAbout],
   ['storage-providers', storageProviders],
   ['pikpak-about', pikpakAbout],
   ['pikpak-create-folder', legacyPikPak(storageWrite('createFolder'))],

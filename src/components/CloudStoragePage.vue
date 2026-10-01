@@ -34,6 +34,9 @@ const directoryMetadata = ref({})
 const manifestUpdatedAt = ref('')
 const storageProviders = ref([])
 const activeStorageId = ref('pikpak-main')
+const quotaLoadingStorageId = ref('')
+const quotaError = ref('')
+const directoryIndex = ref({ storageId: '', status: 'idle', error: '' })
 const selectedCategory = ref('all')
 const recentFilter = ref('all')
 const recentLayout = ref('list')
@@ -43,6 +46,15 @@ const backgroundVideoLoaded = ref(false)
 const activeCapabilities = computed(() => storageProviders.value.find(p => p.id === activeStorageId.value)?.capabilities || {})
 const activeStorageName = computed(() => storageProviders.value.find((provider) => provider.id === activeStorageId.value)?.name || '网盘')
 const activeStorageInfo = computed(() => storageProviders.value.find((provider) => provider.id === activeStorageId.value) || null)
+const activeDirectoryIndexStatus = computed(() => directoryIndex.value.storageId === activeStorageId.value ? directoryIndex.value.status : 'idle')
+const directoryIndexing = computed(() => activeDirectoryIndexStatus.value === 'scanning')
+const directoryIndexMessage = computed(() => {
+  if (directoryIndexing.value) return '正在整理可访问的目录…'
+  if (activeDirectoryIndexStatus.value === 'partial') return '部分目录暂时无法读取，统计只包含已读取的文件。'
+  if (activeDirectoryIndexStatus.value === 'failed') return '目录读取未完成，请稍后刷新。'
+  if (activeDirectoryIndexStatus.value === 'complete') return '分类与最近更新覆盖当前有权限读取的目录。'
+  return authRequired.value ? '登录后读取当前网盘目录。' : '正在准备目录索引…'
+})
 const activeQuota = computed(() => {
   const quota = activeStorageInfo.value?.quota
   const used = Number(quota?.used)
@@ -87,6 +99,9 @@ const fileNameInput = ref(null)
 let touchOrigin = null
 let pendingDeepLinkFolderId = ''
 const directoryCache = new Map()
+const directoryLoadInFlight = new Map()
+const storageAboutCache = new Map()
+const directoryIndexRuns = new Map()
 let storageLoadGeneration = 0
 let rootStorageResolvedGeneration = -1
 
@@ -111,13 +126,16 @@ const filteredRecentFiles = computed(() => {
 const categoryCards = computed(() => {
   const count = (category) => allFiles.value.filter((file) => matchesCategory(file, category)).length
   const privateCount = rootFolders.value.filter(isPrivateItem).length
+  const readLabel = (value, suffix = '项') => activeDirectoryIndexStatus.value === 'complete'
+    ? `${value} ${suffix}`
+    : (activeDirectoryIndexStatus.value === 'partial' ? '部分目录暂不可读' : (authRequired.value ? '需要登录' : '读取中…'))
   return [
-    { id: 'video', label: '视频', icon: 'video', meta: `${count('video')} 项已读取`, enabled: true },
-    { id: 'image', label: '相册', icon: 'photos', meta: `${count('image')} 项已读取`, enabled: true },
-    { id: 'document', label: '文档', icon: 'documents', meta: `${count('document')} 项已读取`, enabled: true },
-    { id: 'audio', label: '音频', icon: 'audio', meta: `${count('audio')} 项已读取`, enabled: true },
-    { id: 'novel', label: '小说', icon: 'novel', meta: `${count('novel')} 项已读取`, enabled: true },
-    { id: 'private', label: '私密空间', icon: 'private', meta: `${privateCount} 个已标记私密`, enabled: true },
+    { id: 'video', label: '视频', icon: 'video', meta: readLabel(count('video')), enabled: true },
+    { id: 'image', label: '相册', icon: 'photos', meta: readLabel(count('image')), enabled: true },
+    { id: 'document', label: '文档', icon: 'documents', meta: readLabel(count('document')), enabled: true },
+    { id: 'audio', label: '音频', icon: 'audio', meta: readLabel(count('audio')), enabled: true },
+    { id: 'novel', label: '小说', icon: 'novel', meta: readLabel(count('novel')), enabled: true },
+    { id: 'private', label: '私密空间', icon: 'private', meta: readLabel(privateCount, '个已标记私密'), enabled: true },
     { id: 'trash', label: '回收站', icon: 'trash', meta: activeCapabilities.value.trash ? '列表暂未接入' : '当前网盘不支持', enabled: false },
   ]
 })
@@ -210,8 +228,8 @@ function classifyType(item) {
   if (item?.isFolder) return 'folder'
   const mime = String(item?.mimeType || '').toLowerCase()
   const ext = String(item?.extension || extensionOf(item?.name)).toLowerCase()
-  if (mime.startsWith('image/')) return 'image'
-  if (mime.startsWith('video/')) return 'video'
+  if (mime.startsWith('image/') || IMAGE_EXTENSIONS.includes(ext)) return 'image'
+  if (mime.startsWith('video/') || VIDEO_EXTENSIONS.includes(ext)) return 'video'
   if (mime.startsWith('audio/') || AUDIO_EXTENSIONS.includes(ext)) return 'audio'
   if (NOVEL_EXTENSIONS.includes(ext)) return 'novel'
   if (['zip', 'rar', '7z', 'tar', 'gz', 'bz2', 'xz'].includes(ext)) return 'archive'
@@ -343,7 +361,11 @@ async function apiJson(url, options = {}) {
       ? '当前网盘授权已失效，请在管理后台重新授权。'
       : (code === 'quark_unreachable'
           ? '夸克网盘暂时无法连接，请稍后重试。'
-          : (response.status === 401 && code === 'authentication_required' ? '需要先登录云盘。' : (payload?.message || payload?.error || ('HTTP ' + response.status))))
+          : (code === 'file_not_found'
+              ? '文件不存在或已移动。'
+              : (code === 'download_link_unavailable'
+                  ? '暂时无法获取文件。'
+                  : (response.status === 401 && code === 'authentication_required' ? '需要先登录云盘。' : (payload?.message || payload?.error || ('HTTP ' + response.status))))))
     const error = new Error(message)
     error.code = code
     error.status = response.status
@@ -418,56 +440,157 @@ async function requestDirectoryPage(parentId, pageToken, requestedStorageId, gen
 }
 
 async function appendDirectoryPages(parentId, entry, generation) {
-  if (entry.loadingPages || entry.complete) return
+  if (entry.complete) return entry
+  if (entry.pagePromise) {
+    if (entry.pageGeneration === generation) return entry.pagePromise
+    await entry.pagePromise
+    if (entry.complete) return entry
+  }
   entry.loadingPages = true
-  try {
-    while (entry.nextPageToken && entry.seenTokens.size < 200 && !entry.cancelled && directoryIsCurrent(entry.storageId, generation)) {
+  entry.pageError = null
+  const promise = (async () => {
+    while (entry.nextPageToken && entry.seenTokens.size < 10_000 && !entry.cancelled && directoryIsCurrent(entry.storageId, generation)) {
       const pageToken = entry.nextPageToken
-      if (entry.seenTokens.has(pageToken)) { entry.nextPageToken = ''; break }
-      entry.seenTokens.add(pageToken)
+      if (entry.seenTokens.has(pageToken)) { entry.pageError = new Error('目录分页游标重复。'); break }
       if (entry.nextRequestDelayMs > 0) await new Promise((resolve) => setTimeout(resolve, entry.nextRequestDelayMs))
-      if (!directoryIsCurrent(entry.storageId, generation)) return
+      if (!directoryIsCurrent(entry.storageId, generation)) return entry
       const page = await requestDirectoryPage(parentId, pageToken, entry.storageId, generation)
-      if (!page || entry.cancelled) return
+      if (!page || entry.cancelled) return entry
+      entry.seenTokens.add(pageToken)
       entry.items.push(...page.items)
       entry.nextPageToken = page.nextPageToken
       entry.nextRequestDelayMs = page.nextRequestDelayMs
-      if (entry.nextPageToken && entry.seenTokens.has(entry.nextPageToken)) { entry.nextPageToken = ''; break }
+      if (entry.nextPageToken && entry.seenTokens.has(entry.nextPageToken)) { entry.pageError = new Error('目录分页游标重复。'); break }
       presentDirectory(parentId, entry)
     }
-    entry.complete = !entry.nextPageToken || entry.seenTokens.size >= 200
+    if (entry.nextPageToken && entry.seenTokens.size >= 10_000) entry.pageError = new Error('目录分页数量超过安全限制。')
+    entry.complete = !entry.nextPageToken && !entry.pageError
     if (!parentId && entry.complete && directoryIsCurrent(entry.storageId, generation)) presentDirectory(parentId, entry)
+    return entry
+  })()
+  entry.pagePromise = promise
+  entry.pageGeneration = generation
+  try {
+    return await promise
   } catch (error) {
+    entry.pageError = error
     if (directoryIsCurrent(entry.storageId, generation)) errorMessage.value = error instanceof Error ? error.message : '目录后续分页读取失败。'
+    return entry
   } finally {
+    if (entry.pagePromise === promise) entry.pagePromise = null
     entry.loadingPages = false
   }
 }
 
 async function loadDirectory(parentId = '', { force = false, requestedStorageId = activeStorageId.value, generation = storageLoadGeneration } = {}) {
-  let entry = requestedStorageId ? directoryCache.get(directoryKey(requestedStorageId, parentId)) : null
+  const lookupStorageId = requestedStorageId || activeStorageId.value
+  const key = lookupStorageId ? directoryKey(lookupStorageId, parentId) : ''
+  let entry = key ? directoryCache.get(key) : null
   if (entry && !force) {
-    if (!directoryIsCurrent(requestedStorageId, generation)) return null
+    if (!directoryIsCurrent(lookupStorageId, generation)) return null
     presentDirectory(parentId, entry)
     void appendDirectoryPages(parentId, entry, generation)
     return entry
   }
-  if (entry && force) { entry.cancelled = true; directoryCache.delete(directoryKey(requestedStorageId, parentId)) }
-  const page = await requestDirectoryPage(parentId, '', requestedStorageId, generation)
-  if (!page || !directoryIsCurrent(page.storageId, generation)) return null
-  entry = {
-    storageId: page.storageId,
-    items: page.items,
-    nextPageToken: page.nextPageToken,
-    nextRequestDelayMs: page.nextRequestDelayMs,
-    seenTokens: new Set(),
-    loadingPages: false,
-    complete: !page.nextPageToken,
+  const pending = key ? directoryLoadInFlight.get(key) : null
+  if (pending && pending.generation === generation && !force) return pending.promise
+  if (entry && force) { entry.cancelled = true; directoryCache.delete(key) }
+  const promise = (async () => {
+    const page = await requestDirectoryPage(parentId, '', requestedStorageId, generation)
+    if (!page || !directoryIsCurrent(page.storageId, generation)) return null
+    const resolvedKey = directoryKey(page.storageId, parentId)
+    const existing = directoryCache.get(resolvedKey)
+    if (!force && existing) return existing
+    entry = {
+      storageId: page.storageId,
+      items: page.items,
+      nextPageToken: page.nextPageToken,
+      nextRequestDelayMs: page.nextRequestDelayMs,
+      seenTokens: new Set(),
+      loadingPages: false,
+      pagePromise: null,
+      pageGeneration: generation,
+      pageError: null,
+      cancelled: false,
+      complete: !page.nextPageToken,
+    }
+    directoryCache.set(resolvedKey, entry)
+    presentDirectory(parentId, entry)
+    void appendDirectoryPages(parentId, entry, generation)
+    return entry
+  })()
+  if (key) directoryLoadInFlight.set(key, { generation, promise })
+  try {
+    return await promise
+  } finally {
+    if (key && directoryLoadInFlight.get(key)?.promise === promise) directoryLoadInFlight.delete(key)
   }
-  directoryCache.set(directoryKey(entry.storageId, parentId), entry)
-  presentDirectory(parentId, entry)
-  void appendDirectoryPages(parentId, entry, generation)
-  return entry
+}
+
+async function ensureDirectoryComplete(parentId, entry, generation) {
+  if (!entry) return null
+  if (!entry.complete) await appendDirectoryPages(parentId, entry, generation)
+  if (entry.pageError) throw entry.pageError
+  return entry.complete ? entry : null
+}
+
+function isExpectedUnreadableDirectory(error) {
+  return ['authentication_required', 'cloud_login_not_configured', 'storage_authorization_required', 'file_not_found'].includes(error?.code)
+}
+
+async function indexStorageTree(storageId, generation) {
+  if (!storageId || !directoryIsCurrent(storageId, generation)) return
+  const runKey = `${storageId}\u0000${generation}`
+  if (directoryIndexRuns.has(runKey)) return directoryIndexRuns.get(runKey)
+  directoryIndex.value = { storageId, status: 'scanning', error: '' }
+  const task = (async () => {
+    let partial = false
+    const scheduled = new Set()
+    const queue = []
+    try {
+      const root = await loadDirectory('', { requestedStorageId: storageId, generation })
+      const completeRoot = await ensureDirectoryComplete('', root, generation)
+      if (!completeRoot || !directoryIsCurrent(storageId, generation)) return
+      for (const item of completeRoot.items) {
+        if (item.isFolder && item.id && !scheduled.has(item.id)) {
+          scheduled.add(item.id)
+          queue.push(item)
+        }
+      }
+      const provider = activeStorageInfo.value?.provider || activeStorageInfo.value?.type
+      // Stay serial until provider metadata is known; Quark root files can arrive
+      // before the lightweight provider list in production.
+      const concurrency = provider === 'pikpak' ? 2 : 1
+      while (queue.length && directoryIsCurrent(storageId, generation)) {
+        const batch = queue.splice(0, concurrency)
+        await Promise.all(batch.map(async (folder) => {
+          if (!directoryIsCurrent(storageId, generation)) return
+          try {
+            const entry = await loadDirectory(folder.id, { requestedStorageId: storageId, generation })
+            const complete = await ensureDirectoryComplete(folder.id, entry, generation)
+            if (!complete || !directoryIsCurrent(storageId, generation)) { partial = true; return }
+            for (const item of complete.items) {
+              if (item.isFolder && item.id && !scheduled.has(item.id)) {
+                scheduled.add(item.id)
+                queue.push(item)
+              }
+            }
+          } catch (error) {
+            if (!isExpectedUnreadableDirectory(error)) partial = true
+          }
+        }))
+      }
+      if (directoryIsCurrent(storageId, generation)) {
+        directoryIndex.value = { storageId, status: partial ? 'partial' : 'complete', error: '' }
+      }
+    } catch (error) {
+      if (directoryIsCurrent(storageId, generation)) {
+        directoryIndex.value = { storageId, status: 'failed', error: error?.code || 'directory_index_failed' }
+      }
+    }
+  })()
+  directoryIndexRuns.set(runKey, task)
+  try { await task } finally { if (directoryIndexRuns.get(runKey) === task) directoryIndexRuns.delete(runKey) }
 }
 
 async function loadFolder(id, name = '', writable, parentId, metadata = {}, { force = false, generation = storageLoadGeneration } = {}) {
@@ -517,16 +640,52 @@ async function loadStorageProviders(generation = storageLoadGeneration) {
       || storageProviders.value.find((provider) => provider.selectable)
     if (fallback) activeStorageId.value = fallback.id
   }
+  if (activeStorageId.value) void loadStorageAbout(activeStorageId.value, generation)
+}
+
+function mergeStorageAbout(payload) {
+  const id = payload?.storageId
+  if (!id || id !== activeStorageId.value) return
+  storageProviders.value = storageProviders.value.map((provider) => provider.id === id
+    ? { ...provider, accountInfo: payload.accountInfo || null, quota: payload.quota || null, capabilities: payload.capabilities || provider.capabilities, status: payload.status || provider.status, authStatus: 'valid' }
+    : provider)
+}
+
+async function loadStorageAbout(storageId, generation = storageLoadGeneration) {
+  if (!storageId || !directoryIsCurrent(storageId, generation)) return
+  const cached = storageAboutCache.get(storageId)
+  if (cached && cached.expiresAt > Date.now()) {
+    mergeStorageAbout(cached.payload)
+    return cached.payload
+  }
+  quotaLoadingStorageId.value = storageId
+  quotaError.value = ''
+  try {
+    const payload = await apiJson('/api/storage-about?' + new URLSearchParams({ storageId }).toString())
+    if (!directoryIsCurrent(storageId, generation)) return
+    mergeStorageAbout(payload)
+    storageAboutCache.set(storageId, { payload, expiresAt: Date.now() + 45_000 })
+    return payload
+  } catch (error) {
+    if (directoryIsCurrent(storageId, generation)) quotaError.value = error?.code || 'storage_about_unavailable'
+    return null
+  } finally {
+    if (directoryIsCurrent(storageId, generation) && quotaLoadingStorageId.value === storageId) quotaLoadingStorageId.value = ''
+  }
 }
 
 async function switchStorage(event) {
   if (loadingLibrary.value || uploading.value || managementBusy.value) return
   storageLoadGeneration += 1
+  directoryIndex.value = { storageId: event.target.value, status: 'idle', error: '' }
   activeStorageId.value = event.target.value
   rootFolders.value = []; rootFiles.value = []; folderMap.value = {}; directoryMetadata.value = {}; manifestUpdatedAt.value = ''
+  quotaError.value = ''
   closePhotoViewer(); closePreview(); selectedAction.value = null; managementDialog.value = ''; goHome()
   const url = new URL(location.href); url.searchParams.set('storageId', activeStorageId.value); url.searchParams.delete('folderId'); history.replaceState(null, '', url)
-  await loadLibrary({ requestedStorageId: activeStorageId.value, generation: storageLoadGeneration })
+  const generation = storageLoadGeneration
+  void loadStorageAbout(activeStorageId.value, generation)
+  await loadLibrary({ requestedStorageId: activeStorageId.value, generation })
 }
 
 async function loadLibrary({ requestedStorageId = activeStorageId.value, generation = storageLoadGeneration } = {}) {
@@ -536,7 +695,10 @@ async function loadLibrary({ requestedStorageId = activeStorageId.value, generat
   uploadStatus.value = ''
   try {
     await readLibraryDirectory({ requestedStorageId, generation })
-    if (generation === storageLoadGeneration) authRequired.value = false
+    if (generation === storageLoadGeneration) {
+      authRequired.value = false
+      void indexStorageTree(activeStorageId.value, generation)
+    }
     return generation === storageLoadGeneration
   } catch (error) {
     if (generation === storageLoadGeneration) {
@@ -547,6 +709,11 @@ async function loadLibrary({ requestedStorageId = activeStorageId.value, generat
         authRequired.value = true
       } else {
         errorMessage.value = error instanceof Error ? error.message : '无法读取当前网盘。'
+      }
+      directoryIndex.value = {
+        storageId: requestedStorageId || activeStorageId.value,
+        status: error?.code === 'authentication_required' ? 'auth-required' : 'failed',
+        error: error?.code || 'directory_load_failed',
       }
     }
     return false
@@ -1050,6 +1217,7 @@ async function loginCloud() {
     })
     authPassword.value = ''
     authRequired.value = false
+    void loadStorageAbout(activeStorageId.value, storageLoadGeneration)
     await loadLibrary()
     if (pendingDeepLinkFolderId) {
       const opened = await openFileFolder({ slug: pendingDeepLinkFolderId })
@@ -1331,7 +1499,7 @@ onBeforeUnmount(() => {
             <div class="ocean-sidebar-quota-label"><strong>{{ formatBytes(activeQuota.used) }}</strong><span>/ {{ formatBytes(activeQuota.total) }}</span></div>
             <div class="ocean-quota-track"><i :style="{ width: quotaPercent + '%' }" /></div>
           </template>
-          <p v-else class="ocean-quota-unknown">容量信息暂不可用</p>
+          <p v-else class="ocean-quota-unknown">{{ quotaLoadingStorageId === activeStorageId ? '正在读取容量…' : (quotaError ? '容量暂时无法读取' : '容量信息暂不可用') }}</p>
         </section>
 
         <div class="ocean-sidebar-actions">
@@ -1420,13 +1588,13 @@ onBeforeUnmount(() => {
                     <strong>{{ formatBytes(activeQuota.used) }}</strong><span>/ {{ formatBytes(activeQuota.total) }}</span>
                   </div>
                   <div v-else class="ocean-quota-value ocean-quota-value--unknown">
-                    <strong>{{ activeStorageInfo ? '容量信息暂不可用' : '正在读取空间状态…' }}</strong>
+                    <strong>{{ quotaLoadingStorageId === activeStorageId ? '正在读取容量…' : (activeStorageInfo ? '容量信息暂不可用' : '正在读取空间状态…') }}</strong>
                   </div>
                   <div v-if="activeQuota" class="ocean-quota-track ocean-quota-track--hero" aria-label="已用空间">
                     <i :style="{ width: quotaPercent + '%' }" />
                   </div>
                   <small v-if="activeQuota">已用 {{ formatBytes(activeQuota.used) }} · 剩余 {{ formatBytes(Math.max(0, activeQuota.total - activeQuota.used)) }}</small>
-                  <small v-else>容量仅在网盘接口返回真实数据时显示</small>
+                  <small v-else>{{ quotaLoadingStorageId === activeStorageId ? '正在读取网盘容量' : (quotaError ? '容量暂时无法读取' : '网盘接口未返回有效容量数据') }}</small>
                 </div>
               </div>
               <div class="ocean-hero-provider">
@@ -1441,7 +1609,7 @@ onBeforeUnmount(() => {
             <section class="ocean-section ocean-categories" aria-labelledby="categories-title">
               <div class="ocean-section-heading">
                 <div><p class="ocean-kicker">EXPLORE YOUR SPACE</p><h2 id="categories-title">云端分类</h2></div>
-                <span>分类数量只统计本次已读取的目录</span>
+                <span>分类数量按当前可访问目录统计</span>
               </div>
               <div class="ocean-category-grid">
                 <button
@@ -1459,12 +1627,12 @@ onBeforeUnmount(() => {
                   <small>{{ category.meta }}</small>
                 </button>
               </div>
-              <p class="ocean-data-note">尚未打开的文件夹不会被后台扫描；进入文件夹后，页面才会把其中真实项目加入已读取统计。</p>
+              <p class="ocean-data-note" role="status">{{ directoryIndexMessage }}</p>
             </section>
 
             <section class="ocean-section ocean-recent-panel" aria-labelledby="recent-title">
               <div class="ocean-section-heading ocean-section-heading--recent">
-                <div><p class="ocean-kicker">YOUR CLOUD ACTIVITY</p><h2 id="recent-title">最近更新</h2><span>依据文件的真实更新时间或创建时间</span></div>
+                <div><p class="ocean-kicker">YOUR CLOUD ACTIVITY</p><h2 id="recent-title">最近更新</h2><span>{{ directoryIndexing ? '正在整理文件…' : (activeDirectoryIndexStatus === 'partial' ? '部分目录暂时无法读取' : '依据文件的真实更新时间或创建时间') }}</span></div>
                 <button class="ocean-more-button" type="button" @click="openFiles()">更多 <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h13M13 6l6 6-6 6" /></svg></button>
               </div>
 
@@ -1529,13 +1697,22 @@ onBeforeUnmount(() => {
                   </article>
                 </div>
               </template>
+              <div v-else-if="directoryIndexing" class="ocean-empty ocean-empty--loading" role="status">正在整理文件…</div>
+              <div v-else-if="activeDirectoryIndexStatus === 'partial'" class="ocean-empty">
+                <strong>部分目录暂时无法读取</strong>
+                <span>当前已读取的真实文件仍可使用，受限目录不会加入统计。</span>
+              </div>
+              <div v-else-if="activeDirectoryIndexStatus === 'failed'" class="ocean-empty">
+                <strong>目录读取未完成</strong>
+                <span>请稍后刷新，再查看当前网盘的最近更新。</span>
+              </div>
               <div v-else class="ocean-empty">
                 <CloudCategoryIcon name="files" :size="56" />
                 <strong>{{ searchQuery || recentFilter !== 'all' ? '没有找到符合条件的已读取文件' : '还没有可显示的最近文件' }}</strong>
-                <span>{{ searchQuery || recentFilter !== 'all' ? '换一个筛选条件试试。' : '打开文件夹后，真实文件会按更新时间显示在这里。' }}</span>
+                <span>{{ searchQuery || recentFilter !== 'all' ? '换一个筛选条件试试。' : '当前可访问目录中没有可显示的文件。' }}</span>
               </div>
 
-              <div v-if="!loadingLibrary" class="ocean-recent-mobile">
+              <div v-if="!loadingLibrary && filteredRecentFiles.length" class="ocean-recent-mobile">
                 <article v-for="file in filteredRecentFiles" :key="file.id || file.path" class="ocean-mobile-file-row">
                   <button class="ocean-file-open" type="button" @click="openFile(file)">
                     <span class="ocean-file-thumb">

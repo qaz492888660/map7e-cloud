@@ -274,6 +274,9 @@ test('generic storage APIs expose providers and keep PikPak behavior compatible'
   response = await invoke(dispatchHandler, { query: { route: 'storage-files', storageId: 'quark-main' } })
   assert.equal(response.statusCode, 409)
   assert.equal(response.body.error, 'storage_authorization_required')
+
+  response = await invoke(dispatchHandler, { query: { route: 'storage-about', storageId: 'pikpak-main' } })
+  assert.equal(response.statusCode, 401, 'account and quota probes require the existing cloud or admin session')
 })
 
 test('admin root-picker directory API is routed, admin-only, and returns one folder level', async () => {

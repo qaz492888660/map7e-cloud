@@ -3,13 +3,17 @@ import assert from 'node:assert/strict'
 import crypto from 'node:crypto'
 import { seal, unseal, metadataId, writeAuth, readAuth, readConfig, writeConfig, withLock, clearStorageCachesForTests } from '../lib/storage/store.js'
 import { storageDescriptors, resolveStorage } from '../lib/storage/registry.js'
+import storageProviders from '../lib/api-handlers/storage-providers.js'
+import storageAbout, { clearStorageAboutCacheForTests } from '../lib/api-handlers/storage-about.js'
 import { safeDirectUrl } from '../lib/storage/errors.js'
 import { createPikPakProvider } from '../lib/storage/providers/pikpak.js'
 import { createQuarkProvider, quarkHeaders, beginQuarkAuthorization, finishQuarkAuthorization } from '../lib/storage/providers/quark.js'
 import { OFFICIAL_SIGN_KEY } from '../lib/storage/providers/quark-client.js'
 import { requireItemRead } from '../lib/storage/permissions.js'
+import { folderPathWithinRoot } from '../lib/storage/root.js'
 import { setFileMetadata, setGlobalAccess } from '../lib/admin-store.js'
 import { createAdminSessionToken } from '../lib/admin-auth.js'
+import { createSessionToken } from '../lib/cloud-auth.js'
 import storageFiles from '../lib/api-handlers/storage-files.js'
 import quarkOAuth from '../lib/api-handlers/quark-oauth.js'
 import adminStorages from '../lib/api-handlers/admin-storages.js'
@@ -38,7 +42,7 @@ globalThis.fetch = async (url, options = {}) => {
   const payload = await upstream(new URL(url), options)
   return payload instanceof Response ? payload : response(payload)
 }
-function res() { return { headers: {}, status(n) { this.statusCode = n; return this }, setHeader(k,v) { this.headers[k] = v }, json(v) { this.body = v; return this } } }
+function res() { return { headers: {}, status(n) { this.statusCode = n; return this }, setHeader(k,v) { this.headers[k] = v }, json(v) { this.body = v; return this }, end(value) { this.body = value; return this } } }
 
 await test('encrypted credentials bind to storage, detect tampering, and stay out of descriptors', async () => {
   const auth = { accessToken: 'account-access-secret', refreshToken: 'account-refresh-secret', deviceId: 'device' }
@@ -54,6 +58,58 @@ await test('encrypted credentials bind to storage, detect tampering, and stay ou
   process.env.VERCEL_ENV = 'preview'
   assert.equal(await readAuth('quark-main'), null)
   process.env.VERCEL_ENV = 'production'
+})
+await test('provider list stays fast and storage-about probes only the selected provider quota', async () => {
+  await writeConfig({ version: 1, defaultStorageId: 'pikpak-main', instances: [
+    { storageId: 'pikpak-main', provider: 'pikpak', displayName: 'PikPak', enabled: true },
+    { storageId: 'quark-main', provider: 'quark', displayName: '夸克网盘', enabled: true },
+  ] })
+  const quarkAuth = { accessToken: 'target-quark-access', refreshToken: 'target-quark-refresh', deviceId: 'target-device' }
+  await writeAuth('quark-main', quarkAuth)
+  clearStorageAboutCacheForTests()
+  calls.length = 0
+  upstream = async url => {
+    if (url.pathname.endsWith('/drive/v1/about')) return { user: { name: 'PikPak owner' }, quota: { limit: '1024', usage: '256' } }
+    if (url.pathname.endsWith('/user/info')) return { status: 0, data: { nickname: 'Quark owner' } }
+    if (url.pathname.endsWith('/user/get_vip_info')) return { status: 0, data: { vip_type: 'SVIP', capacity: '4096', used: '1024' } }
+    throw Error('Unexpected provider probe')
+  }
+  const anonymous = res()
+  await storageAbout({ method: 'GET', query: { storageId: 'pikpak-main' }, headers: {} }, anonymous)
+  assert.equal(anonymous.statusCode, 503, 'quota and account data require an authorized cloud session')
+  assert.equal(calls.length, 0, 'unauthorized quota requests do not probe stored provider credentials')
+  const cloudSession = createSessionToken(process.env.PIKPAK_PAT)
+  const authorizedRequest = storageId => ({ method: 'GET', query: { storageId }, headers: { cookie: `map7e_cloud_session=${cloudSession.token}` } })
+
+  const list = res()
+  await storageProviders({ method: 'GET', query: {} }, list)
+  assert.equal(list.statusCode, 200)
+  assert.equal(calls.length, 0, 'ordinary provider discovery does not call any provider API')
+  assert.equal(list.body.providers.find(item => item.id === 'pikpak-main').quota, null)
+  assert.equal(list.body.providers.find(item => item.id === 'quark-main').quota, null)
+
+  const pikpak = res()
+  await storageAbout(authorizedRequest('pikpak-main'), pikpak)
+  assert.equal(pikpak.statusCode, 200)
+  assert.deepEqual(pikpak.body.quota, { total: 1024, used: 256, free: 768 })
+  assert.deepEqual(pikpak.body.accountInfo, { provider: 'pikpak', nickname: 'PikPak owner' })
+  assert.equal(calls.filter(call => call.url.pathname.endsWith('/drive/v1/about')).length, 1, 'PikPak account and quota share one /about request')
+  assert.equal(calls.filter(call => call.url.hostname === 'open-api-drive.quark.cn').length, 0, 'inactive Quark is not probed')
+
+  clearStorageAboutCacheForTests()
+  const quark = res()
+  await storageAbout(authorizedRequest('quark-main'), quark)
+  assert.equal(quark.statusCode, 200)
+  assert.deepEqual(quark.body.quota, { total: 4096, used: 1024, free: 3072 })
+  assert.deepEqual(quark.body.accountInfo, { nickname: 'Quark owner', memberType: 'SVIP' })
+  assert.equal(calls.filter(call => call.url.hostname === 'open-api-drive.quark.cn').length, 2)
+  assert.equal(JSON.stringify(quark.body).includes(quarkAuth.accessToken), false)
+  assert.equal(JSON.stringify(quark.body).includes(quarkAuth.refreshToken), false)
+
+  const cached = res()
+  await storageAbout(authorizedRequest('quark-main'), cached)
+  assert.equal(cached.body.cached, true)
+  assert.equal(calls.filter(call => call.url.hostname === 'open-api-drive.quark.cn').length, 2, 'short quota cache avoids repeat upstream probes')
 })
 await test('legacy identity remains unchanged and new accounts have separate metadata', () => {
   assert.equal(metadataId('pikpak-main', 'same-id'), 'same-id')
@@ -230,6 +286,97 @@ await test('permissions use actual parent and scope identical file ids to each s
   await assert.rejects(requireItemRead({ headers: {} }, provider, 'quark-main', 'same-id', 'fake-parent'), /file_not_found/)
   await assert.rejects(requireItemRead({ headers: {} }, provider, 'quark-main', 'same-id', ''), /authentication_required|cloud_login_not_configured/)
   assert.equal((await requireItemRead({ headers: {} }, provider, 'pikpak-two', 'same-id', '')).id, 'same-id')
+})
+
+await test('Quark info response wrappers normalize root and nested item parents consistently', async () => {
+  const auth = { accessToken: 'info-access', refreshToken: 'info-refresh', deviceId: 'info-device' }
+  await writeAuth('quark-main', auth)
+  const records = {
+    root: { fid: 'root', pdir_fid: 0, file_type: '0', file_name: 'Root' },
+    folder: { fid: 'folder', pdir_fid: 'root', file_type: 0, file_name: 'Nested' },
+    file: { fid: 'file', pdir_fid: '0', file_type: 2, file_name: 'readme.txt' },
+  }
+  upstream = async url => {
+    const id = url.searchParams.get('fid')
+    if (id === 'root') return { status: 0, data: { file: records.root } }
+    if (id === 'folder') return { status: 0, data: { file_info: records.folder } }
+    if (id === 'file') return { status: 0, data: records.file }
+    return { status: 0, data: { file_info: records.root } }
+  }
+  const provider = createQuarkProvider({ storageId: 'quark-main', provider: 'quark' }, auth)
+  const root = await provider.getItem('root')
+  const nested = await provider.getItem('folder')
+  const file = await provider.getItem('file')
+  assert.equal(root.id, 'root')
+  assert.equal(root.parentId, '', 'numeric/string root 0 maps to the project root sentinel')
+  assert.equal(root.isFolder, true)
+  assert.equal(nested.parentId, 'root')
+  assert.equal(file.parentId, '')
+  await assert.rejects(provider.getItem('missing'), error => error.code === 'file_not_found')
+
+  const path = await folderPathWithinRoot(provider, 'folder', '0')
+  assert.deepEqual(path.map(item => item.id), ['root', 'folder'], 'a configured Quark root 0 is the same as an empty project root')
+})
+
+await test('Quark nested folder reads and storage downloads accept normalized real item parents', async () => {
+  await writeConfig({ version: 1, defaultStorageId: 'quark-main', instances: [
+    { storageId: 'pikpak-main', provider: 'pikpak', displayName: 'PikPak', enabled: true },
+    { storageId: 'quark-main', provider: 'quark', displayName: '夸克网盘', enabled: true, rootFolderId: '0' },
+  ] })
+  const auth = { accessToken: 'nested-access', refreshToken: 'nested-refresh', userId: 'nested-user', deviceId: 'nested-device' }
+  await writeAuth('quark-main', auth)
+  await setGlobalAccess('public')
+  const listParents = [], downloadLinkCalls = []
+  upstream = async (url, options = {}) => {
+    if (url.pathname.endsWith('/file/list')) {
+      const parent = JSON.parse(options.body).parent_fid
+      listParents.push(parent)
+      if (parent === '0') return { status: 0, data: { file_list: [{ fid: 'outer', pdir_fid: 0, file_type: 0, file_name: 'Outer' }], last_page: true } }
+      if (parent === 'outer') return { status: 0, data: { file_list: [{ fid: 'inner', pdir_fid: 'outer', file_type: 0, file_name: 'Inner' }], last_page: true } }
+      if (parent === 'inner') return { status: 0, data: { file_list: [{ fid: 'nested-file', pdir_fid: 'inner', file_type: 2, file_name: 'notes.txt' }], last_page: true } }
+      return { status: 0, data: { file_list: [], last_page: true } }
+    }
+    if (url.pathname.endsWith('/file/info')) {
+      const id = url.searchParams.get('fid')
+      const records = {
+        outer: { fid: 'outer', pdir_fid: '0', file_type: 0, file_name: 'Outer' },
+        inner: { fid: 'inner', pdir_fid: 'outer', file_type: 0, file_name: 'Inner' },
+        'nested-file': { fid: 'nested-file', pdir_fid: 'inner', file_type: 2, file_name: 'notes.txt' },
+      }
+      return records[id] ? { status: 0, data: { file_info: records[id] } } : { status: 1, error_info: 'missing' }
+    }
+    if (url.pathname.endsWith('/file/get_download_url')) {
+      downloadLinkCalls.push(url.pathname)
+      return { status: 0, data: { download_url: 'https://download.example/nested-file' } }
+    }
+    if (url.hostname === 'download.example') return new Response(null, { status: 206, headers: { 'Content-Range': 'bytes 0-0/1' } })
+    return { status: 0, data: {} }
+  }
+
+  const root = res()
+  await storageFiles({ method: 'GET', query: { storageId: 'quark-main' }, headers: {} }, root)
+  assert.equal(root.statusCode, 200)
+  assert.equal(root.body.items[0].id, 'outer')
+  const first = res()
+  await storageFiles({ method: 'GET', query: { storageId: 'quark-main', parentId: 'outer' }, headers: {} }, first)
+  assert.equal(first.statusCode, 200)
+  assert.equal(first.body.items[0].id, 'inner')
+  const second = res()
+  await storageFiles({ method: 'GET', query: { storageId: 'quark-main', parentId: 'inner' }, headers: {} }, second)
+  assert.equal(second.statusCode, 200)
+  assert.equal(second.body.items[0].id, 'nested-file')
+  assert.deepEqual(listParents, ['0', 'outer', 'inner'])
+
+  const downloaded = res()
+  await storageDownload({ method: 'GET', query: { storageId: 'quark-main', id: 'nested-file', parentId: 'inner' }, headers: {} }, downloaded)
+  assert.equal(downloaded.statusCode, 302, JSON.stringify(downloaded.body))
+  assert.equal(downloaded.headers.Location, 'https://download.example/nested-file')
+  assert.equal(downloadLinkCalls.length, 1)
+
+  const badParent = res()
+  await storageDownload({ method: 'GET', query: { storageId: 'quark-main', id: 'nested-file', parentId: '0' }, headers: {} }, badParent)
+  assert.equal(badParent.statusCode, 404, 'parent validation remains strict after root normalization')
+  assert.equal(downloadLinkCalls.length, 1, 'a mismatched parent never requests a download URL')
 })
 
 
