@@ -36,8 +36,8 @@ const uid = useId()
         <stop stop-color="#FFFFFF" />
         <stop offset="1" stop-color="#99DFFF" />
       </linearGradient>
-      <filter :id="uid + '-shadow'" x="4" y="4" width="82" height="82" color-interpolation-filters="sRGB">
-        <feDropShadow dx="0" dy="5" stdDeviation="4" flood-color="#18BCEB" flood-opacity=".28" />
+      <filter :id="uid + '-shadow'" x="0" y="0" width="88" height="88" filterUnits="userSpaceOnUse" primitiveUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+        <feDropShadow dx="0" dy="4" stdDeviation="2.5" flood-color="#18BCEB" flood-opacity=".28" />
       </filter>
     </defs>
 
