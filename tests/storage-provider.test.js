@@ -298,6 +298,7 @@ await test('Quark info response wrappers normalize root and nested item parents 
     file: { fid: 'file', pdir_fid: '0', file_type: 2, file_name: 'readme.txt' },
   }
   upstream = async url => {
+    if (url.pathname.endsWith('/file/list')) return { status: 0, data: { file_list: [records.root], last_page: true } }
     const id = url.searchParams.get('fid')
     if (id === 'root') return { status: 0, data: { file: records.root } }
     if (id === 'folder') return { status: 0, data: { file_info: records.folder } }
@@ -322,7 +323,7 @@ await test('Quark info response wrappers normalize root and nested item parents 
 await test('Quark FID suffix identity supports live info prefixes through nested listing and download checks', async () => {
   await writeConfig({ version: 1, defaultStorageId: 'quark-main', instances: [
     { storageId: 'pikpak-main', provider: 'pikpak', displayName: 'PikPak', enabled: true },
-    { storageId: 'quark-main', provider: 'quark', displayName: '夸克网盘', enabled: true, rootFolderId: '0' },
+    { storageId: 'quark-main', provider: 'quark', displayName: '夸克网盘', enabled: true },
   ] })
   await writeAuth('quark-main', { accessToken: 'fid-access', refreshToken: 'fid-refresh', userId: 'fid-user', deviceId: 'fid-device' })
   await setGlobalAccess('public')
@@ -330,6 +331,7 @@ await test('Quark FID suffix identity supports live info prefixes through nested
   const listedInner = 'listed-inner-prefix|inner-key'
   const listedFile = 'listed-file-prefix|file-key'
   const listParents = [], downloadLinkCalls = []
+  let virtualRootInfoCalls = 0
   upstream = async (url, options = {}) => {
     if (url.pathname.endsWith('/file/list')) {
       const parent = JSON.parse(options.body).parent_fid
@@ -345,8 +347,8 @@ await test('Quark FID suffix identity supports live info prefixes through nested
         'outer-key': { fid: 'info-outer-prefix|outer-key', parent_fid: 'info-root-alias|drive-key', file_type: '0', filename: '夸克云盘' },
         'inner-key': { fid: 'info-inner-prefix|inner-key', parent_fid: 'info-outer-prefix|outer-key', file_type: '0', filename: '旅行照片' },
         'file-key': { fid: 'info-file-prefix|file-key', parent_fid: 'info-inner-prefix|inner-key', file_type: '1', filename: 'photo.jpg' },
-        'drive-key': { fid: 'canonical-root-prefix|drive-key', parent_fid: '0', file_type: '0', filename: '根目录' },
       }
+      if (key === 'drive-key') { virtualRootInfoCalls += 1; return { status: 1, errno: 404, error_info: 'virtual root is not an item' } }
       return records[key] ? { status: 0, data: records[key] } : { status: 1, error_info: 'missing' }
     }
     if (url.pathname.endsWith('/file/get_download_url')) {
@@ -383,6 +385,7 @@ await test('Quark FID suffix identity supports live info prefixes through nested
   assert.equal(falseParent.statusCode, 404, 'a different identity suffix remains rejected')
   assert.equal(downloadLinkCalls.length, 1, 'a mismatched parent never requests a download URL')
   assert.deepEqual(listParents.slice(0, 3), ['0', listedOuter, listedInner])
+  assert.equal(virtualRootInfoCalls, 0, 'the opaque root parent from Quark list is recognized without treating it as a file')
 })
 
 await test('Quark nested folder reads and storage downloads accept normalized real item parents', async () => {
