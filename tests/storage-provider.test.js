@@ -372,7 +372,7 @@ await test('Quark preview uses a signed Gateway ticket and the server sends offi
   assert.equal(listing.body.items[0].previewAvailable, true)
   assert.equal(JSON.stringify(listing.body).includes(auth.accessToken), false)
 })
-await test('PikPak RAW thumbnails use the same credential-safe Preview API', async () => {await test('Quark .ts and .mts only use video tickets when MIME is absent or video-compatible', async () => {
+await test('Quark .ts and .mts only use video tickets when MIME is absent or video-compatible', async () => {
   await writeConfig({ version: 1, defaultStorageId: 'quark-main', instances: [
     { storageId: 'quark-main', provider: 'quark', displayName: 'Quark', enabled: true },
   ] })
@@ -407,7 +407,7 @@ await test('PikPak RAW thumbnails use the same credential-safe Preview API', asy
   assert.equal(mediaClaimsFromResponse(unknown).purpose, 'video')
 })
 
-
+await test('PikPak RAW thumbnails use the same credential-safe Preview API', async () => {
   const auth = { accessToken: 'pikpak-preview-account-secret' }
   const sourceUrl = `https://thumb.mypikpak.com/raw.webp?token=${auth.accessToken}`
   await writeConfig({ version: 1, defaultStorageId: 'pikpak-main', instances: [
