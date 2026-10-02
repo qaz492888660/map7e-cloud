@@ -1,6 +1,6 @@
 # Quark official integration evidence
 
-Checked 2026-09-30 against Quark's official Agent Skill source:
+Checked 2026-10-02 against Quark's official Agent Skill 1.0.20 source and release:
 
 - Repository: <https://github.com/quark-clouddrive/quarkclouddrive_offical>
 - Inspected runtime revision: `509e3ada82c1ac4a251e13bac8ca9b858d125cfb`
@@ -8,6 +8,8 @@ Checked 2026-09-30 against Quark's official Agent Skill source:
 - File operations guide: <https://github.com/quark-clouddrive/quarkclouddrive_offical/blob/main/skills/quarkclouddrive/references/file-ops.md>
 - Official Skill configuration endpoint: `https://open-api-drive.quark.cn/agent/v1/skill_config`
 - Runtime release: Quark Drive Skill 1.0.20
+- Official release listing: <https://github.com/quark-clouddrive/quarkclouddrive_offical/releases>
+- Official Quark Help download link: <https://www.quark.cn/documents/help/quark-drive-skill>
 
 ## What the sources establish
 
@@ -42,3 +44,34 @@ constants distributed in the official runtime, not user credentials. OAuth
 access and refresh tokens are encrypted at rest in Upstash and are never
 returned to the browser. The provider does not claim that Quark accepts
 arbitrary ordinary web-app clients.
+
+## Media authentication confirmed in Skill 1.0.20
+
+The release archive's `DownloadManager` constructs a Cookie containing the
+required `x_pan_client_id` and `x_pan_access_token` fields. It appends
+`x_pan_client_token` only when a client token exists in the local account
+configuration. The client ID comes from the official runtime configuration;
+the access token comes from the authorized account. Map7e uses the official
+client ID (or its matching `QUARK_CLIENT_ID` override) and the OAuth access
+token stored for the selected Quark storage. A stored `clientToken` is included
+if present; Map7e's current OAuth exchange does not populate that optional field.
+
+The CLI obtains a media URL with POST
+`/open/v1/file/get_download_url`, reading `data.download_url`. Its download
+manager sends GET requests directly to that returned CDN URL with the Cookie;
+chunk requests also send `Range`. When the URL expiry embedded in the URL is
+detected, the CLI obtains a replacement URL and retries the chunk. The official
+runtime's direct file reader does not establish the authentication behavior of
+thumbnail CDN requests; Map7e sends the same credential Cookie to the Quark
+thumbnail host server-side, but that path remains unverified against the real
+Production sample.
+
+The new `services/media-gateway/` uses that server-side media flow. It does not
+put a Quark token or CDN URL in its ticket. It streams the CDN response and its
+single Range, checks Quark-host allowlists and public DNS results, retries a
+fresh download URL only once after a CDN `401` or `403`, and writes only safe
+response headers to the browser. Quark reauthentication, capacity, root and
+nested listing, indexing and JPG/MP4 classification have already been proven
+in Production per the project acceptance record. Production media delivery is
+still incomplete until a persistent Gateway host is deployed and JPG/video
+Range playback is verified on the real account.

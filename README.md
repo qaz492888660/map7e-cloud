@@ -18,6 +18,7 @@ Map7e Cloud is a mobile-first multi-storage web interface. Vite compiles the Vue
 - index.html and src/main.js: Vite application entrypoint
 - src/components/CloudStoragePage.vue: home, albums, file browser, viewer, previews, login, and upload interface
 - lib/storage/root.js: storage-root ancestry checks
+- services/media-gateway/: standalone Quark media Range and preview service; see its [deployment guide](services/media-gateway/README.md)
 - public/admin.html and public/assets/admin.js: storage management and root-folder picker
 - api/cloud-login.js, api/cloud-logout.js, lib/cloud-auth.js: protected cloud session
 - api/pikpak-files.js, api/pikpak-download.js, api/pikpak-upload-ticket.js: authenticated PikPak operations
@@ -51,3 +52,5 @@ When the global policy is locked, only explicitly public top-level folders are l
 ## Local Development and Tests
 
 Run `npm run dev` for Vite development, `npm run build` for the production bundle, and `npm test` for backend/storage and Vue interaction tests. Live directory, login, download, and upload actions require the Vercel API runtime and environment variables.
+
+Quark image and video bytes are streamed by the separate Media Gateway after the Cloud API checks file permissions and signs a short-lived ticket. PikPak continues through its existing path. Production Quark media delivery requires a persistent Gateway host and the shared `MEDIA_GATEWAY_URL` / `MEDIA_GATEWAY_SIGNING_SECRET` configuration; see the Gateway deployment guide before enabling it.

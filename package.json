@@ -8,9 +8,10 @@
   },
   "scripts": {
     "dev": "vite --host 0.0.0.0",
-    "build": "vite build",
+    "build": "vite build && npm run build:media-gateway",
+    "build:media-gateway": "node --check services/media-gateway/src/gateway.js && node --check services/media-gateway/src/server.js",
     "preview": "vite preview --host 0.0.0.0",
-    "test": "node --test tests/*.test.js && npm run test:ui",
+    "test": "node --test tests/*.test.js services/media-gateway/tests/*.test.js && npm run test:ui",
     "test:ui": "vitest run"
   },
   "dependencies": {

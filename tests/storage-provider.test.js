@@ -1,13 +1,16 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import crypto from 'node:crypto'
-import { Writable } from 'node:stream'
+import dns from 'node:dns/promises'
+import https from 'node:https'
+import { EventEmitter } from 'node:events'
+import { Readable, Writable } from 'node:stream'
 import { seal, unseal, metadataId, writeAuth, readAuth, readConfig, writeConfig, withLock, clearStorageCachesForTests } from '../lib/storage/store.js'
 import { storageDescriptors, resolveStorage } from '../lib/storage/registry.js'
 import storageProviders from '../lib/api-handlers/storage-providers.js'
 import storageAbout, { clearStorageAboutCacheForTests } from '../lib/api-handlers/storage-about.js'
 import { safeDirectUrl } from '../lib/storage/errors.js'
-import { logPreviewDiagnostic, previewSourceFieldNames, previewSourceUrl, safeBrowserPreviewUrl, probeRange } from '../lib/storage/previews.js'
+import { attachPreviewLinks, logPreviewDiagnostic, previewSourceFieldNames, previewSourceUrl, safeBrowserPreviewUrl } from '../lib/storage/previews.js'
 import { createPikPakProvider } from '../lib/storage/providers/pikpak.js'
 import { createQuarkProvider, normalizeQuarkItem, quarkHeaders, beginQuarkAuthorization, finishQuarkAuthorization } from '../lib/storage/providers/quark.js'
 import { OFFICIAL_SIGN_KEY } from '../lib/storage/providers/quark-client.js'
@@ -22,12 +25,16 @@ import adminStorages from '../lib/api-handlers/admin-storages.js'
 import { storageWrite } from '../lib/api-handlers/storage-write.js'
 import storageDownload from '../lib/api-handlers/storage-download.js'
 import storagePreview from '../lib/api-handlers/storage-preview.js'
+import { verifyMediaTicket } from '../lib/storage/media-ticket.js'
 
+const MEDIA_TEST_SECRET = 'map7e-media-gateway-test-signing-secret-at-least-32-bytes'
 process.env.PIKPAK_PAT = 'primary-test-secret'
 process.env.STORAGE_ENCRYPTION_KEY = 'test-encryption-key'
 process.env.UPSTASH_REDIS_REST_URL = 'https://redis.test'
 process.env.UPSTASH_REDIS_REST_TOKEN = 'redis-test-secret'
 process.env.VERCEL_ENV = 'production'
+process.env.MEDIA_GATEWAY_URL = 'https://media.test'
+process.env.MEDIA_GATEWAY_SIGNING_SECRET = MEDIA_TEST_SECRET
 const redis = new Map(), calls = [], redisReads = new Map()
 let upstream = async () => ({ status: 0, data: {} })
 const response = (payload, status = 200) => new Response(JSON.stringify(payload), { status, headers: { 'Content-Type': 'application/json' } })
@@ -47,6 +54,10 @@ globalThis.fetch = async (url, options = {}) => {
   return payload instanceof Response ? payload : response(payload)
 }
 function res() { return { headers: {}, status(n) { this.statusCode = n; return this }, setHeader(k,v) { this.headers[k] = v }, json(v) { this.body = v; return this }, end(value) { this.body = value; return this } } }
+function mediaClaimsFromResponse(target) {
+  const location = new URL(target.headers.Location)
+  return verifyMediaTicket(location.searchParams.get('ticket'), MEDIA_TEST_SECRET)
+}
 function streamRes() {
   const chunks = []
   const target = new Writable({ write(chunk, encoding, callback) { chunks.push(Buffer.from(chunk)); callback() } })
@@ -56,6 +67,34 @@ function streamRes() {
   target.json = function json(body) { this.body = body; return this }
   target.bytes = () => Buffer.concat(chunks)
   return target
+}
+function mockQuarkHttps(getResponse) {
+  const originalRequest = https.request
+  const requests = []
+  https.request = (url, options, callback) => {
+    const request = new EventEmitter()
+    request.destroy = error => { if (error) queueMicrotask(() => request.emit('error', error)); return request }
+    request.end = () => {
+      const parsed = new URL(url)
+      options.lookup(parsed.hostname, { family: 4 }, (error, address) => {
+        if (error) { request.emit('error', error); return }
+        requests.push({ url: parsed, headers: options.headers, address })
+        Promise.resolve(getResponse(parsed, options.headers)).then(upstreamResponse => {
+          const incoming = upstreamResponse.body ? Readable.fromWeb(upstreamResponse.body) : Readable.from([])
+          incoming.statusCode = upstreamResponse.status
+          incoming.headers = Object.fromEntries(upstreamResponse.headers.entries())
+          let closed = false
+          const closeRequest = () => { if (!closed) { closed = true; request.emit('close') } }
+          incoming.once('end', closeRequest)
+          incoming.once('close', closeRequest)
+          callback(incoming)
+        }, error => request.emit('error', error))
+      })
+      return request
+    }
+    return request
+  }
+  return { requests, restore() { https.request = originalRequest } }
 }
 
 await test('encrypted credentials bind to storage, detect tampering, and stay out of descriptors', async () => {
@@ -228,6 +267,17 @@ await test('RAW preview fields are detected without returning sensitive thumbnai
   assert.equal(safeBrowserPreviewUrl('https://thumb.quark.cn/a?X-OSS-Credential=temporary', []), null)
   assert.equal(JSON.stringify(item).includes(token), false)
 })
+await test('Quark listing thumbnail URLs stay server-side even without signed query fields', () => {
+  const item = normalizeQuarkItem({
+    fid: 'photo', pdir_fid: '0', file_type: 2, file_name: 'photo.jpg', file_ext: 'jpg',
+    thumbnail_url: 'https://thumb.quark.cn/photo.jpg?quality=small',
+  })
+  assert.equal(item.thumbnail, null)
+  assert.equal(item.thumbnailAvailable, true)
+  const linked = attachPreviewLinks(item, 'quark-main')
+  assert.match(linked.thumbnail, /^\/api\/storage-preview\?/)
+  assert.equal(linked.thumbnail.includes('thumb.quark.cn'), false)
+})
 await test('Preview diagnostics record only safe field names, host, status, and content type', async () => {
   const originalInfo = console.info
   let output = ''
@@ -256,7 +306,7 @@ await test('Preview diagnostics record only safe field names, host, status, and 
     assert.equal(output.includes(secret), false)
   }
 })
-await test('storage-preview streams a Quark thumbnail with safe Quark origin headers', async () => {
+await test('Quark preview uses a signed Gateway ticket and the server sends official media credentials', async () => {
   const auth = { accessToken: 'preview-api-access-secret', refreshToken: 'preview-api-refresh-secret', deviceId: 'preview-device' }
   await writeConfig({ version: 1, defaultStorageId: 'quark-main', instances: [
     { storageId: 'quark-main', provider: 'quark', displayName: '夸克网盘', enabled: true },
@@ -275,7 +325,7 @@ await test('storage-preview streams a Quark thumbnail with safe Quark origin hea
       assert.equal(options.headers['Sec-Fetch-Mode'], 'no-cors')
       assert.equal(options.headers['Sec-Fetch-Site'], 'same-site')
       assert.equal(options.headers['Accept-Language'], 'zh-CN,zh;q=0.9,en;q=0.8')
-      assert.equal(options.headers.Cookie, undefined)
+      assert.equal(options.headers.Cookie, `x_pan_client_id=third_party_agent;x_pan_access_token=${auth.accessToken}`)
       assert.equal(options.headers.Authorization, undefined)
       return new Response(new Uint8Array([255, 216, 217]), { status: 200, headers: {
         'Content-Type': 'image/jpeg', 'Content-Length': '3', ETag: '"preview-v1"', 'Last-Modified': 'Thu, 01 Oct 2026 12:00:00 GMT',
@@ -289,18 +339,31 @@ await test('storage-preview streams a Quark thumbnail with safe Quark origin hea
     } } }
     return { status: 0, data: {} }
   }
-  const target = streamRes()
+  const provider = createQuarkProvider({ storageId: 'quark-main', provider: 'quark' }, await readAuth('quark-main'), {
+    fetchCdn: (url, options) => upstream(new URL(url), options),
+  })
+  const originalLookup = dns.lookup
+  dns.lookup = async () => [{ address: '1.1.1.1', family: 4 }]
+  try {
+    const quarkPreview = await provider.getPreview('raw-image')
+    assert.equal(quarkPreview.status, 200)
+    assert.deepEqual([...new Uint8Array(await quarkPreview.arrayBuffer())], [255, 216, 217])
+  } finally {
+    dns.lookup = originalLookup
+  }
+
+  const target = res()
   await storagePreview({ method: 'GET', query: { storageId: 'quark-main', id: 'raw-image', parentId: '', variant: 'preview' }, headers: {} }, target)
-  assert.equal(target.statusCode, 200)
-  assert.equal(target.headers['Content-Type'], 'image/jpeg')
-  assert.equal(target.headers['Content-Length'], '3')
-  assert.equal(target.headers.ETag, '"preview-v1"')
-  assert.equal(target.headers['Last-Modified'], 'Thu, 01 Oct 2026 12:00:00 GMT')
-  assert.match(target.headers['Cache-Control'], /private, max-age=60/)
-  assert.equal(target.headers['X-Content-Type-Options'], 'nosniff')
-  assert.deepEqual([...target.bytes()], [255, 216, 217])
+  assert.equal(target.statusCode, 302)
+  assert.equal(target.headers['Cache-Control'], 'private, no-store')
+  assert.equal(target.headers['Referrer-Policy'], 'no-referrer')
+  assert.equal(new URL(target.headers.Location).origin, 'https://media.test')
+  const claims = mediaClaimsFromResponse(target)
+  assert.deepEqual({ storageId: claims.storageId, fileId: claims.fileId, parentId: claims.parentId, purpose: claims.purpose, variant: claims.variant }, {
+    storageId: 'quark-main', fileId: 'raw-image', parentId: '', purpose: 'preview', variant: 'preview',
+  })
   assert.equal(JSON.stringify(target.headers).includes(auth.accessToken), false)
-  assert.equal(target.bytes().includes(Buffer.from(auth.accessToken)), false)
+  assert.equal(target.headers.Location.includes('thumb.quark.cn'), false)
 
   const listing = res()
   await storageFiles({ method: 'GET', query: { storageId: 'quark-main' }, headers: {} }, listing)
@@ -373,15 +436,33 @@ await test('storage-preview permission checks and storageId-scoped same-id previ
   await storagePreview({ method: 'GET', query: { storageId: 'quark-main', id: 'same-id', parentId: '', variant: 'preview' }, headers: {} }, forbidden)
   assert.equal(forbidden.statusCode, 401)
   assert.equal(forbidden.body.error, 'authentication_required')
+  assert.equal(forbidden.headers.Location, undefined, 'locked content cannot issue a media ticket')
   assert.equal(calls.some(call => call.url.hostname === 'thumb.quark.cn'), false, 'locked preview data is not fetched before authorization')
   if (oldPassword === undefined) delete process.env.CLOUD_PASSWORD
   else process.env.CLOUD_PASSWORD = oldPassword
   await setFileMetadata(metadataId('quark-main', 'same-id'), { access: 'inherit' })
 
+  const gatewayUrl = process.env.MEDIA_GATEWAY_URL
+  delete process.env.MEDIA_GATEWAY_URL
+  const unavailable = res()
+  await storagePreview({ method: 'GET', query: { storageId: 'quark-main', id: 'same-id', parentId: '', variant: 'preview' }, headers: {} }, unavailable)
+  assert.equal(unavailable.statusCode, 503)
+  assert.equal(unavailable.body.error, 'media_gateway_not_configured')
+  process.env.MEDIA_GATEWAY_URL = gatewayUrl
+
+  const signingSecret = process.env.MEDIA_GATEWAY_SIGNING_SECRET
+  delete process.env.MEDIA_GATEWAY_SIGNING_SECRET
+  const downloadUnavailable = res()
+  await storageDownload({ method: 'GET', query: { storageId: 'quark-main', id: 'same-id', parentId: '' }, headers: {} }, downloadUnavailable)
+  assert.equal(downloadUnavailable.statusCode, 503)
+  assert.equal(downloadUnavailable.body.error, 'media_gateway_not_configured')
+  process.env.MEDIA_GATEWAY_SIGNING_SECRET = signingSecret
+
   const target = streamRes()
   await storagePreview({ method: 'GET', query: { storageId: 'quark-secondary', id: 'same-id', parentId: '', variant: 'preview' }, headers: {} }, target)
-  assert.equal(target.statusCode, 200)
-  assert.deepEqual([...target.bytes()], [2], 'the same file ID resolves through the selected Storage only')
+  assert.equal(target.statusCode, 302)
+  assert.equal(mediaClaimsFromResponse(target).storageId, 'quark-secondary', 'the same file ID resolves through the selected Storage only')
+  assert.equal(mediaClaimsFromResponse(target).fileId, 'same-id')
   assert.equal(JSON.stringify(target.headers).includes(secondAuth.accessToken), false)
   assert.equal(JSON.stringify(target.headers).includes(firstAuth.accessToken), false)
 })
@@ -406,6 +487,10 @@ await test('video Range check reports actual upstream headers without moving fil
     if (url.pathname.endsWith('/file/get_download_url')) return { status: 0, data: { download_url: directUrl } }
     return { status: 0, data: {} }
   }
+  const originalLookup = dns.lookup
+  dns.lookup = async () => [{ address: '1.1.1.1', family: 4 }]
+  const httpsMock = mockQuarkHttps((url, headers) => upstream(url, { headers }))
+  try {
   const check = res()
   await storageDownload({ method: 'GET', query: { storageId: 'quark-main', id: 'large-video', parentId: '', check: 'range' }, headers: {} }, check)
   assert.equal(check.statusCode, 200)
@@ -419,17 +504,29 @@ await test('video Range check reports actual upstream headers without moving fil
   assert.equal(JSON.stringify(check.body).includes('video.quark.cn'), false)
   assert.equal(JSON.stringify(check.body).includes('range-secret'), false)
 
-  const middle = await probeRange(directUrl, 'bytes=1024-2047')
+  const provider = createQuarkProvider({ storageId: 'quark-main', provider: 'quark' }, await readAuth('quark-main'))
+  const middle = await provider.getFileResponse('large-video', { range: 'bytes=1024-2047' })
   assert.equal(middle.status, 206)
-  assert.equal(middle.rangeSupported, true)
-  assert.equal(middle.contentRange, 'bytes 1024-2047/32212254720')
-  assert.equal(calls.filter(call => call.url.hostname === 'video.quark.cn').at(-1).headers.Range, 'bytes=1024-2047')
+  assert.equal(middle.headers.get('content-range'), 'bytes 1024-2047/32212254720')
+  const mediaCall = httpsMock.requests.filter(call => call.url.hostname === 'video.quark.cn').at(-1)
+  assert.equal(mediaCall.headers.Range, 'bytes=1024-2047')
+  assert.equal(mediaCall.headers.Cookie, `x_pan_client_id=third_party_agent;x_pan_access_token=${auth.accessToken}`)
+  await middle.body.cancel()
 
   const download = res()
   await storageDownload({ method: 'GET', query: { storageId: 'quark-main', id: 'large-video', parentId: '' }, headers: {} }, download)
   assert.equal(download.statusCode, 302)
-  assert.equal(download.headers.Location, directUrl)
+  const claims = mediaClaimsFromResponse(download)
+  assert.equal(claims.purpose, 'video')
+  assert.equal(claims.storageId, 'quark-main')
+  assert.equal(claims.fileId, 'large-video')
+  assert.equal(download.headers.Location.includes('video.quark.cn'), false)
+  assert.equal(download.headers.Location.includes('range-secret'), false)
   assert.equal(download.body, undefined, 'the video body remains on the Provider CDN')
+  } finally {
+    httpsMock.restore()
+    dns.lookup = originalLookup
+  }
 })
 await test('OAuth uses official exchange and stores expiry fields from response', async () => {
   upstream = async url => url.pathname.endsWith('get_authorize_page_url') ? { status: 0, data: { authorize_page_url: 'https://pan.quark.cn/open/v1/oauth/agent?page_code=page', page_code: 'page', device_id: 'device' } } : url.pathname.endsWith('get_aac_by_pagecode') ? { status: 0, data: {} } : { status: 0, data: { access_token: 'new-access', refresh_token: 'new-refresh', user_id: 'user', device_id: 'device', access_token_expires_at: 1900000000, refresh_token_expires_at: 2000000000 } }
@@ -520,16 +617,15 @@ await test('expired token rotation persists rotated credentials and locks exclud
   await withLock('exclusive', async () => assert.rejects(withLock('exclusive', async () => {}), /storage_operation_busy/))
   await withLock('exclusive', async () => {})
 })
-await test('download validates credential-free URLs and never passes account cookies to browser', async () => {
+await test('Quark Gateway download routes never hand an upstream URL or account credential to the browser', async () => {
   assert.equal(safeDirectUrl('https://cdn.test/a?access_token=secret'), null)
   assert.equal(safeDirectUrl('https://user:password@cdn.test/a'), null)
   assert.equal(safeDirectUrl('https://cdn.test/secret', ['secret']), null)
   const provider = createQuarkProvider({ storageId: 'quark-main' }, await readAuth('quark-main'))
-  upstream = async url => url.hostname === 'cdn.test' ? response({}, 403) : { status: 0, data: { download_url: 'https://cdn.test/file?temporary_signature=ok' } }
-  await assert.rejects(provider.getDownloadUrl('f'), /quark_direct_download_requires_account_cookie/)
-  assert.deepEqual(calls.at(-1).headers, { Range: 'bytes=0-0' })
-  upstream = async url => url.hostname === 'cdn.test' ? response({}, 206) : { status: 0, data: { download_url: 'https://cdn.test/file' } }
-  assert.equal(await provider.getDownloadUrl('f'), 'https://cdn.test/file')
+  upstream = async url => url.pathname.endsWith('/file/get_download_url')
+    ? { status: 0, data: { download_url: 'https://cdn.test/file?temporary_signature=ok' } }
+    : { status: 0, data: {} }
+  await assert.rejects(provider.getFileResponse('f'), /download_link_unavailable/)
 })
 await test('permissions use actual parent and scope identical file ids to each storage', async () => {
   await setGlobalAccess('public')
@@ -628,13 +724,14 @@ await test('Quark FID suffix identity supports live info prefixes through nested
   const downloaded = res()
   await storageDownload({ method: 'GET', query: { storageId: 'quark-main', id: listedFile, parentId: secondLevel.body.items[0].parentId }, headers: {} }, downloaded)
   assert.equal(downloaded.statusCode, 302, JSON.stringify(downloaded.body))
-  assert.equal(downloaded.headers.Location, 'https://download.example/live-quark-file')
-  assert.equal(downloadLinkCalls[0], listedFile, 'the original full FID is preserved for Quark download calls')
+  assert.equal(mediaClaimsFromResponse(downloaded).fileId, listedFile, 'the original full FID is preserved in the signed ticket')
+  assert.equal(mediaClaimsFromResponse(downloaded).purpose, 'original')
+  assert.equal(downloadLinkCalls.length, 0, 'Quark bytes are read by the Gateway after ticket validation')
 
   const falseParent = res()
   await storageDownload({ method: 'GET', query: { storageId: 'quark-main', id: listedFile, parentId: 'wrong-prefix|wrong-key' }, headers: {} }, falseParent)
   assert.equal(falseParent.statusCode, 404, 'a different identity suffix remains rejected')
-  assert.equal(downloadLinkCalls.length, 1, 'a mismatched parent never requests a download URL')
+  assert.equal(downloadLinkCalls.length, 0, 'neither valid nor mismatched requests fetch an upstream URL on Vercel')
   assert.deepEqual(listParents.slice(0, 3), ['0', listedOuter, listedInner])
   assert.equal(virtualRootInfoCalls, 0, 'the opaque root parent from Quark list is recognized without treating it as a file')
 })
@@ -691,13 +788,13 @@ await test('Quark nested folder reads and storage downloads accept normalized re
   const downloaded = res()
   await storageDownload({ method: 'GET', query: { storageId: 'quark-main', id: 'nested-file', parentId: 'inner' }, headers: {} }, downloaded)
   assert.equal(downloaded.statusCode, 302, JSON.stringify(downloaded.body))
-  assert.equal(downloaded.headers.Location, 'https://download.example/nested-file')
-  assert.equal(downloadLinkCalls.length, 1)
+  assert.equal(mediaClaimsFromResponse(downloaded).fileId, 'nested-file')
+  assert.equal(downloadLinkCalls.length, 0)
 
   const badParent = res()
   await storageDownload({ method: 'GET', query: { storageId: 'quark-main', id: 'nested-file', parentId: '0' }, headers: {} }, badParent)
   assert.equal(badParent.statusCode, 404, 'parent validation remains strict after root normalization')
-  assert.equal(downloadLinkCalls.length, 1, 'a mismatched parent never requests a download URL')
+  assert.equal(downloadLinkCalls.length, 0, 'neither valid nor mismatched requests fetch an upstream URL on Vercel')
 })
 
 
