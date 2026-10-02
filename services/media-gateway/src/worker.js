@@ -25,6 +25,8 @@ const MIME_BY_EXTENSION = new Map([
   ['png', 'image/png'], ['tif', 'image/tiff'], ['tiff', 'image/tiff'], ['webp', 'image/webp'],
   ['mp4', 'video/mp4'], ['m4v', 'video/mp4'], ['mov', 'video/quicktime'], ['webm', 'video/webm'],
   ['mkv', 'video/x-matroska'], ['avi', 'video/x-msvideo'], ['mpeg', 'video/mpeg'], ['mpg', 'video/mpeg'],
+  ['3gp', 'video/3gpp'], ['3g2', 'video/3gpp2'], ['m2ts', 'video/mp2t'], ['mts', 'video/mp2t'],
+  ['ts', 'video/mp2t'], ['ogv', 'video/ogg'], ['wmv', 'video/x-ms-wmv'],
   ['mp3', 'audio/mpeg'], ['m4a', 'audio/mp4'], ['pdf', 'application/pdf'],
 ])
 const PREVIEW_KEYS = ['image_preview_url', 'preview_url', 'preview_image_url', 'image_preview', 'preview_image', 'preview']
