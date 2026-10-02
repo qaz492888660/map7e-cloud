@@ -4,7 +4,9 @@ import CloudCategoryIcon from './CloudCategoryIcon.vue'
 
 const BLOG_VIDEO_URL = 'https://blog.map7e.com/videos/underwater.mp4'
 const TEXT_EXTENSIONS = ['txt', 'md', 'markdown', 'json', 'csv', 'xml', 'yaml', 'yml', 'log', 'ini']
-const IMAGE_EXTENSIONS = ['jpg', 'jpeg', 'png', 'webp', 'gif', 'avif', 'svg']
+const RAW_IMAGE_EXTENSIONS = ['dng', 'cr2', 'cr3', 'nef', 'arw', 'rw2', 'orf', 'raf', 'pef']
+const IMAGE_EXTENSIONS = ['jpg', 'jpeg', 'png', 'webp', 'gif', 'avif', 'svg', ...RAW_IMAGE_EXTENSIONS]
+const BROWSER_PREVIEW_IMAGE_EXTENSIONS = new Set(['jpg', 'jpeg', 'png', 'webp', 'gif', 'avif', 'svg'])
 const VIDEO_EXTENSIONS = ['mp4', 'webm', 'mov', 'm4v']
 const AUDIO_EXTENSIONS = ['mp3', 'm4a', 'aac', 'flac', 'wav', 'ogg', 'opus', 'wma']
 const NOVEL_EXTENSIONS = ['txt', 'epub', 'mobi', 'azw', 'azw3']
@@ -217,6 +219,12 @@ const photoCounter = computed(() => viewerItems.value.length > 1 ? (viewerIndex.
 function isImageFile(file) {
   if (file?.type === 'image') return true
   return IMAGE_EXTENSIONS.includes(file?.extension || extensionOf(file?.name))
+}
+
+function isBrowserPreviewImage(file) {
+  const ext = String(file?.extension || extensionOf(file?.name)).toLocaleLowerCase()
+  if (RAW_IMAGE_EXTENSIONS.includes(ext)) return false
+  return file?.type === 'image' || String(file?.mimeType || '').toLowerCase().startsWith('image/') || BROWSER_PREVIEW_IMAGE_EXTENSIONS.has(ext)
 }
 
 function extensionOf(name) {
@@ -1305,7 +1313,7 @@ function handleViewerTouchEnd(event) {
 }
 
 async function openFile(file) {
-  if (isImageFile(file)) {
+  if (isBrowserPreviewImage(file)) {
     openPhotoViewer(file, [file])
     return
   }

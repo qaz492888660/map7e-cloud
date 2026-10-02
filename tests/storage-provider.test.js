@@ -155,6 +155,24 @@ await test('Quark official signature, root and cursor protocol, safe errors, uns
   upstream = async () => ({ status: 1, agent_msg: 'sensitive account-access-secret' })
   await assert.rejects(provider.getQuota(), e => e.code === 'quark_request_failed' && !e.message.includes('secret'))
 })
+await test('Quark retries one transient read failure but never retries folder creation', async () => {
+  const auth = { accessToken: 'retry-access', refreshToken: 'retry-refresh', deviceId: 'retry-device' }
+  const provider = createQuarkProvider({ storageId: 'quark-main' }, auth)
+  let listAttempts = 0
+  calls.length = 0
+  upstream = async url => {
+    if (url.pathname.endsWith('/file/list') && listAttempts++ === 0) throw new TypeError('temporary network failure')
+    return { status: 0, data: { file_list: [], last_page: true } }
+  }
+  const listing = await provider.listFiles()
+  assert.deepEqual(listing.items, [])
+  assert.equal(calls.filter(call => call.url.pathname.endsWith('/file/list')).length, 2)
+
+  calls.length = 0
+  upstream = async () => { throw new TypeError('temporary network failure') }
+  await assert.rejects(provider.createFolder({ name: 'retry-guard' }), error => error.code === 'quark_unreachable')
+  assert.equal(calls.length, 1, 'write operations are never retried automatically')
+})
 await test('Quark account metadata, unknown quota, and thumbnail token redaction', async () => {
   const auth = { accessToken: 'quark-access-sensitive', refreshToken: 'quark-refresh-sensitive', deviceId: 'device' }
   await writeAuth('quark-main', auth)
