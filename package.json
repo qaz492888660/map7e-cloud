@@ -9,7 +9,10 @@
   "scripts": {
     "dev": "vite --host 0.0.0.0",
     "build": "vite build && npm run build:media-gateway",
-    "build:media-gateway": "node --check services/media-gateway/src/gateway.js && node --check services/media-gateway/src/server.js",
+    "build:media-gateway": "node --check services/media-gateway/src/gateway.js && node --check services/media-gateway/src/server.js && node --check services/media-gateway/src/worker.js",
+    "build:media-gateway-worker": "npm exec -- wrangler deploy --dry-run --config services/media-gateway/wrangler.jsonc",
+    "deploy:media-gateway-worker": "npm exec -- wrangler deploy --config services/media-gateway/wrangler.jsonc",
+    "tail:media-gateway-worker": "npm exec -- wrangler tail map7e-quark-media-gateway",
     "preview": "vite preview --host 0.0.0.0",
     "test": "node --test tests/*.test.js services/media-gateway/tests/*.test.js && npm run test:ui",
     "test:ui": "vitest run"
@@ -22,6 +25,7 @@
     "@vue/test-utils": "^2.4.6",
     "jsdom": "^27.2.0",
     "vite": "8.3.1",
-    "vitest": "^4.0.17"
+    "vitest": "^4.0.17",
+    "wrangler": "^4.147.0"
   }
 }

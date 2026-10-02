@@ -52,6 +52,30 @@ The service needs a continuously available container or VM, long-lived HTTP resp
 
 For a VM deployment, put a reverse proxy such as Caddy in front of this container for automatic HTTPS and route `media.map7e.com` to port `8080`. Disable idle suspension. Keep at least 512 MB RAM for the Node service; memory use is based on active stream chunks, not file size. Test actual Quark playback from the target mobile browsers after deployment.
 
+## Cloudflare Workers deployment
+
+The repository also includes a Fetch/Streams Worker entry point for Cloudflare. Cloudflare Workers support streaming multi-gigabyte response bodies without a response-size cap, and Cloudflare currently charges no data-transfer egress fee. The Free plan has a 100,000-request daily limit and a 10 ms CPU limit per invocation; check current plan limits against expected use. See [Workers limits](https://developers.cloudflare.com/workers/platform/limits/), [Streams](https://developers.cloudflare.com/workers/runtime-apis/streams/), and [Workers pricing](https://developers.cloudflare.com/workers/platform/pricing/).
+
+Install the repository dependencies, authenticate Wrangler with `npm exec -- wrangler login --device`, then build and deploy:
+
+```sh
+npm run build:media-gateway-worker
+npm run deploy:media-gateway-worker
+```
+
+Set these as Worker Secrets from the same Production values as Map7e Cloud. Wrangler prompts for each value; do not place secret values in command arguments or commit them:
+
+```sh
+npm exec -- wrangler secret put MEDIA_GATEWAY_SIGNING_SECRET --config services/media-gateway/wrangler.jsonc
+npm exec -- wrangler secret put KV_REST_API_URL --config services/media-gateway/wrangler.jsonc
+npm exec -- wrangler secret put KV_REST_API_TOKEN --config services/media-gateway/wrangler.jsonc
+npm exec -- wrangler secret put STORAGE_ENCRYPTION_KEY --config services/media-gateway/wrangler.jsonc
+```
+
+`KV_REST_API_URL` and `KV_REST_API_TOKEN` must point to Map7e Cloud's existing Upstash REST database. `STORAGE_ENCRYPTION_KEY` must equal the effective key used by Cloud to decrypt its Quark auth record. If Cloud still uses `PIKPAK_PAT` as its legacy encryption-key fallback, provide that same value under the Worker secret name `STORAGE_ENCRYPTION_KEY`. Only set `QUARK_CLIENT_ID` or `QUARK_SIGN_KEY` if Production overrides the official defaults. The Worker limits its automatic invocation logs and redacts query strings because the short-lived ticket is sent in the URL; application logs contain only sanitized request metadata.
+
+After deployment, Cloud can use the Worker `workers.dev` HTTPS URL as `MEDIA_GATEWAY_URL` for a test. For production, attach `media.map7e.com` as a Worker Custom Domain and set `MEDIA_GATEWAY_URL=https://media.map7e.com` in Vercel Production. Do not enable Cloud's Quark redirect until both Worker Secrets and the matching Cloud Production signing secret are set. `workers.dev` is useful for deployment checks; Cloudflare recommends a custom domain for production traffic.
+
 ## Local verification
 
 ```sh

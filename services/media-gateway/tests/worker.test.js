@@ -1,0 +1,452 @@
+import assert from 'node:assert/strict'
+import crypto from 'node:crypto'
+import test from 'node:test'
+import { createMediaTicket } from '../../../lib/storage/media-ticket.js'
+import {
+  createMediaGatewayWorker,
+  isAllowedQuarkUrl,
+  parseSingleRange,
+  quarkFidsMatch,
+  verifyGrant,
+} from '../src/worker.js'
+
+const ticketSecret = 'worker-test-signing-secret-has-at-least-32-bytes'
+const encryptionSecret = 'worker-test-storage-encryption-key'
+const allowedOrigin = 'https://cloud.map7e.com'
+const fixedNow = 1_800_000_000_000
+const redisUrl = 'https://test-redis.upstash.io'
+const redisToken = 'redis-test-token-only-in-worker'
+const defaultAuth = {
+  accessToken: 'quark-access-token-server-only',
+  refreshToken: 'quark-refresh-token-server-only',
+  clientToken: 'quark-client-token-server-only',
+  userId: 'test-user-id',
+  deviceId: 'test-device-id',
+  accessExpiresAt: null,
+  refreshExpiresAt: null,
+}
+
+function jsonResponse(value, status = 200, headers = {}) {
+  return new Response(JSON.stringify(value), { status, headers: { 'Content-Type': 'application/json', ...headers } })
+}
+
+async function sealAuth(storageId, auth, secret = encryptionSecret) {
+  const key = crypto.createHash('sha256').update('map7e-storage-v1\u0000' + secret).digest()
+  const iv = crypto.randomBytes(12)
+  const cipher = crypto.createCipheriv('aes-256-gcm', key, iv)
+  cipher.setAAD(Buffer.from(storageId))
+  const data = Buffer.concat([cipher.update(JSON.stringify(auth), 'utf8'), cipher.final()])
+  return JSON.stringify({
+    version: 1,
+    iv: iv.toString('base64url'),
+    tag: cipher.getAuthTag().toString('base64url'),
+    data: data.toString('base64url'),
+  })
+}
+
+function mediaFile(id, overrides = {}) {
+  return {
+    fid: id,
+    pdir_fid: '0',
+    file_name: 'sample.mp4',
+    file_type: 1,
+    size: 30 * 1024 * 1024 * 1024,
+    mime_type: 'video/mp4',
+    file_ext: 'mp4',
+    ...overrides,
+  }
+}
+
+function ticketFor(fileId, options = {}, now = fixedNow) {
+  return createMediaTicket({
+    storageId: options.storageId || 'quark-main',
+    fileId,
+    parentId: options.parentId || '',
+    purpose: options.purpose || 'video',
+    ...(options.purpose === 'preview' ? { variant: options.variant || 'preview' } : {}),
+  }, { secret: options.secret || ticketSecret, now })
+}
+
+async function createFixture({
+  files = {},
+  auth = defaultAuth,
+  envOverrides = {},
+  nowValue = fixedNow,
+  cdnHandler,
+  expireFirstMediaUrl = false,
+  authorizeRefresh = false,
+} = {}) {
+  const state = {
+    files,
+    auth,
+    authRecord: await sealAuth('quark-main', auth),
+    apiRequests: [],
+    cdnRequests: [],
+    redisRequests: [],
+    logs: [],
+    mediaUrlCount: 0,
+    media401Remaining: expireFirstMediaUrl ? 1 : 0,
+    authExpired: authorizeRefresh,
+    storedRefreshes: 0,
+  }
+  const env = {
+    MEDIA_GATEWAY_SIGNING_SECRET: ticketSecret,
+    MEDIA_GATEWAY_ALLOWED_ORIGIN: allowedOrigin,
+    UPSTASH_REDIS_REST_URL: redisUrl,
+    UPSTASH_REDIS_REST_TOKEN: redisToken,
+    STORAGE_ENCRYPTION_KEY: encryptionSecret,
+    ...envOverrides,
+  }
+  const config = {
+    version: 1,
+    defaultStorageId: 'quark-main',
+    instances: [
+      { storageId: 'quark-main', provider: 'quark', displayName: '夸克网盘', enabled: true },
+    ],
+  }
+  const fetchImpl = async (input, init = {}) => {
+    const url = new URL(typeof input === 'string' ? input : input.url)
+    const headers = new Headers(init.headers || {})
+    if (url.hostname === 'test-redis.upstash.io') {
+      const commands = JSON.parse(init.body)
+      state.redisRequests.push(commands)
+      const values = commands.map(command => {
+        if (command[0] === 'GET' && command[1] === 'map7e-cloud:storage:config:v1:') return JSON.stringify(config)
+        if (command[0] === 'GET' && command[1] === 'map7e-cloud:storage:auth:v1:quark-main') return state.authRecord
+        if (command[0] === 'GET' && command[1] === 'map7e-cloud:storage:lock:v1:refresh-quark-main') return null
+        if (command[0] === 'SET' && command[1] === 'map7e-cloud:storage:lock:v1:refresh-quark-main') return 'OK'
+        if (command[0] === 'SET' && command[1] === 'map7e-cloud:storage:auth:v1:quark-main') {
+          state.authRecord = command[2]
+          state.storedRefreshes += 1
+          return 'OK'
+        }
+        if (command[0] === 'EVAL') return 1
+        throw new Error('unexpected_redis_command')
+      })
+      return jsonResponse(values.map(result => ({ result })))
+    }
+    if (url.hostname === 'open-api-drive.quark.cn') {
+      const accessToken = url.searchParams.get('access_token')
+      state.apiRequests.push({ url: url.toString(), method: init.method || 'GET', headers, accessToken, body: init.body })
+      if (url.pathname === '/agent/v1/oauth/access_token/rotate') {
+        return jsonResponse({ status: 0, data: {
+          access_token: 'quark-access-token-refreshed',
+          refresh_token: 'quark-refresh-token-refreshed',
+          expires_in: 3600,
+        } })
+      }
+      if (state.authExpired && accessToken !== 'quark-access-token-refreshed') {
+        return jsonResponse({ status: 1, error_info: 'access token expired' }, 401)
+      }
+      if (url.pathname === '/open/v1/file/info') {
+        const id = url.searchParams.get('fid')
+        const file = state.files[id] || mediaFile(id)
+        return jsonResponse({ status: 0, data: file })
+      }
+      if (url.pathname === '/open/v1/file/get_download_url') {
+        state.mediaUrlCount += 1
+        const id = JSON.parse(init.body).fid
+        const file = state.files[id] || mediaFile(id)
+        const deadline = Math.floor(nowValue / 1000) + 1800
+        return jsonResponse({ status: 0, data: {
+          download_url: 'https://cdn.quark.cn/download/' + encodeURIComponent(id)
+            + '?auth_key=' + deadline + '-signature-' + state.mediaUrlCount,
+          size: file.size,
+          file_name: file.file_name,
+        } })
+      }
+      throw new Error('unexpected_quark_api_path')
+    }
+    if (url.hostname.endsWith('.quark.cn') || url.hostname === 'quark.cn') {
+      if (cdnHandler) return cdnHandler(url, headers, state)
+      state.cdnRequests.push({ url: url.toString(), headers, range: headers.get('range') })
+      if (url.pathname.startsWith('/thumb/')) {
+        return new Response(new Uint8Array([255, 216, 255]), {
+          status: 200,
+          headers: { 'Content-Type': 'image/jpeg', 'Content-Length': '3' },
+        })
+      }
+      if (state.media401Remaining > 0) {
+        state.media401Remaining -= 1
+        return new Response('denied', { status: 403, headers: { 'Content-Type': 'text/plain' } })
+      }
+      const total = 30 * 1024 * 1024 * 1024
+      const range = headers.get('range')
+      if (!range) {
+        return new Response(new Uint8Array([1, 2, 3]), {
+          status: 200,
+          headers: { 'Content-Type': 'application/octet-stream', 'Content-Length': '3', 'Accept-Ranges': 'bytes' },
+        })
+      }
+      const match = /^bytes=(\d+)-(\d+)$/.exec(range)
+      if (!match) return new Response(null, { status: 416, headers: { 'Content-Range': 'bytes */' + total } })
+      const start = Number(match[1])
+      const end = Number(match[2])
+      if (start >= total) return new Response(null, { status: 416, headers: { 'Content-Range': 'bytes */' + total } })
+      const boundedEnd = Math.min(end, total - 1)
+      const length = boundedEnd - start + 1
+      const fileId = decodeURIComponent(url.pathname.split('/').pop() || '')
+      const file = state.files[fileId] || mediaFile(fileId)
+      return new Response(new Uint8Array(length).fill(7), {
+        status: 206,
+        headers: {
+          'Content-Type': file.mime_type || 'video/mp4',
+          'Accept-Ranges': 'bytes',
+          'Content-Range': 'bytes ' + start + '-' + boundedEnd + '/' + total,
+          'Content-Length': String(length),
+          ETag: '"worker-media-v1"',
+          'Last-Modified': 'Thu, 01 Oct 2026 12:00:00 GMT',
+        },
+      })
+    }
+    throw new Error('unexpected_upstream_host')
+  }
+  const worker = createMediaGatewayWorker({
+    fetchImpl,
+    now: () => nowValue,
+    logger: entry => state.logs.push(entry),
+  })
+  return { worker, env, state, setNow(value) { nowValue = value } }
+}
+
+async function requestMedia(fixture, fileId, {
+  purpose = 'video',
+  variant,
+  parentId = '',
+  range,
+  ifRange,
+  cookie,
+  origin = allowedOrigin,
+  now = fixedNow,
+} = {}) {
+  const token = ticketFor(fileId, { purpose, variant, parentId }, now)
+  const headers = new Headers()
+  if (range !== undefined) headers.set('Range', range)
+  if (ifRange !== undefined) headers.set('If-Range', ifRange)
+  if (cookie) headers.set('Cookie', cookie)
+  if (origin) headers.set('Origin', origin)
+  const url = 'https://media.example.test/v1/media?ticket=' + encodeURIComponent(token)
+  return fixture.worker.fetch(new Request(url, { headers }), fixture.env)
+}
+
+test('Worker verifies Node-issued HMAC tickets and rejects expired or modified grants', async () => {
+  const ticket = ticketFor('ticket-check')
+  const claims = await verifyGrant(ticket, ticketSecret, { now: fixedNow, grantType: 'ticket' })
+  assert.equal(claims.storageId, 'quark-main')
+  assert.equal(claims.fileId, 'ticket-check')
+  await assert.rejects(() => verifyGrant(ticket.slice(0, -1) + 'A', ticketSecret, { now: fixedNow, grantType: 'ticket' }), /media_ticket_invalid/)
+  await assert.rejects(() => verifyGrant(ticket, ticketSecret, { now: fixedNow + 301_000, grantType: 'ticket' }), /media_ticket_expired/)
+})
+
+test('Worker health is minimal and works without media secrets', async () => {
+  const fixture = await createFixture({ envOverrides: { MEDIA_GATEWAY_SIGNING_SECRET: undefined } })
+  const response = await fixture.worker.fetch(new Request('https://media.example.test/health'), fixture.env)
+  assert.equal(response.status, 200)
+  assert.deepEqual(await response.json(), { ok: true, version: '0.2.0' })
+  assert.equal(fixture.state.redisRequests.length, 0)
+})
+
+test('Worker returns media_gateway_not_configured instead of a generic 502 when storage secrets are absent', async () => {
+  const fixture = await createFixture({ envOverrides: {
+    UPSTASH_REDIS_REST_URL: undefined,
+    UPSTASH_REDIS_REST_TOKEN: undefined,
+    KV_REST_API_URL: undefined,
+    KV_REST_API_TOKEN: undefined,
+  } })
+  const response = await requestMedia(fixture, 'no-store')
+  assert.equal(response.status, 503)
+  assert.equal((await response.json()).error, 'media_gateway_not_configured')
+})
+
+test('Quark upstream URL allowlist blocks arbitrary hosts, IPs, localhost and non-HTTPS', () => {
+  assert.equal(isAllowedQuarkUrl('https://cdn.quark.cn/file?auth_key=1-signature'), true)
+  assert.equal(isAllowedQuarkUrl('https://download.quark.com/file'), true)
+  assert.equal(isAllowedQuarkUrl('https://attacker.example/file'), false)
+  assert.equal(isAllowedQuarkUrl('https://quark.cn.attacker.example/file'), false)
+  assert.equal(isAllowedQuarkUrl('https://127.0.0.1/file'), false)
+  assert.equal(isAllowedQuarkUrl('https://localhost/file'), false)
+  assert.equal(isAllowedQuarkUrl('http://cdn.quark.cn/file'), false)
+  assert.equal(isAllowedQuarkUrl('https://user:pass@cdn.quark.cn/file'), false)
+})
+
+test('single Range parser supports first/middle/suffix ranges and rejects multipart, invalid and out-of-file ranges', () => {
+  assert.deepEqual(parseSingleRange('bytes=0-1023', 2048), { header: 'bytes=0-1023', start: 0, end: 1023 })
+  assert.deepEqual(parseSingleRange('bytes=123456-123999', 2048 * 1024), { header: 'bytes=123456-123999', start: 123456, end: 123999 })
+  assert.deepEqual(parseSingleRange('bytes=-1024', 4096), { header: 'bytes=-1024', start: null, end: 1024 })
+  assert.throws(() => parseSingleRange('bytes=0-1,3-4', 10), /range_not_satisfiable/)
+  assert.throws(() => parseSingleRange('bytes=10-2', 100), /range_not_satisfiable/)
+  assert.throws(() => parseSingleRange('bytes=2048-2049', 2048), /range_not_satisfiable/)
+})
+
+test('first and middle video ranges return streamed 206 headers for 30 GB metadata', async () => {
+  const fixture = await createFixture()
+  for (const range of ['bytes=0-1023', 'bytes=1610612736-1610612738']) {
+    const response = await requestMedia(fixture, 'large-video', { range })
+    assert.equal(response.status, 206)
+    assert.equal(response.headers.get('content-type'), 'video/mp4')
+    assert.equal(response.headers.get('accept-ranges'), 'bytes')
+    assert.equal(response.headers.get('content-range'), 'bytes ' + range.slice(6) + '/32212254720')
+    assert.equal(response.headers.get('content-length'), range === 'bytes=0-1023' ? '1024' : '3')
+    assert.equal((await response.arrayBuffer()).byteLength, range === 'bytes=0-1023' ? 1024 : 3)
+  }
+  assert.deepEqual(fixture.state.cdnRequests.map(value => value.range), ['bytes=0-1023', 'bytes=1610612736-1610612738'])
+  assert.equal(fixture.state.logs.length, 2)
+  assert.equal(fixture.state.logs[0].bytesStreamed, 1024)
+})
+
+test('bad and out-of-file Range requests return 416 before downloading media', async () => {
+  const fixture = await createFixture()
+  const multi = await requestMedia(fixture, 'invalid-range', { range: 'bytes=0-1,4-6' })
+  assert.equal(multi.status, 416)
+  assert.equal(multi.headers.get('content-range'), 'bytes */*')
+  const overrun = await requestMedia(fixture, 'out-of-file-range', { range: 'bytes=32212254720-32212254721' })
+  assert.equal(overrun.status, 416)
+  assert.equal(overrun.headers.get('content-range'), 'bytes */32212254720')
+  assert.equal(fixture.state.cdnRequests.length, 0)
+})
+
+test('JPG thumbnail streams with server-side Quark cookie and never returns credentials or CDN URL', async () => {
+  const fixture = await createFixture({ files: {
+    'photo-thumb': mediaFile('photo-thumb', {
+      file_name: '壁纸_8.jpg',
+      mime_type: 'image/jpeg',
+      file_ext: 'jpg',
+      thumbnail_url: 'https://cdn.quark.cn/thumb/photo-thumb?auth_key=secret-cdn-query',
+    }),
+  } })
+  const response = await requestMedia(fixture, 'photo-thumb', { purpose: 'preview', variant: 'thumbnail' })
+  assert.equal(response.status, 200)
+  assert.equal(response.headers.get('content-type'), 'image/jpeg')
+  const imageBytes = await response.arrayBuffer()
+  assert.equal(imageBytes.byteLength, 3)
+  assert.equal(fixture.state.cdnRequests[0].headers.get('cookie'),
+    'x_pan_client_id=third_party_agent;x_pan_access_token=quark-access-token-server-only;x_pan_client_token=quark-client-token-server-only')
+  const returned = JSON.stringify({
+    headers: [...response.headers.entries()],
+    logs: fixture.state.logs,
+    bodyBytes: imageBytes.byteLength,
+  })
+  assert.equal(returned.includes('quark-access-token-server-only'), false)
+  assert.equal(returned.includes('quark-refresh-token-server-only'), false)
+  assert.equal(returned.includes('quark-client-token-server-only'), false)
+  assert.equal(returned.includes('secret-cdn-query'), false)
+})
+
+test('JPG preview falls back to original bytes as a stream; DNG does not fall back to original', async () => {
+  const fixture = await createFixture({
+    files: {
+      'jpg-fallback': mediaFile('jpg-fallback', {
+        file_name: '壁纸_8.jpg',
+        mime_type: '',
+        file_ext: 'jpg',
+        preview_url: 'https://cdn.quark.cn/thumb/blocked-jpg',
+      }),
+      'raw-no-fallback': mediaFile('raw-no-fallback', {
+        file_name: 'IMG_6069_20260722.DNG',
+        mime_type: '',
+        file_ext: 'dng',
+        preview_url: 'https://cdn.quark.cn/thumb/blocked-raw',
+      }),
+    },
+    cdnHandler: async (url, headers, state) => {
+      state.cdnRequests.push({ url: url.toString(), headers, range: headers.get('range') })
+      if (url.pathname.startsWith('/thumb/')) return new Response('blocked', { status: 412, headers: { 'Content-Type': 'text/html' } })
+      return new Response(new Uint8Array([255, 216, 255]), {
+        status: 200,
+        headers: { 'Content-Type': 'application/octet-stream', 'Content-Length': '3' },
+      })
+    },
+  })
+  const jpg = await requestMedia(fixture, 'jpg-fallback', { purpose: 'preview', variant: 'preview' })
+  assert.equal(jpg.status, 200)
+  assert.equal(jpg.headers.get('content-type'), 'image/jpeg')
+  assert.equal((await jpg.arrayBuffer()).byteLength, 3)
+  const dng = await requestMedia(fixture, 'raw-no-fallback', { purpose: 'preview', variant: 'preview' })
+  assert.equal(dng.status, 404)
+  assert.equal((await dng.json()).error, 'preview_unavailable')
+  assert.equal(fixture.state.mediaUrlCount, 1)
+})
+
+test('untrusted thumbnail URL and redirect target are blocked before Worker fetches them', async () => {
+  const fixture = await createFixture({
+    files: {
+      'bad-preview': mediaFile('bad-preview', {
+        file_name: 'bad.jpg',
+        file_ext: 'jpg',
+        thumbnail_url: 'https://attacker.invalid/image.jpg',
+      }),
+      'redirect-preview': mediaFile('redirect-preview', {
+        file_name: 'redirect.jpg',
+        file_ext: 'jpg',
+        thumbnail_url: 'https://cdn.quark.cn/thumb/redirect',
+      }),
+    },
+    cdnHandler: async (url, headers, state) => {
+      state.cdnRequests.push({ url: url.toString(), headers, range: headers.get('range') })
+      return new Response(null, { status: 302, headers: { Location: 'http://127.0.0.1/private' } })
+    },
+  })
+  const before = fixture.state.cdnRequests.length
+  const bad = await requestMedia(fixture, 'bad-preview', { purpose: 'preview', variant: 'thumbnail' })
+  assert.equal(bad.status, 502)
+  assert.equal(fixture.state.cdnRequests.length, before)
+  const redirected = await requestMedia(fixture, 'redirect-preview', { purpose: 'preview', variant: 'thumbnail' })
+  assert.equal(redirected.status, 502)
+  assert.equal(fixture.state.cdnRequests.length, before + 1)
+})
+
+test('Quark CDN 403 refreshes the download URL and retries exactly once', async () => {
+  const fixture = await createFixture({ expireFirstMediaUrl: true })
+  const response = await requestMedia(fixture, 'url-refresh-video', { range: 'bytes=0-1' })
+  assert.equal(response.status, 206)
+  assert.equal(await response.text(), '\u0007\u0007')
+  assert.equal(fixture.state.mediaUrlCount, 2)
+  assert.equal(fixture.state.cdnRequests.length, 2)
+})
+
+test('expired Quark access token is refreshed once and encrypted auth is written back to the shared Redis key', async () => {
+  const expiredAuth = { ...defaultAuth, accessExpiresAt: fixedNow - 1 }
+  const fixture = await createFixture({ auth: expiredAuth, authorizeRefresh: true })
+  const response = await requestMedia(fixture, 'auth-refresh-video', { range: 'bytes=0-0' })
+  assert.equal(response.status, 206)
+  assert.equal(fixture.state.storedRefreshes, 1)
+  const fileInfo = fixture.state.apiRequests.find(value => value.url.includes('/open/v1/file/info'))
+  assert.equal(fileInfo.accessToken, 'quark-access-token-refreshed')
+  const saved = JSON.parse(fixture.state.authRecord)
+  assert.equal(saved.version, 1)
+  assert.notEqual(saved.data, '')
+  assert.equal(fixture.state.redisRequests.some(commands => commands.some(command => command[0] === 'EVAL')), true)
+})
+
+test('ticket and session support independent seeks after the five-minute ticket expires', async () => {
+  const fixture = await createFixture()
+  const token = ticketFor('seek-video', {}, fixedNow)
+  const first = await fixture.worker.fetch(new Request(
+    'https://media.example.test/v1/media?ticket=' + encodeURIComponent(token),
+    { headers: { Range: 'bytes=0-0', Origin: allowedOrigin } },
+  ), fixture.env)
+  assert.equal(first.status, 206)
+  const cookie = first.headers.get('set-cookie').split(';', 1)[0]
+  fixture.setNow(fixedNow + 301_000)
+  const second = await fixture.worker.fetch(new Request(
+    'https://media.example.test/v1/media?ticket=' + encodeURIComponent(token),
+    { headers: { Range: 'bytes=2000000000-2000000001', Cookie: cookie, Origin: allowedOrigin } },
+  ), fixture.env)
+  assert.equal(second.status, 206)
+  assert.equal(second.headers.get('content-range'), 'bytes 2000000000-2000000001/32212254720')
+})
+
+test('wrong Origin, method, arbitrary URL and invalid FID do not reach Quark media', async () => {
+  const fixture = await createFixture()
+  const grant = ticketFor('guarded-video')
+  const url = 'https://media.example.test/v1/media?ticket=' + encodeURIComponent(grant)
+  const wrongOrigin = await fixture.worker.fetch(new Request(url, { headers: { Origin: 'https://evil.example' } }), fixture.env)
+  assert.equal(wrongOrigin.status, 403)
+  const post = await fixture.worker.fetch(new Request(url, { method: 'POST' }), fixture.env)
+  assert.equal(post.status, 405)
+  const arbitrary = await fixture.worker.fetch(new Request(url + '&url=https%3A%2F%2Fevil.example%2Ffile'), fixture.env)
+  assert.equal(arbitrary.status, 400)
+  assert.equal(fixture.state.apiRequests.length, 0)
+  assert.equal(quarkFidsMatch('a|opaque', 'b|opaque'), true)
+  assert.equal(quarkFidsMatch('opaque-a', 'opaque-b'), false)
+})
