@@ -52,7 +52,7 @@ describe('CloudStoragePage directory loading', () => {
         return jsonResponse({ ok: true, storageId: requested, items: [folder('photos', '图片'), file('root-doc', 'readme.txt')] })
       }
       if (requested === 'pikpak-main' && parentId === 'photos') {
-        return jsonResponse({ ok: true, storageId: requested, items: [folder('nested', '二级目录', 'photos'), { ...file('photo', 'photo.jpg', 'photos'), extension: 'jpg' }] })
+        return jsonResponse({ ok: true, storageId: requested, items: [folder('nested', '二级目录', 'photos'), { ...file('photo', 'photo.jpg', 'photos'), extension: 'jpg' }, { ...file('raw-photo', 'camera.dng', 'photos'), extension: 'dng' }] })
       }
       if (requested === 'pikpak-main' && parentId === 'nested') return jsonResponse({ ok: true, storageId: requested, items: [{ ...file('deep-pdf', 'report.pdf', 'nested'), extension: 'pdf' }] })
       if (requested === 'quark-main' && !parentId && !pageToken) {
@@ -84,7 +84,8 @@ describe('CloudStoragePage directory loading', () => {
     ]))
     expect(wrapper.text()).toContain('report.pdf')
     expect(wrapper.text()).toContain('photo.jpg')
-    expect(wrapper.find('.ocean-category-card[aria-label^="相册"]').attributes('aria-label')).toContain('1 项')
+    expect(wrapper.text()).toContain('camera.dng')
+    expect(wrapper.find('.ocean-category-card[aria-label^="相册"]').attributes('aria-label')).toContain('2 项')
     expect(wrapper.find('.ocean-category-card[aria-label^="文档"]').attributes('aria-label')).toContain('1 项')
     expect(globalThis.fetch.mock.calls.some(([input]) => new URL(input, location.href).pathname === '/api/storage-about')).toBe(true)
     expect(wrapper.find('.background-video').attributes('preload')).toBe('none')
@@ -99,6 +100,10 @@ describe('CloudStoragePage directory loading', () => {
     await waitFor(() => expect(wrapper.find('.folder-open').exists()).toBe(true))
     await wrapper.find('.folder-open').trigger('click')
     await waitFor(() => expect(wrapper.text()).toContain('photo.jpg'))
+    const rawPhoto = wrapper.findAll('.file-open').find(button => button.attributes('aria-label') === '预览 camera.dng')
+    expect(rawPhoto).toBeTruthy()
+    await rawPhoto.trigger('click')
+    expect(wrapper.find('.preview-overlay').text()).toContain('这个格式暂不支持站内预览')
     expect(requests).toHaveLength(requestCount)
   })
 
