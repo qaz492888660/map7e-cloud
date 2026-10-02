@@ -7,7 +7,7 @@ import { storageDescriptors, resolveStorage } from '../lib/storage/registry.js'
 import storageProviders from '../lib/api-handlers/storage-providers.js'
 import storageAbout, { clearStorageAboutCacheForTests } from '../lib/api-handlers/storage-about.js'
 import { safeDirectUrl } from '../lib/storage/errors.js'
-import { previewSourceUrl, safeBrowserPreviewUrl, probeRange } from '../lib/storage/previews.js'
+import { logPreviewDiagnostic, previewSourceFieldNames, previewSourceUrl, safeBrowserPreviewUrl, probeRange } from '../lib/storage/previews.js'
 import { createPikPakProvider } from '../lib/storage/providers/pikpak.js'
 import { createQuarkProvider, normalizeQuarkItem, quarkHeaders, beginQuarkAuthorization, finishQuarkAuthorization } from '../lib/storage/providers/quark.js'
 import { OFFICIAL_SIGN_KEY } from '../lib/storage/providers/quark-client.js'
@@ -228,6 +228,34 @@ await test('RAW preview fields are detected without returning sensitive thumbnai
   assert.equal(safeBrowserPreviewUrl('https://thumb.quark.cn/a?X-OSS-Credential=temporary', []), null)
   assert.equal(JSON.stringify(item).includes(token), false)
 })
+await test('Preview diagnostics record only safe field names, host, status, and content type', async () => {
+  const originalInfo = console.info
+  let output = ''
+  console.info = value => { output += String(value) }
+  try {
+    const source = {
+      thumbnail_url: 'https://dl-sz.open-drive.quark.cn/thumbnail?access_token=preview-secret',
+      preview: { image: { url: 'https://dl-sz.open-drive.quark.cn/preview?signature=signed-secret' } },
+      token_thumbnail: 'https://must-not-log.example/image?token=secret',
+    }
+    assert.deepEqual(previewSourceFieldNames(source), ['thumbnail_url', 'preview'])
+    logPreviewDiagnostic({
+      provider: 'quark', stage: 'upstream_response', variant: 'preview',
+      fieldNames: ['thumbnail_url', 'preview', 'access_token_preview'],
+      host: 'DL-SZ.OPEN-DRIVE.QUARK.CN', status: 200, contentType: 'IMAGE/JPEG',
+      url: source.thumbnail_url, cookie: 'cookie-secret', accessToken: 'access-secret',
+    })
+  } finally {
+    console.info = originalInfo
+  }
+  assert.match(output, /"host":"dl-sz\.open-drive\.quark\.cn"/)
+  assert.match(output, /"status":200/)
+  assert.match(output, /"contentType":"image\/jpeg"/)
+  assert.match(output, /"fieldNames":\["thumbnail_url","preview"\]/)
+  for (const secret of ['preview-secret', 'signed-secret', 'must-not-log', 'cookie-secret', 'access-secret', 'access_token_preview']) {
+    assert.equal(output.includes(secret), false)
+  }
+})
 await test('storage-preview streams a Quark thumbnail and never returns its token URL', async () => {
   const auth = { accessToken: 'preview-api-access-secret', refreshToken: 'preview-api-refresh-secret', deviceId: 'preview-device' }
   await writeConfig({ version: 1, defaultStorageId: 'quark-main', instances: [
@@ -253,8 +281,19 @@ await test('storage-preview streams a Quark thumbnail and never returns its toke
     return { status: 0, data: {} }
   }
   const target = streamRes()
-  await storagePreview({ method: 'GET', query: { storageId: 'quark-main', id: 'raw-image', parentId: '', variant: 'preview' }, headers: {} }, target)
+  const originalTimeout = AbortSignal.timeout
+  const observedTimeouts = []
+  AbortSignal.timeout = function (timeout) {
+    observedTimeouts.push(timeout)
+    return originalTimeout.call(this, timeout)
+  }
+  try {
+    await storagePreview({ method: 'GET', query: { storageId: 'quark-main', id: 'raw-image', parentId: '', variant: 'preview' }, headers: {} }, target)
+  } finally {
+    AbortSignal.timeout = originalTimeout
+  }
   assert.equal(target.statusCode, 200)
+  assert.ok(observedTimeouts.includes(30000), 'Quark thumbnail requests have a bounded 30 second fetch deadline')
   assert.equal(target.headers['Content-Type'], 'image/jpeg')
   assert.equal(target.headers['Content-Length'], '3')
   assert.equal(target.headers.ETag, '"preview-v1"')
