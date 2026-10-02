@@ -294,6 +294,46 @@ test('first and middle video ranges return streamed 206 headers for 30 GB metada
   assert.equal(fixture.state.logs[0].bytesStreamed, 1024)
 })
 
+test('Worker infers all ticketed video extensions when Quark returns octet-stream', async () => {
+  const expected = new Map([
+    ['3gp', 'video/3gpp'],
+    ['3g2', 'video/3gpp2'],
+    ['m2ts', 'video/mp2t'],
+    ['mts', 'video/mp2t'],
+    ['ts', 'video/mp2t'],
+    ['ogv', 'video/ogg'],
+    ['wmv', 'video/x-ms-wmv'],
+  ])
+  for (const [extension, mime] of expected) {
+    const fileId = 'video-' + extension
+    const fixture = await createFixture({
+      files: {
+        [fileId]: mediaFile(fileId, {
+          file_name: 'sample.' + extension,
+          mime_type: '',
+          file_ext: extension,
+        }),
+      },
+      cdnHandler: async (url, headers, state) => {
+        state.cdnRequests.push({ url: url.toString(), headers, range: headers.get('range') })
+        return new Response(new Uint8Array([7]), {
+          status: 206,
+          headers: {
+            'Content-Type': 'application/octet-stream',
+            'Accept-Ranges': 'bytes',
+            'Content-Range': 'bytes 0-0/32212254720',
+            'Content-Length': '1',
+          },
+        })
+      },
+    })
+    const response = await requestMedia(fixture, fileId, { range: 'bytes=0-0' })
+    assert.equal(response.status, 206, extension)
+    assert.equal(response.headers.get('content-type'), mime, extension)
+    assert.equal((await response.arrayBuffer()).byteLength, 1, extension)
+  }
+})
+
 test('bad and out-of-file Range requests return 416 before downloading media', async () => {
   const fixture = await createFixture()
   const multi = await requestMedia(fixture, 'invalid-range', { range: 'bytes=0-1,4-6' })
