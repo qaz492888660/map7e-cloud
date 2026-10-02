@@ -81,6 +81,7 @@ const viewerItems = ref([])
 const viewerIndex = ref(-1)
 const viewerScale = ref(1)
 const viewerDimensions = ref('')
+const viewerError = ref('')
 const previewFile = ref(null)
 const previewMode = ref('')
 const previewText = ref('')
@@ -221,9 +222,15 @@ function isImageFile(file) {
   return IMAGE_EXTENSIONS.includes(file?.extension || extensionOf(file?.name))
 }
 
-function isBrowserPreviewImage(file) {
+function isRawImageFile(file) {
   const ext = String(file?.extension || extensionOf(file?.name)).toLocaleLowerCase()
-  if (RAW_IMAGE_EXTENSIONS.includes(ext)) return false
+  const mime = String(file?.mimeType || '').toLowerCase()
+  return RAW_IMAGE_EXTENSIONS.includes(ext) || /(?:dng|cr2|cr3|nef|arw|rw2|orf|raf|pef|camera-raw)/.test(mime)
+}
+
+function isBrowserPreviewImage(file) {
+  if (isRawImageFile(file)) return false
+  const ext = String(file?.extension || extensionOf(file?.name)).toLocaleLowerCase()
   return file?.type === 'image' || String(file?.mimeType || '').toLowerCase().startsWith('image/') || BROWSER_PREVIEW_IMAGE_EXTENSIONS.has(ext)
 }
 
@@ -281,6 +288,7 @@ function normalizePikPakItem(file, storageId = activeStorageId.value) {
   const sizeBytes = file?.size === null || file?.size === undefined || file?.size === '' ? null : Number(file.size)
   return {
     id: String(file?.id || ''),
+    storageId,
     parentId: String(file?.parentId || ''),
     name: String(file?.name || '未命名文件'),
     path: isFolder ? '' : '/api/storage-download?storageId=' + encodeURIComponent(storageId) + '&id=' + encodeURIComponent(String(file?.id || '')) + '&parentId=' + encodeURIComponent(String(file?.parentId || '')),
@@ -300,7 +308,24 @@ function normalizePikPakItem(file, storageId = activeStorageId.value) {
     effectiveAccess: file?.effectiveAccess === 'locked' ? 'locked' : 'public',
     writable: file?.writable !== false,
     thumbnail: file?.thumbnail || null,
+    previewPath: file?.previewAvailable ? storagePreviewPath(storageId, {
+      id: file?.id,
+      parentId: file?.parentId,
+      modifiedAt: file?.modifiedAt || file?.modified_time,
+    }, 'preview') : null,
   }
+}
+
+function storagePreviewPath(storageId, file, variant) {
+  const query = new URLSearchParams({
+    storageId: String(storageId || ''),
+    id: String(file?.id || ''),
+    parentId: String(file?.parentId || ''),
+    variant,
+  })
+  const version = file?.modifiedAt || file?.modified_time || file?.updated_at || file?.createdAt || file?.created_time
+  if (version) query.set('v', String(version))
+  return '/api/storage-preview?' + query.toString()
 }
 
 function normalizeRootFolder(item) {
@@ -1239,10 +1264,18 @@ async function loginCloud() {
 }
 
 function openPhotoViewer(file, items) {
-  viewerItems.value = items
-  viewerIndex.value = Math.max(0, items.findIndex((item) => item.path === file.path))
+  viewerItems.value = items.map((item) => {
+    const rawPreview = isRawImageFile(item)
+    return {
+      ...item,
+      rawPreview,
+      viewerSource: rawPreview ? (item.previewPath || '') : (isBrowserPreviewImage(item) ? item.path : ''),
+    }
+  })
+  viewerIndex.value = Math.max(0, viewerItems.value.findIndex((item) => item.path === file.path))
   viewerScale.value = 1
   viewerDimensions.value = ''
+  viewerError.value = ''
 }
 
 function closePhotoViewer() {
@@ -1250,6 +1283,7 @@ function closePhotoViewer() {
   viewerItems.value = []
   viewerScale.value = 1
   viewerDimensions.value = ''
+  viewerError.value = ''
 }
 
 function movePhoto(direction) {
@@ -1258,11 +1292,19 @@ function movePhoto(direction) {
   viewerIndex.value = (viewerIndex.value + direction + length) % length
   viewerScale.value = 1
   viewerDimensions.value = ''
+  viewerError.value = ''
 }
 
 function handleViewerImageLoad(event) {
   const image = event.target
   viewerDimensions.value = image.naturalWidth + ' × ' + image.naturalHeight
+  viewerError.value = ''
+}
+
+function handleViewerImageError() {
+  viewerError.value = viewerImage.value?.rawPreview
+    ? 'RAW 预览图暂时无法加载，请稍后重试或下载原文件。'
+    : '图片暂时无法加载。'
 }
 
 function toggleZoom() {
@@ -1313,7 +1355,7 @@ function handleViewerTouchEnd(event) {
 }
 
 async function openFile(file) {
-  if (isBrowserPreviewImage(file)) {
+  if (isImageFile(file)) {
     openPhotoViewer(file, [file])
     return
   }
@@ -1328,6 +1370,27 @@ async function openFile(file) {
   }
   if (file.type === 'video' || VIDEO_EXTENSIONS.includes(file.extension)) {
     previewMode.value = 'video'
+    previewLoading.value = true
+    try {
+      const checkUrl = new URL(file.path, window.location.origin)
+      checkUrl.searchParams.set('check', 'range')
+      const response = await fetch(checkUrl.pathname + checkUrl.search, { cache: 'no-store' })
+      let data = {}
+      try { data = await response.json() } catch { data = {} }
+      if (!response.ok || data.ok !== true) {
+        if (data.error === 'storage_range_probe_failed') {
+          previewError.value = '网络连接失败，无法确认视频能否分段播放。请稍后重试或下载原文件。'
+        } else {
+          previewError.value = '获取网盘播放地址失败。请稍后重试或下载原文件。'
+        }
+      } else if (data.rangeSupported !== true) {
+        previewError.value = '当前网盘未提供有效的 Range 分段读取，无法可靠播放大视频。你可以下载原文件。'
+      }
+    } catch {
+      previewError.value = '网络连接失败，无法确认视频播放地址。请稍后重试或下载原文件。'
+    } finally {
+      previewLoading.value = false
+    }
     return
   }
   if (TEXT_EXTENSIONS.includes(file.extension) || String(file.mimeType || '').toLowerCase().startsWith('text/')) {
@@ -1355,6 +1418,14 @@ async function openFile(file) {
     return
   }
   previewMode.value = 'unsupported'
+}
+
+function handleVideoError(event) {
+  const code = event?.target?.error?.code
+  if (code === 2) previewError.value = '视频播放时网络连接失败。请检查网络或稍后重试。'
+  else if (code === 3) previewError.value = '浏览器无法解码这个视频，可能是文件数据损坏或编码不兼容。'
+  else if (code === 4) previewError.value = '当前视频格式或编码不支持网页播放。'
+  else previewError.value = '视频播放失败。请稍后重试或下载原文件。'
 }
 
 function closePreview() {
@@ -1918,13 +1989,24 @@ onBeforeUnmount(() => {
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6" /></svg>
           </button>
           <div class="viewer-stage" @touchstart="handleViewerTouchStart" @touchmove="handleViewerTouchMove" @touchend="handleViewerTouchEnd">
+            <div v-if="viewerImage.rawPreview && !viewerImage.viewerSource" class="preview-message">
+              <strong>该 RAW 格式暂无可用预览</strong>
+              <span>可以下载原文件后查看。</span>
+              <a class="primary-download" :href="viewerImage.path" :download="viewerImage.name">下载原文件</a>
+            </div>
+            <div v-else-if="viewerError" class="preview-message">
+              <strong>{{ viewerError }}</strong>
+              <a class="primary-download" :href="viewerImage.path" :download="viewerImage.name">下载原文件</a>
+            </div>
             <img
+              v-else
               :key="viewerImage.path"
               class="viewer-image"
-              :src="viewerImage.path"
+              :src="viewerImage.viewerSource"
               :alt="viewerImage.name"
               :style="{ transform: 'scale(' + viewerScale + ')' }"
               @load="handleViewerImageLoad"
+              @error="handleViewerImageError"
             />
           </div>
           <button v-if="viewerItems.length > 1" class="viewer-arrow viewer-arrow--right" type="button" aria-label="下一张" @click="movePhoto(1)">
@@ -1936,6 +2018,7 @@ onBeforeUnmount(() => {
               <strong class="viewer-filename">{{ viewerImage.name }}</strong>
               <span class="viewer-metadata">
                 <span v-if="viewerDimensions">{{ viewerDimensions }}</span>
+                <span v-if="viewerImage.rawPreview">RAW 预览</span>
                 <span v-if="viewerImage.sizeBytes !== null">{{ fileSizeLabel(viewerImage) }}</span>
                 <span v-if="dateLabel(viewerImage.date)">{{ viewerImage.date }}</span>
               </span>
@@ -1960,13 +2043,13 @@ onBeforeUnmount(() => {
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.5v11m0 0 4-4m-4 4-4-4M5 17v3h14v-3" /></svg>
             </a>
           </header>
-          <div v-if="previewLoading" class="preview-message">正在打开文件…</div>
+          <div v-if="previewLoading" class="preview-message">{{ previewMode === 'video' ? '正在检查视频流…' : '正在打开文件…' }}</div>
           <div v-else-if="previewError" class="preview-message">
             <strong>{{ previewError }}</strong>
             <a class="primary-download" :href="previewFile.path" :download="previewFile.name">下载原文件</a>
           </div>
           <iframe v-else-if="previewMode === 'pdf'" class="pdf-preview" :src="previewFile.path" :title="previewFile.name" />
-          <video v-else-if="previewMode === 'video'" class="file-video-preview" :src="previewFile.path" controls playsinline />
+          <video v-else-if="previewMode === 'video'" class="file-video-preview" :src="previewFile.path" controls playsinline preload="metadata" @error="handleVideoError" />
           <pre v-else-if="previewMode === 'text'" class="text-preview">{{ previewText }}</pre>
           <div v-else class="preview-message">
             <strong>这个格式暂不支持站内预览</strong>
