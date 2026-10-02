@@ -270,6 +270,11 @@ await test('storage-preview streams a Quark thumbnail with safe Quark origin hea
       assert.equal(url.toString(), thumbnailUrl, 'the sensitive URL is used only inside the server-side provider call')
       assert.equal(options.headers.Origin, 'https://pan.quark.cn')
       assert.equal(options.headers.Referer, 'https://pan.quark.cn/')
+      assert.match(options.headers['User-Agent'], /^Mozilla\/5\.0 /)
+      assert.equal(options.headers['Sec-Fetch-Dest'], 'image')
+      assert.equal(options.headers['Sec-Fetch-Mode'], 'no-cors')
+      assert.equal(options.headers['Sec-Fetch-Site'], 'same-site')
+      assert.equal(options.headers['Accept-Language'], 'zh-CN,zh;q=0.9,en;q=0.8')
       assert.equal(options.headers.Cookie, undefined)
       assert.equal(options.headers.Authorization, undefined)
       return new Response(new Uint8Array([255, 216, 217]), { status: 200, headers: {
