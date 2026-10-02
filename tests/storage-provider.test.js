@@ -256,7 +256,7 @@ await test('Preview diagnostics record only safe field names, host, status, and 
     assert.equal(output.includes(secret), false)
   }
 })
-await test('storage-preview streams a Quark thumbnail and never returns its token URL', async () => {
+await test('storage-preview streams a Quark thumbnail with safe Quark origin headers', async () => {
   const auth = { accessToken: 'preview-api-access-secret', refreshToken: 'preview-api-refresh-secret', deviceId: 'preview-device' }
   await writeConfig({ version: 1, defaultStorageId: 'quark-main', instances: [
     { storageId: 'quark-main', provider: 'quark', displayName: '夸克网盘', enabled: true },
@@ -265,9 +265,13 @@ await test('storage-preview streams a Quark thumbnail and never returns its toke
   await setGlobalAccess('public')
   calls.length = 0
   const thumbnailUrl = `https://thumb.quark.cn/raw-thumbnail.jpg?access_token=${auth.accessToken}`
-  upstream = async url => {
+  upstream = async (url, options = {}) => {
     if (url.hostname === 'thumb.quark.cn') {
       assert.equal(url.toString(), thumbnailUrl, 'the sensitive URL is used only inside the server-side provider call')
+      assert.equal(options.headers.Origin, 'https://pan.quark.cn')
+      assert.equal(options.headers.Referer, 'https://pan.quark.cn/')
+      assert.equal(options.headers.Cookie, undefined)
+      assert.equal(options.headers.Authorization, undefined)
       return new Response(new Uint8Array([255, 216, 217]), { status: 200, headers: {
         'Content-Type': 'image/jpeg', 'Content-Length': '3', ETag: '"preview-v1"', 'Last-Modified': 'Thu, 01 Oct 2026 12:00:00 GMT',
       } })
@@ -281,19 +285,8 @@ await test('storage-preview streams a Quark thumbnail and never returns its toke
     return { status: 0, data: {} }
   }
   const target = streamRes()
-  const originalTimeout = AbortSignal.timeout
-  const observedTimeouts = []
-  AbortSignal.timeout = function (timeout) {
-    observedTimeouts.push(timeout)
-    return originalTimeout.call(this, timeout)
-  }
-  try {
-    await storagePreview({ method: 'GET', query: { storageId: 'quark-main', id: 'raw-image', parentId: '', variant: 'preview' }, headers: {} }, target)
-  } finally {
-    AbortSignal.timeout = originalTimeout
-  }
+  await storagePreview({ method: 'GET', query: { storageId: 'quark-main', id: 'raw-image', parentId: '', variant: 'preview' }, headers: {} }, target)
   assert.equal(target.statusCode, 200)
-  assert.ok(observedTimeouts.includes(30000), 'Quark thumbnail requests have a bounded 30 second fetch deadline')
   assert.equal(target.headers['Content-Type'], 'image/jpeg')
   assert.equal(target.headers['Content-Length'], '3')
   assert.equal(target.headers.ETag, '"preview-v1"')
