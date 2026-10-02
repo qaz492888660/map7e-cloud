@@ -372,7 +372,42 @@ await test('Quark preview uses a signed Gateway ticket and the server sends offi
   assert.equal(listing.body.items[0].previewAvailable, true)
   assert.equal(JSON.stringify(listing.body).includes(auth.accessToken), false)
 })
-await test('PikPak RAW thumbnails use the same credential-safe Preview API', async () => {
+await test('PikPak RAW thumbnails use the same credential-safe Preview API', async () => {await test('Quark .ts and .mts only use video tickets when MIME is absent or video-compatible', async () => {
+  await writeConfig({ version: 1, defaultStorageId: 'quark-main', instances: [
+    { storageId: 'quark-main', provider: 'quark', displayName: 'Quark', enabled: true },
+  ] })
+  await writeAuth('quark-main', { accessToken: 'mime-access', refreshToken: 'mime-refresh', deviceId: 'mime-device' })
+  await setGlobalAccess('public')
+  upstream = async url => {
+    if (url.pathname.endsWith('/file/info')) {
+      const id = url.searchParams.get('fid')
+      const files = {
+        'source-ts': { fid: 'source-ts', pdir_fid: '0', file_type: 1, file_name: 'source.ts', file_ext: 'ts', mime_type: 'text/typescript' },
+        'video-ts': { fid: 'video-ts', pdir_fid: '0', file_type: 1, file_name: 'clip.ts', file_ext: 'ts', mime_type: 'video/mp2t' },
+        'unknown-mts': { fid: 'unknown-mts', pdir_fid: '0', file_type: 1, file_name: 'clip.mts', file_ext: 'mts', mime_type: '' },
+      }
+      return { status: 0, data: files[id] }
+    }
+    return { status: 0, data: {} }
+  }
+
+  const source = res()
+  await storageDownload({ method: 'GET', query: { storageId: 'quark-main', id: 'source-ts', parentId: '' }, headers: {} }, source)
+  assert.equal(source.statusCode, 302)
+  assert.equal(mediaClaimsFromResponse(source).purpose, 'original')
+
+  const video = res()
+  await storageDownload({ method: 'GET', query: { storageId: 'quark-main', id: 'video-ts', parentId: '' }, headers: {} }, video)
+  assert.equal(video.statusCode, 302)
+  assert.equal(mediaClaimsFromResponse(video).purpose, 'video')
+
+  const unknown = res()
+  await storageDownload({ method: 'GET', query: { storageId: 'quark-main', id: 'unknown-mts', parentId: '' }, headers: {} }, unknown)
+  assert.equal(unknown.statusCode, 302)
+  assert.equal(mediaClaimsFromResponse(unknown).purpose, 'video')
+})
+
+
   const auth = { accessToken: 'pikpak-preview-account-secret' }
   const sourceUrl = `https://thumb.mypikpak.com/raw.webp?token=${auth.accessToken}`
   await writeConfig({ version: 1, defaultStorageId: 'pikpak-main', instances: [
