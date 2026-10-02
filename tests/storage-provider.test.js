@@ -1,13 +1,15 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import crypto from 'node:crypto'
+import { Writable } from 'node:stream'
 import { seal, unseal, metadataId, writeAuth, readAuth, readConfig, writeConfig, withLock, clearStorageCachesForTests } from '../lib/storage/store.js'
 import { storageDescriptors, resolveStorage } from '../lib/storage/registry.js'
 import storageProviders from '../lib/api-handlers/storage-providers.js'
 import storageAbout, { clearStorageAboutCacheForTests } from '../lib/api-handlers/storage-about.js'
 import { safeDirectUrl } from '../lib/storage/errors.js'
+import { previewSourceUrl, safeBrowserPreviewUrl, probeRange } from '../lib/storage/previews.js'
 import { createPikPakProvider } from '../lib/storage/providers/pikpak.js'
-import { createQuarkProvider, quarkHeaders, beginQuarkAuthorization, finishQuarkAuthorization } from '../lib/storage/providers/quark.js'
+import { createQuarkProvider, normalizeQuarkItem, quarkHeaders, beginQuarkAuthorization, finishQuarkAuthorization } from '../lib/storage/providers/quark.js'
 import { OFFICIAL_SIGN_KEY } from '../lib/storage/providers/quark-client.js'
 import { requireItemRead } from '../lib/storage/permissions.js'
 import { folderPathWithinRoot } from '../lib/storage/root.js'
@@ -19,6 +21,7 @@ import quarkOAuth from '../lib/api-handlers/quark-oauth.js'
 import adminStorages from '../lib/api-handlers/admin-storages.js'
 import { storageWrite } from '../lib/api-handlers/storage-write.js'
 import storageDownload from '../lib/api-handlers/storage-download.js'
+import storagePreview from '../lib/api-handlers/storage-preview.js'
 
 process.env.PIKPAK_PAT = 'primary-test-secret'
 process.env.STORAGE_ENCRYPTION_KEY = 'test-encryption-key'
@@ -44,6 +47,16 @@ globalThis.fetch = async (url, options = {}) => {
   return payload instanceof Response ? payload : response(payload)
 }
 function res() { return { headers: {}, status(n) { this.statusCode = n; return this }, setHeader(k,v) { this.headers[k] = v }, json(v) { this.body = v; return this }, end(value) { this.body = value; return this } } }
+function streamRes() {
+  const chunks = []
+  const target = new Writable({ write(chunk, encoding, callback) { chunks.push(Buffer.from(chunk)); callback() } })
+  target.headers = {}
+  target.status = function status(code) { this.statusCode = code; return this }
+  target.setHeader = function setHeader(name, value) { this.headers[name] = value }
+  target.json = function json(body) { this.body = body; return this }
+  target.bytes = () => Buffer.concat(chunks)
+  return target
+}
 
 await test('encrypted credentials bind to storage, detect tampering, and stay out of descriptors', async () => {
   const auth = { accessToken: 'account-access-secret', refreshToken: 'account-refresh-secret', deviceId: 'device' }
@@ -197,6 +210,189 @@ await test('Quark account metadata, unknown quota, and thumbnail token redaction
     : { status: 0, data: { nickname: '枫' } }
   const providerWithoutQuota = createQuarkProvider({ storageId: 'quark-main' }, await readAuth('quark-main'))
   assert.equal(await providerWithoutQuota.getQuota(), null)
+})
+await test('RAW preview fields are detected without returning sensitive thumbnail URLs', async () => {
+  const token = 'quark-preview-secret'
+  const item = normalizeQuarkItem({
+    fid: 'raw', pdir_fid: '0', file_type: 2, file_name: 'camera.dng', file_ext: 'dng',
+    thumbnail_url: `https://thumb.quark.cn/raw.jpg?access_token=${token}`,
+    preview: { image: { url: 'https://thumb.quark.cn/preview.webp?quality=high' } },
+  }, [token])
+  assert.equal(item.extension, 'dng')
+  assert.equal(item.thumbnail, null, 'a URL with an account credential is not sent to the browser')
+  assert.equal(item.thumbnailAvailable, true)
+  assert.equal(item.previewAvailable, true)
+  assert.equal(previewSourceUrl({ preview: { image: { url: 'https://thumb.quark.cn/preview.webp' } } }, 'preview'), 'https://thumb.quark.cn/preview.webp')
+  assert.equal(safeBrowserPreviewUrl(`https://thumb.quark.cn/a?session=${token}`, [token]), null)
+  assert.equal(safeBrowserPreviewUrl('https://thumb.quark.cn/a?signature=temporary', []), null)
+  assert.equal(safeBrowserPreviewUrl('https://thumb.quark.cn/a?X-OSS-Credential=temporary', []), null)
+  assert.equal(JSON.stringify(item).includes(token), false)
+})
+await test('storage-preview streams a Quark thumbnail and never returns its token URL', async () => {
+  const auth = { accessToken: 'preview-api-access-secret', refreshToken: 'preview-api-refresh-secret', deviceId: 'preview-device' }
+  await writeConfig({ version: 1, defaultStorageId: 'quark-main', instances: [
+    { storageId: 'quark-main', provider: 'quark', displayName: '夸克网盘', enabled: true },
+  ] })
+  await writeAuth('quark-main', auth)
+  await setGlobalAccess('public')
+  calls.length = 0
+  const thumbnailUrl = `https://thumb.quark.cn/raw-thumbnail.jpg?access_token=${auth.accessToken}`
+  upstream = async url => {
+    if (url.hostname === 'thumb.quark.cn') {
+      assert.equal(url.toString(), thumbnailUrl, 'the sensitive URL is used only inside the server-side provider call')
+      return new Response(new Uint8Array([255, 216, 217]), { status: 200, headers: {
+        'Content-Type': 'image/jpeg', 'Content-Length': '3', ETag: '"preview-v1"', 'Last-Modified': 'Thu, 01 Oct 2026 12:00:00 GMT',
+      } })
+    }
+    if (url.pathname.endsWith('/file/list')) return { status: 0, data: { file_list: [
+      { fid: 'raw-image', pdir_fid: '0', file_type: 2, file_name: 'camera.dng', file_ext: 'dng', thumbnail_url: thumbnailUrl },
+    ], last_page: true } }
+    if (url.pathname.endsWith('/file/info')) return { status: 0, data: { file_info: {
+      fid: 'raw-image', pdir_fid: '0', file_type: 2, file_name: 'camera.dng', file_ext: 'dng', thumbnail_url: thumbnailUrl,
+    } } }
+    return { status: 0, data: {} }
+  }
+  const target = streamRes()
+  await storagePreview({ method: 'GET', query: { storageId: 'quark-main', id: 'raw-image', parentId: '', variant: 'preview' }, headers: {} }, target)
+  assert.equal(target.statusCode, 200)
+  assert.equal(target.headers['Content-Type'], 'image/jpeg')
+  assert.equal(target.headers['Content-Length'], '3')
+  assert.equal(target.headers.ETag, '"preview-v1"')
+  assert.equal(target.headers['Last-Modified'], 'Thu, 01 Oct 2026 12:00:00 GMT')
+  assert.match(target.headers['Cache-Control'], /private, max-age=60/)
+  assert.equal(target.headers['X-Content-Type-Options'], 'nosniff')
+  assert.deepEqual([...target.bytes()], [255, 216, 217])
+  assert.equal(JSON.stringify(target.headers).includes(auth.accessToken), false)
+  assert.equal(target.bytes().includes(Buffer.from(auth.accessToken)), false)
+
+  const listing = res()
+  await storageFiles({ method: 'GET', query: { storageId: 'quark-main' }, headers: {} }, listing)
+  assert.equal(listing.statusCode, 200, JSON.stringify(listing.body))
+  assert.ok(listing.body.items[0].thumbnail.startsWith('/api/storage-preview?'))
+  assert.equal(listing.body.items[0].previewAvailable, true)
+  assert.equal(JSON.stringify(listing.body).includes(auth.accessToken), false)
+})
+await test('PikPak RAW thumbnails use the same credential-safe Preview API', async () => {
+  const auth = { accessToken: 'pikpak-preview-account-secret' }
+  const sourceUrl = `https://thumb.mypikpak.com/raw.webp?token=${auth.accessToken}`
+  await writeConfig({ version: 1, defaultStorageId: 'pikpak-main', instances: [
+    { storageId: 'pikpak-main', provider: 'pikpak', displayName: 'PikPak', enabled: true },
+    { storageId: 'pikpak-two', provider: 'pikpak', displayName: 'PikPak secondary', enabled: true },
+  ] })
+  await writeAuth('pikpak-two', auth)
+  await setGlobalAccess('public')
+  let thumbnailRequest
+  upstream = async (url, options = {}) => {
+    if (url.hostname === 'thumb.mypikpak.com') {
+      thumbnailRequest = options
+      assert.equal(url.toString(), sourceUrl)
+      return new Response(new Uint8Array([1, 2]), { status: 200, headers: { 'Content-Type': 'image/webp', 'Content-Length': '2' } })
+    }
+    if (url.hostname === 'api-drive.mypikpak.com') return {
+      id: 'pikpak-raw', parent_id: '', kind: 'drive#file', name: 'camera.dng', file_extension: 'dng', thumbnail_link: sourceUrl,
+    }
+    return { status: 0, data: {} }
+  }
+  const target = streamRes()
+  await storagePreview({ method: 'GET', query: { storageId: 'pikpak-two', id: 'pikpak-raw', parentId: '', variant: 'preview' }, headers: {} }, target)
+  assert.equal(target.statusCode, 200)
+  assert.equal(target.headers['Content-Type'], 'image/webp')
+  assert.deepEqual([...target.bytes()], [1, 2])
+  assert.equal(thumbnailRequest.headers.Authorization, undefined)
+  assert.equal(thumbnailRequest.headers.Cookie, undefined)
+  assert.equal(JSON.stringify(target.headers).includes(auth.accessToken), false)
+})
+await test('storage-preview permission checks and storageId-scoped same-id previews stay isolated', async () => {
+  const firstAuth = { accessToken: 'first-storage-preview-token', refreshToken: 'first-refresh', deviceId: 'first-device' }
+  const secondAuth = { accessToken: 'second-storage-preview-token', refreshToken: 'second-refresh', deviceId: 'second-device' }
+  await writeConfig({ version: 1, defaultStorageId: 'quark-main', instances: [
+    { storageId: 'quark-main', provider: 'quark', displayName: 'Quark A', enabled: true },
+    { storageId: 'quark-secondary', provider: 'quark', displayName: 'Quark B', enabled: true },
+  ] })
+  await writeAuth('quark-main', firstAuth)
+  await writeAuth('quark-secondary', secondAuth)
+  await setGlobalAccess('public')
+  calls.length = 0
+  upstream = async url => {
+    if (url.hostname === 'thumb.quark.cn') {
+      const isSecond = url.pathname.startsWith('/quark-secondary/')
+      return new Response(new Uint8Array([isSecond ? 2 : 1]), { status: 200, headers: { 'Content-Type': 'image/jpeg' } })
+    }
+    if (url.pathname.endsWith('/file/info')) {
+      const isSecond = url.searchParams.get('access_token') === secondAuth.accessToken
+      const storage = isSecond ? 'quark-secondary' : 'quark-main'
+      return { status: 0, data: { file_info: {
+        fid: 'same-id', pdir_fid: '0', file_type: 2, file_name: 'same.dng', file_ext: 'dng',
+        thumbnail_url: `https://thumb.quark.cn/${storage}/same.jpg?temporary-preview=opaque`,
+      } } }
+    }
+    return { status: 0, data: {} }
+  }
+
+  const forbidden = res()
+  const oldPassword = process.env.CLOUD_PASSWORD
+  process.env.CLOUD_PASSWORD = 'preview-access-password'
+  await setFileMetadata(metadataId('quark-main', 'same-id'), { access: 'locked' })
+  await storagePreview({ method: 'GET', query: { storageId: 'quark-main', id: 'same-id', parentId: '', variant: 'preview' }, headers: {} }, forbidden)
+  assert.equal(forbidden.statusCode, 401)
+  assert.equal(forbidden.body.error, 'authentication_required')
+  assert.equal(calls.some(call => call.url.hostname === 'thumb.quark.cn'), false, 'locked preview data is not fetched before authorization')
+  if (oldPassword === undefined) delete process.env.CLOUD_PASSWORD
+  else process.env.CLOUD_PASSWORD = oldPassword
+  await setFileMetadata(metadataId('quark-main', 'same-id'), { access: 'inherit' })
+
+  const target = streamRes()
+  await storagePreview({ method: 'GET', query: { storageId: 'quark-secondary', id: 'same-id', parentId: '', variant: 'preview' }, headers: {} }, target)
+  assert.equal(target.statusCode, 200)
+  assert.deepEqual([...target.bytes()], [2], 'the same file ID resolves through the selected Storage only')
+  assert.equal(JSON.stringify(target.headers).includes(secondAuth.accessToken), false)
+  assert.equal(JSON.stringify(target.headers).includes(firstAuth.accessToken), false)
+})
+await test('video Range check reports actual upstream headers without moving file bytes through Vercel', async () => {
+  const auth = { accessToken: 'range-check-access', refreshToken: 'range-check-refresh', deviceId: 'range-device' }
+  const directUrl = 'https://video.quark.cn/large.mp4?temporary_signature=range-secret'
+  await writeConfig({ version: 1, defaultStorageId: 'quark-main', instances: [
+    { storageId: 'quark-main', provider: 'quark', displayName: '夸克网盘', enabled: true },
+  ] })
+  await writeAuth('quark-main', auth)
+  await setGlobalAccess('public')
+  calls.length = 0
+  upstream = async (url, options = {}) => {
+    if (url.hostname === 'video.quark.cn') {
+      const range = options.headers?.Range || 'bytes=0-0'
+      const contentRange = range === 'bytes=0-0' ? 'bytes 0-0/32212254720' : 'bytes 1024-2047/32212254720'
+      return new Response(new Uint8Array([0]), { status: 206, headers: {
+        'Accept-Ranges': 'bytes', 'Content-Range': contentRange, 'Content-Length': range === 'bytes=0-0' ? '1' : '1024', 'Content-Type': 'video/mp4', ETag: '"range-etag"',
+      } })
+    }
+    if (url.pathname.endsWith('/file/info')) return { status: 0, data: { file_info: { fid: 'large-video', pdir_fid: '0', file_type: 2, file_name: 'large.mp4' } } }
+    if (url.pathname.endsWith('/file/get_download_url')) return { status: 0, data: { download_url: directUrl } }
+    return { status: 0, data: {} }
+  }
+  const check = res()
+  await storageDownload({ method: 'GET', query: { storageId: 'quark-main', id: 'large-video', parentId: '', check: 'range' }, headers: {} }, check)
+  assert.equal(check.statusCode, 200)
+  assert.equal(check.body.rangeSupported, true)
+  assert.equal(check.body.status, 206)
+  assert.equal(check.body.acceptRanges, 'bytes')
+  assert.equal(check.body.contentRange, 'bytes 0-0/32212254720')
+  assert.equal(check.body.contentType, 'video/mp4')
+  assert.equal(check.body.contentLength, 1)
+  assert.equal(check.body.totalLength, 32212254720)
+  assert.equal(JSON.stringify(check.body).includes('video.quark.cn'), false)
+  assert.equal(JSON.stringify(check.body).includes('range-secret'), false)
+
+  const middle = await probeRange(directUrl, 'bytes=1024-2047')
+  assert.equal(middle.status, 206)
+  assert.equal(middle.rangeSupported, true)
+  assert.equal(middle.contentRange, 'bytes 1024-2047/32212254720')
+  assert.equal(calls.filter(call => call.url.hostname === 'video.quark.cn').at(-1).headers.Range, 'bytes=1024-2047')
+
+  const download = res()
+  await storageDownload({ method: 'GET', query: { storageId: 'quark-main', id: 'large-video', parentId: '' }, headers: {} }, download)
+  assert.equal(download.statusCode, 302)
+  assert.equal(download.headers.Location, directUrl)
+  assert.equal(download.body, undefined, 'the video body remains on the Provider CDN')
 })
 await test('OAuth uses official exchange and stores expiry fields from response', async () => {
   upstream = async url => url.pathname.endsWith('get_authorize_page_url') ? { status: 0, data: { authorize_page_url: 'https://pan.quark.cn/open/v1/oauth/agent?page_code=page', page_code: 'page', device_id: 'device' } } : url.pathname.endsWith('get_aac_by_pagecode') ? { status: 0, data: {} } : { status: 0, data: { access_token: 'new-access', refresh_token: 'new-refresh', user_id: 'user', device_id: 'device', access_token_expires_at: 1900000000, refresh_token_expires_at: 2000000000 } }

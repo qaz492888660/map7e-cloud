@@ -13,6 +13,7 @@ import adminSession from '../lib/api-handlers/admin-session.js'
 import cloudLogin from '../lib/api-handlers/cloud-login.js'
 import cloudLogout from '../lib/api-handlers/cloud-logout.js'
 import storageDownload from '../lib/api-handlers/storage-download.js'
+import storagePreview from '../lib/api-handlers/storage-preview.js'
 import storageFiles from '../lib/api-handlers/storage-files.js'
 import storageProviders from '../lib/api-handlers/storage-providers.js'
 import storageAbout from '../lib/api-handlers/storage-about.js'
@@ -38,6 +39,7 @@ const handlers = new Map([
   ['cloud-login', cloudLogin],
   ['cloud-logout', cloudLogout],
   ['storage-download', storageDownload],
+  ['storage-preview', storagePreview],
   ['storage-files', storageFiles],
   ['storage-about', storageAbout],
   ['storage-providers', storageProviders],
