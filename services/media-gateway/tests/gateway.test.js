@@ -131,6 +131,43 @@ await test('video first and middle Range requests stream as 206 with safe header
   } finally { await closeServer(server) }
 })
 
+await test('SVG previews receive a sandbox CSP on the media response', async () => {
+  const provider = {
+    getItem: async id => createItem({ id, name: 'user.svg', extension: 'svg', mimeType: 'image/svg+xml' }),
+    getThumbnail: async () => new Response('<svg xmlns="http://www.w3.org/2000/svg"></svg>', {
+      status: 200,
+      headers: { 'Content-Type': 'image/svg+xml' },
+    }),
+  }
+  const { server, baseUrl } = await startServer({ provider })
+  try {
+    const response = await fetch(`${baseUrl}/v1/media?ticket=${encodeURIComponent(ticket({ purpose: 'preview', variant: 'thumbnail' }))}`)
+    assert.equal(response.status, 200)
+    assert.equal(response.headers.get('content-type'), 'image/svg+xml')
+    assert.equal(response.headers.get('content-security-policy'), "default-src 'none'; sandbox")
+    await response.arrayBuffer()
+  } finally { await closeServer(server) }
+})
+
+await test('upstream 416 without a video MIME remains 416 for a stale unknown size', async () => {
+  const provider = {
+    getItem: async id => createItem({ id, size: null }),
+    getFileResponse: async () => new Response('range rejected', {
+      status: 416,
+      headers: { 'Content-Range': 'bytes */32212254720', 'Content-Type': 'text/html' },
+    }),
+  }
+  const { server, baseUrl } = await startServer({ provider })
+  try {
+    const response = await fetch(`${baseUrl}/v1/media?ticket=${encodeURIComponent(ticket())}`, {
+      headers: { Range: 'bytes=40000000000-', Origin: allowedOrigin },
+    })
+    assert.equal(response.status, 416)
+    assert.equal(response.headers.get('content-range'), 'bytes */32212254720')
+    await response.body?.cancel()
+  } finally { await closeServer(server) }
+})
+
 await test('invalid upstream Content-Range and Content-Length are rejected', async () => {
   const provider = {
     getItem: async id => createItem({ id }),

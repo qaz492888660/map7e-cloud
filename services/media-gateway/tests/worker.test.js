@@ -580,6 +580,41 @@ test('JPG thumbnail streams with server-side Quark cookie and never returns cred
   assert.equal(returned.includes('secret-cdn-query'), false)
 })
 
+test('SVG preview responses apply sandbox CSP', async () => {
+  const fixture = await createFixture({
+    files: {
+      'user-svg': mediaFile('user-svg', {
+        file_name: 'user.svg',
+        mime_type: 'image/svg+xml',
+        file_ext: 'svg',
+        thumbnail_url: 'https://cdn.quark.cn/thumb/user-svg',
+      }),
+    },
+    cdnHandler: async () => new Response('<svg xmlns="http://www.w3.org/2000/svg"></svg>', {
+      status: 200,
+      headers: { 'Content-Type': 'image/svg+xml' },
+    }),
+  })
+  const response = await requestMedia(fixture, 'user-svg', { purpose: 'preview', variant: 'thumbnail' })
+  assert.equal(response.status, 200)
+  assert.equal(response.headers.get('content-type'), 'image/svg+xml')
+  assert.equal(response.headers.get('content-security-policy'), "default-src 'none'; sandbox")
+  await response.arrayBuffer()
+})
+
+test('upstream 416 without a video MIME remains 416 when Quark file size is unknown', async () => {
+  const fixture = await createFixture({
+    files: { 'stale-size-video': mediaFile('stale-size-video', { size: null, mime_type: 'video/mp4' }) },
+    cdnHandler: async (_url, headers) => headers.get('range')
+      ? new Response('range rejected', { status: 416, headers: { 'Content-Range': 'bytes */32212254720', 'Content-Type': 'text/html' } })
+      : new Response(null, { status: 200, headers: { 'Content-Type': 'video/mp4' } }),
+  })
+  const response = await requestMedia(fixture, 'stale-size-video', { range: 'bytes=40000000000-' })
+  assert.equal(response.status, 416)
+  assert.equal(response.headers.get('content-range'), 'bytes */32212254720')
+  await response.body?.cancel()
+})
+
 test('configured site domain rejects cross-site Worker media hosts', async () => {
   const fixture = await createFixture()
   const token = ticketFor('cross-site-video', {}, fixedNow)

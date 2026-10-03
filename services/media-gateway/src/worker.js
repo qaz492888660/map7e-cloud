@@ -983,6 +983,7 @@ function mediaHeaders(response, item, claims, contentType) {
     'Content-Type': contentType,
     'Content-Disposition': fileNameDisposition(claims.purpose, item, claims.disposition),
   })
+  if (claims.purpose === 'preview') headers.set('Content-Security-Policy', "default-src 'none'; sandbox")
   const length = safeHeader(response.headers.get('content-length'), /^\d+$/)
   if (length) headers.set('Content-Length', length)
   const contentRange = safeContentRange(response)
@@ -1180,11 +1181,6 @@ export function createMediaGatewayWorker({
           { env, fetchImpl, now },
         )
         let upstream = result.response
-        contentType = result.contentTypeOverride || contentTypeFor(upstream, item, claims.purpose)
-        if (!contentType) {
-          await upstream.body?.cancel().catch(() => {})
-          throw storageError('preview_content_type_unsupported', 415)
-        }
         if (upstream.status === 416) {
           await upstream.body?.cancel().catch(() => {})
           const headers = new Headers(cors)
@@ -1193,6 +1189,11 @@ export function createMediaGatewayWorker({
           status = 416
           await finishLog()
           return new Response(null, { status, headers })
+        }
+        contentType = result.contentTypeOverride || contentTypeFor(upstream, item, claims.purpose)
+        if (!contentType) {
+          await upstream.body?.cancel().catch(() => {})
+          throw storageError('preview_content_type_unsupported', 415)
         }
         if (result.headProbe) {
           validatePartialResponse(upstream, { header: 'bytes=0-0', start: 0, end: 0 }, item.size)

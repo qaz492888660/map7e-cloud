@@ -246,6 +246,7 @@ function headersForMedia(res, response, item, claims, contentType) {
   res.setHeader('Referrer-Policy', 'no-referrer')
   res.setHeader('Content-Type', contentType)
   res.setHeader('Content-Disposition', disposition(claims.purpose, item, claims.disposition))
+  if (claims.purpose === 'preview') res.setHeader('Content-Security-Policy', "default-src 'none'; sandbox")
   const length = safeHeader(response.headers.get('content-length'), /^\d+$/)
   if (length) res.setHeader('Content-Length', length)
   const range = contentRangeHeader(response)
@@ -344,11 +345,6 @@ export function createMediaGatewayHandler({
       const ifRange = typeof req.headers['if-range'] === 'string' ? req.headers['if-range'] : undefined
       const resolved = await resolveMediaResponse(provider, claims, item, { range, ifRange, signal, head: req.method === 'HEAD' })
       response = resolved.response || resolved
-      contentType = resolved.contentTypeOverride || contentTypeFor(response, item, claims.purpose)
-      if (!contentType) {
-        await cancelBody(response)
-        throw new StorageError('preview_content_type_unsupported', 415)
-      }
       if (response.status === 416) {
         await cancelBody(response)
         const upstreamRange = contentRangeHeader(response)
@@ -357,6 +353,11 @@ export function createMediaGatewayHandler({
         status = 416
         res.statusCode = status
         return res.end()
+      }
+      contentType = resolved.contentTypeOverride || contentTypeFor(response, item, claims.purpose)
+      if (!contentType) {
+        await cancelBody(response)
+        throw new StorageError('preview_content_type_unsupported', 415)
       }
       const upstreamRange = range || (resolved.headProbe ? parseSingleRange('bytes=0-0', item.size) : null)
       if (!(range && ifRange && response.status === 200)) validatePartialResponse(response, upstreamRange, item.size)
