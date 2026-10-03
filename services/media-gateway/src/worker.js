@@ -1,6 +1,6 @@
 import { OFFICIAL_CLIENT_ID, OFFICIAL_SIGN_KEY } from '../../../lib/storage/providers/quark-client.js'
 
-export const MEDIA_GATEWAY_VERSION = '0.2.2'
+export const MEDIA_GATEWAY_VERSION = '0.2.3'
 export const MEDIA_SESSION_COOKIE = '__Host-map7e-media'
 const MAX_RANGE_LENGTH = 128
 const QUARK_API = 'https://open-api-drive.quark.cn'
@@ -139,7 +139,18 @@ async function signClaims(claims, secret) {
 
 async function makeSession(claims, secret) {
   const issuedAt = claims.issuedAt
-  const session = { ...claims, grantType: 'session', issuedAt, expiresAt: issuedAt + 6 * 60 * 60 }
+  const session = {
+    version: claims.version,
+    grantType: 'session',
+    storageId: claims.storageId,
+    fileId: claims.fileId,
+    parentId: claims.parentId,
+    purpose: claims.purpose,
+    ...(claims.variant === undefined ? {} : { variant: claims.variant }),
+    ...(claims.disposition === undefined ? {} : { disposition: claims.disposition }),
+    issuedAt,
+    expiresAt: issuedAt + 6 * 60 * 60,
+  }
   if (!validClaims(session)) throw new GatewayError('media_ticket_invalid', 401)
   return signClaims(session, secret)
 }
@@ -264,6 +275,18 @@ function corsHeaders(request, env) {
   try { allowed = new URL(configured) } catch { throw new GatewayError('media_gateway_not_configured', 503) }
   if (allowed.protocol !== 'https:' || allowed.origin !== configured || allowed.pathname !== '/' || allowed.search || allowed.hash) {
     throw new GatewayError('media_gateway_not_configured', 503)
+  }
+  const siteDomain = env.MEDIA_GATEWAY_SITE_DOMAIN
+  if (siteDomain !== undefined && siteDomain !== '') {
+    if (typeof siteDomain !== 'string' || siteDomain !== siteDomain.toLowerCase()
+      || !/^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/.test(siteDomain)) {
+      throw new GatewayError('media_gateway_not_configured', 503)
+    }
+    const requestHost = new URL(request.url).hostname.toLowerCase()
+    const isWithinSite = hostname => hostname === siteDomain || hostname.endsWith('.' + siteDomain)
+    if (!isWithinSite(allowed.hostname.toLowerCase()) || !isWithinSite(requestHost)) {
+      throw new GatewayError('media_gateway_site_mismatch', 403)
+    }
   }
   const headers = new Headers({ Vary: 'Origin' })
   const origin = request.headers.get('origin')
@@ -983,9 +1006,9 @@ function singleRangeFromRequest(request, size) {
   return { range, ifRange: ifRange || undefined }
 }
 
-async function resolveMediaResponse(client, claims, item, range, ifRange, request, context) {
+async function resolveMediaResponse(client, claims, item, record, range, ifRange, request, context) {
   if (claims.purpose === 'preview') {
-    return previewResponse(client, claims.fileId, item, claims.record, {
+    return previewResponse(client, claims.fileId, item, record, {
       ...claims,
       requestRange: range && range.header,
       requestIfRange: ifRange,
@@ -1141,7 +1164,6 @@ export function createMediaGatewayWorker({
         const client = createQuarkClient(claims.storageId, storage.auth, { env, fetchImpl, now })
         const resolved = await getItemRecord(client, claims.fileId)
         const item = resolved.item
-        claims.record = resolved.record
         const expectedParent = claims.parentId === '0' ? '' : claims.parentId
         if (item.isFolder || !quarkFidsMatch(item.id, claims.fileId) || !quarkFidsMatch(item.parentId, expectedParent)) {
           throw storageError('file_not_found', 404)
@@ -1151,6 +1173,7 @@ export function createMediaGatewayWorker({
           client,
           claims,
           item,
+          resolved.record,
           parsedRange.range,
           parsedRange.ifRange,
           request,

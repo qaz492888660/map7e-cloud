@@ -290,6 +290,10 @@ function inlineMediaPath(file) {
   return url.pathname + url.search
 }
 
+function isQuarkMedia(file) {
+  return storageProviders.value.find((storage) => storage.id === file?.storageId)?.provider === 'quark'
+}
+
 function normalizePikPakItem(file, storageId = activeStorageId.value) {
   const isFolder = Boolean(file?.isFolder)
   const extension = String(file?.extension || extensionOf(file?.name))
@@ -2057,7 +2061,7 @@ onBeforeUnmount(() => {
             <a class="primary-download" :href="previewFile.path" :download="previewFile.name">下载原文件</a>
           </div>
           <iframe v-else-if="previewMode === 'pdf'" class="pdf-preview" :src="previewFile.inlinePath || previewFile.path" :title="previewFile.name" />
-          <video v-else-if="previewMode === 'video'" class="file-video-preview" :src="previewFile.inlinePath || previewFile.path" controls playsinline preload="metadata" @error="handleVideoError" />
+          <video v-else-if="previewMode === 'video'" class="file-video-preview" :src="previewFile.inlinePath || previewFile.path" :crossorigin="isQuarkMedia(previewFile) ? 'use-credentials' : undefined" controls playsinline preload="metadata" @error="handleVideoError" />
           <pre v-else-if="previewMode === 'text'" class="text-preview">{{ previewText }}</pre>
           <div v-else class="preview-message">
             <strong>这个格式暂不支持站内预览</strong>

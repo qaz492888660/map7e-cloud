@@ -199,11 +199,23 @@ describe('CloudStoragePage directory loading', () => {
     expect(video.attributes('src')).toContain('/api/storage-download')
     expect(video.attributes('preload')).toBe('metadata')
     expect(video.attributes('controls')).toBeDefined()
+    expect(video.attributes('crossorigin')).toBeUndefined()
     expect(fetch.mock.calls.some(([input]) => {
       const url = new URL(input, location.href)
       return url.pathname === '/api/storage-download' && url.searchParams.get('check') === 'range'
     })).toBe(true)
     expect(wrapper.find('.file-video-preview').attributes('src')).not.toContain('storage-preview')
+  })
+
+  it('uses credentialed CORS for Quark video Range requests', async () => {
+    window.history.replaceState(null, '', '/?storageId=quark-main')
+    globalThis.fetch = mediaFetch([{ ...file('quark-video', 'quark.mp4'), extension: 'mp4', type: 'video', size: 809 * 1024 ** 2 }])
+    wrapper = mount(CloudStoragePage, { attachTo: document.body })
+    await waitFor(() => expect(wrapper.find('.ocean-data-note').text()).toContain('覆盖当前有权限读取的目录'))
+    await wrapper.find('.ocean-nav--main .ocean-nav-item').trigger('click')
+    await wrapper.find('button[aria-label="预览 quark.mp4"]').trigger('click')
+    await waitFor(() => expect(wrapper.find('.file-video-preview').exists()).toBe(true))
+    expect(wrapper.find('.file-video-preview').attributes('crossorigin')).toBe('use-credentials')
   })
 
   it('shows the Provider Range limitation and keeps the original download available', async () => {

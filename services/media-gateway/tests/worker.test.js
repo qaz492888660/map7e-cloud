@@ -13,7 +13,7 @@ import {
 
 const ticketSecret = 'worker-test-signing-secret-has-at-least-32-bytes'
 const encryptionSecret = 'worker-test-storage-encryption-key'
-const allowedOrigin = 'https://cloud.map7e.com'
+const allowedOrigin = 'https://cloud.example.test'
 const fixedNow = 1_800_000_000_000
 const redisUrl = 'https://test-redis.upstash.io'
 const redisToken = 'redis-test-token-only-in-worker'
@@ -96,6 +96,7 @@ async function createFixture({
   const env = {
     MEDIA_GATEWAY_SIGNING_SECRET: ticketSecret,
     MEDIA_GATEWAY_ALLOWED_ORIGIN: allowedOrigin,
+    MEDIA_GATEWAY_SITE_DOMAIN: 'example.test',
     UPSTASH_REDIS_REST_URL: redisUrl,
     UPSTASH_REDIS_REST_TOKEN: redisToken,
     STORAGE_ENCRYPTION_KEY: encryptionSecret,
@@ -256,7 +257,7 @@ test('Worker health is minimal and works without media secrets', async () => {
   const fixture = await createFixture({ envOverrides: { MEDIA_GATEWAY_SIGNING_SECRET: undefined } })
   const response = await fixture.worker.fetch(new Request('https://media.example.test/health'), fixture.env)
   assert.equal(response.status, 200)
-  assert.deepEqual(await response.json(), { ok: true, version: '0.2.2' })
+  assert.deepEqual(await response.json(), { ok: true, version: '0.2.3' })
   assert.equal(fixture.state.redisRequests.length, 0)
 })
 
@@ -551,6 +552,7 @@ test('JPG thumbnail streams with server-side Quark cookie and never returns cred
       mime_type: 'image/jpeg',
       file_ext: 'jpg',
       thumbnail_url: 'https://cdn.quark.cn/thumb/photo-thumb?auth_key=secret-cdn-query',
+      extra_metadata: 'unneeded-record-data-'.repeat(400),
     }),
   } })
   const response = await requestMedia(fixture, 'photo-thumb', { purpose: 'preview', variant: 'thumbnail' })
@@ -560,6 +562,13 @@ test('JPG thumbnail streams with server-side Quark cookie and never returns cred
   assert.equal(imageBytes.byteLength, 3)
   assert.equal(fixture.state.cdnRequests[0].headers.get('cookie'),
     'x_pan_client_id=third_party_agent;x_pan_access_token=quark-access-token-server-only;x_pan_client_token=quark-client-token-server-only')
+  const cookie = response.headers.get('set-cookie').split(';', 1)[0]
+  const sessionToken = cookie.slice(MEDIA_SESSION_COOKIE.length + 1)
+  assert.ok(sessionToken.length < 4096)
+  const sessionClaims = await verifyGrant(sessionToken, ticketSecret, { now: fixedNow, grantType: 'session' })
+  assert.equal('record' in sessionClaims, false)
+  assert.equal('extra_metadata' in sessionClaims, false)
+  assert.equal(JSON.stringify(sessionClaims).includes('secret-cdn-query'), false)
   const returned = JSON.stringify({
     headers: [...response.headers.entries()],
     logs: fixture.state.logs,
@@ -569,6 +578,17 @@ test('JPG thumbnail streams with server-side Quark cookie and never returns cred
   assert.equal(returned.includes('quark-refresh-token-server-only'), false)
   assert.equal(returned.includes('quark-client-token-server-only'), false)
   assert.equal(returned.includes('secret-cdn-query'), false)
+})
+
+test('configured site domain rejects cross-site Worker media hosts', async () => {
+  const fixture = await createFixture()
+  const token = ticketFor('cross-site-video', {}, fixedNow)
+  const response = await fixture.worker.fetch(new Request(
+    'https://map7e-cloud.workers.dev/v1/media?ticket=' + encodeURIComponent(token),
+    { headers: { Origin: allowedOrigin } },
+  ), fixture.env)
+  assert.equal(response.status, 403)
+  assert.equal((await response.json()).error, 'media_gateway_site_mismatch')
 })
 
 test('JPG preview falls back to original bytes as a stream; DNG does not fall back to original', async () => {

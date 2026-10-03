@@ -20,6 +20,7 @@ Configure the same Production values used by `cloud.map7e.com`:
 | Variable | Purpose |
 | --- | --- |
 | `MEDIA_GATEWAY_SIGNING_SECRET` | HMAC key shared with Cloud; at least 32 UTF-8 bytes. |
+| `MEDIA_GATEWAY_SITE_DOMAIN` | Required site root, such as `map7e.com`; Cloud signs a Gateway URL only when the Cloud and Gateway hosts are within this same site. |
 | `MEDIA_GATEWAY_ALLOWED_ORIGIN` | Exact browser origin, normally `https://cloud.map7e.com`. |
 | `UPSTASH_REDIS_REST_URL` + `UPSTASH_REDIS_REST_TOKEN` | Same persistent store as Cloud; alternatively use `KV_REST_API_URL` + `KV_REST_API_TOKEN`. |
 | `STORAGE_ENCRYPTION_KEY` | Same effective key Cloud uses to decrypt stored Quark auth. If Cloud currently relies on the legacy `PIKPAK_PAT` fallback, use that same value here until a separate-key migration is done. |
@@ -32,15 +33,16 @@ In Map7e Cloud Production, set:
 ```text
 MEDIA_GATEWAY_URL=https://media.map7e.com
 MEDIA_GATEWAY_SIGNING_SECRET=<same value as Gateway>
+MEDIA_GATEWAY_SITE_DOMAIN=map7e.com
 ```
 
-`MEDIA_GATEWAY_URL` must be an HTTPS origin with no path, query, or fragment. Add the corresponding DNS record and HTTPS custom domain at the selected host before enabling these variables.
+`MEDIA_GATEWAY_URL` must be an HTTPS origin with no path, query, or fragment, and its hostname must be the Cloud site's hostname or a subdomain under `MEDIA_GATEWAY_SITE_DOMAIN`. The current Cloud site is `cloud.map7e.com`, so `workers.dev` is rejected for signed media links. Add the corresponding DNS record and HTTPS custom domain at the selected host before enabling these variables.
 
 ## Request and streaming model
 
 Cloud runs the normal storage lookup and `requireItemRead()` permission check, then signs a five-minute HMAC ticket for exactly one `storageId`, `fileId`, `parentId`, purpose, and optional preview variant. It redirects the browser to the Gateway only after that check.
 
-The Gateway verifies the ticket, re-resolves the selected Quark provider and current auth from the shared encrypted store, checks the file and parent identity again, then obtains a fresh Quark download URL itself. It does not accept an upstream URL from the browser. The Quark media Cookie (`x_pan_client_id`, `x_pan_access_token`, and optional `x_pan_client_token`) stays between Gateway and Quark. A ticket-scoped HttpOnly cookie lets the browser request later independent Range segments after the initial five-minute URL ticket expires; the session is file and purpose scoped and expires after six hours.
+The Gateway verifies the ticket, re-resolves the selected Quark provider and current auth from the shared encrypted store, checks the file and parent identity again, then obtains a fresh Quark download URL itself. It does not accept an upstream URL from the browser. The Quark media Cookie (`x_pan_client_id`, `x_pan_access_token`, and optional `x_pan_client_token`) stays between Gateway and Quark. A ticket-scoped HttpOnly cookie lets the browser request later independent Range segments after the initial five-minute URL ticket expires; the session is file and purpose scoped, contains no Quark metadata, and expires after six hours. The Quark video element uses credentialed CORS so same-site `media.map7e.com` Range requests include this cookie.
 
 The media body is piped as a stream. There is no whole-file array buffer or disk staging. Single byte ranges are forwarded to Quark and its `206`, `Content-Range`, length, type, and range support are checked before safe headers are returned. Invalid, out-of-file, and multipart ranges are rejected. Each range request independently resolves the download URL; a Quark `401` or `403` clears the account-scoped short cache, refreshes the URL once, and retries once.
 
@@ -74,7 +76,7 @@ npm exec -- wrangler secret put STORAGE_ENCRYPTION_KEY --config services/media-g
 
 `KV_REST_API_URL` and `KV_REST_API_TOKEN` must point to Map7e Cloud's existing Upstash REST database. `STORAGE_ENCRYPTION_KEY` must equal the effective key used by Cloud to decrypt its Quark auth record. If Cloud still uses `PIKPAK_PAT` as its legacy encryption-key fallback, provide that same value under the Worker secret name `STORAGE_ENCRYPTION_KEY`. Only set `QUARK_CLIENT_ID` or `QUARK_SIGN_KEY` if Production overrides the official defaults. The Worker limits its automatic invocation logs and redacts query strings because the short-lived ticket is sent in the URL; application logs contain only sanitized request metadata.
 
-After deployment, Cloud can use the Worker `workers.dev` HTTPS URL as `MEDIA_GATEWAY_URL` for a test. For production, attach `media.map7e.com` as a Worker Custom Domain and set `MEDIA_GATEWAY_URL=https://media.map7e.com` in Vercel Production. Do not enable Cloud's Quark redirect until both Worker Secrets and the matching Cloud Production signing secret are set. `workers.dev` is useful for deployment checks; Cloudflare recommends a custom domain for production traffic.
+The default Worker URL on `workers.dev` is for health checks and short-lived diagnostic probes only. It is cross-site from `cloud.map7e.com`, so it must never be configured as the Cloud `MEDIA_GATEWAY_URL`. For production, attach `media.map7e.com` as a Worker Custom Domain, set the Worker variable `MEDIA_GATEWAY_SITE_DOMAIN=map7e.com`, and set the three matching Production variables shown above. Do not enable Cloud's Quark redirect until the custom domain, Worker Secrets, and matching Cloud Production signing secret are in place.
 
 ## Local verification
 

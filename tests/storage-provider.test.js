@@ -33,8 +33,9 @@ process.env.STORAGE_ENCRYPTION_KEY = 'test-encryption-key'
 process.env.UPSTASH_REDIS_REST_URL = 'https://redis.test'
 process.env.UPSTASH_REDIS_REST_TOKEN = 'redis-test-secret'
 process.env.VERCEL_ENV = 'production'
-process.env.MEDIA_GATEWAY_URL = 'https://media.test'
+process.env.MEDIA_GATEWAY_URL = 'https://media.map7e.com'
 process.env.MEDIA_GATEWAY_SIGNING_SECRET = MEDIA_TEST_SECRET
+process.env.MEDIA_GATEWAY_SITE_DOMAIN = 'map7e.com'
 const redis = new Map(), calls = [], redisReads = new Map()
 let upstream = async () => ({ status: 0, data: {} })
 const response = (payload, status = 200) => new Response(JSON.stringify(payload), { status, headers: { 'Content-Type': 'application/json' } })
@@ -357,7 +358,7 @@ await test('Quark preview uses a signed Gateway ticket and the server sends offi
   assert.equal(target.statusCode, 302)
   assert.equal(target.headers['Cache-Control'], 'private, no-store')
   assert.equal(target.headers['Referrer-Policy'], 'no-referrer')
-  assert.equal(new URL(target.headers.Location).origin, 'https://media.test')
+  assert.equal(new URL(target.headers.Location).origin, 'https://media.map7e.com')
   const claims = mediaClaimsFromResponse(target)
   assert.deepEqual({ storageId: claims.storageId, fileId: claims.fileId, parentId: claims.parentId, purpose: claims.purpose, variant: claims.variant }, {
     storageId: 'quark-main', fileId: 'raw-image', parentId: '', purpose: 'preview', variant: 'preview',
@@ -512,7 +513,7 @@ await test('video Range check reports actual upstream headers without moving fil
   calls.length = 0
   const gatewayRangeRequests = []
   upstream = async (url, options = {}) => {
-    if (url.hostname === 'media.test') {
+    if (url.hostname === 'media.map7e.com') {
       gatewayRangeRequests.push({ url, options })
       return new Response(null, { status: 206, headers: {
         'Accept-Ranges': 'bytes', 'Content-Range': 'bytes 0-0/32212254720', 'Content-Length': '1', 'Content-Type': 'video/mp4', ETag: '"range-etag"',

@@ -155,6 +155,18 @@ function addCors(req, res, env) {
     || parsedAllowedOrigin.username || parsedAllowedOrigin.password || parsedAllowedOrigin.pathname !== '/') {
     throw new StorageError('media_gateway_not_configured', 503)
   }
+  const siteDomain = env.MEDIA_GATEWAY_SITE_DOMAIN
+  if (siteDomain) {
+    if (siteDomain !== siteDomain.toLowerCase()
+      || !/^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/.test(siteDomain)) {
+      throw new StorageError('media_gateway_not_configured', 503)
+    }
+    const requestHost = String(req.headers.host || '').split(':', 1)[0].toLowerCase()
+    const isWithinSite = hostname => hostname === siteDomain || hostname.endsWith('.' + siteDomain)
+    if (!isWithinSite(parsedAllowedOrigin.hostname.toLowerCase()) || !isWithinSite(requestHost)) {
+      throw new StorageError('media_gateway_site_mismatch', 403)
+    }
+  }
   const origin = req.headers.origin
   res.setHeader('Vary', 'Origin')
   if (origin && origin !== allowedOrigin) throw new MediaHttpError('origin_forbidden', 403)
