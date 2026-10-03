@@ -150,8 +150,41 @@ describe('CloudStoragePage directory loading', () => {
     await waitFor(() => expect(wrapper.find('.ocean-data-note').text()).toContain('覆盖当前有权限读取的目录'))
     await wrapper.find('.ocean-nav--main .ocean-nav-item').trigger('click')
     await wrapper.find('button[aria-label="预览 photo.jpg"]').trigger('click')
-    expect(wrapper.find('.photo-viewer img.viewer-image').attributes('src')).toContain('/api/storage-download')
+    const imageSrc = wrapper.find('.photo-viewer img.viewer-image').attributes('src')
+    expect(imageSrc).toContain('/api/storage-download')
+    expect(new URL(imageSrc, location.href).searchParams.get('inline')).toBeNull()
     expect(wrapper.find('.photo-viewer img.viewer-image').attributes('src')).not.toContain('/api/storage-preview')
+  })
+
+  it('requests Quark JPG inline for image rendering', async () => {
+    const url = new URL(window.location.href)
+    url.searchParams.set('storageId', 'quark-main')
+    window.history.replaceState(null, '', url.pathname + url.search)
+    globalThis.fetch = mediaFetch([{ ...file('quark-jpg', 'photo.jpg'), extension: 'jpg' }])
+    wrapper = mount(CloudStoragePage, { attachTo: document.body })
+    await waitFor(() => expect(wrapper.find('.ocean-data-note').text()).toContain('覆盖当前有权限读取的目录'))
+    await wrapper.find('.ocean-nav--main .ocean-nav-item').trigger('click')
+    await wrapper.find('button[aria-label="预览 photo.jpg"]').trigger('click')
+
+    const imageSrc = wrapper.find('.photo-viewer img.viewer-image').attributes('src')
+    expect(new URL(imageSrc, location.href).searchParams.get('inline')).toBe('1')
+  })
+
+  it('opens Quark PDFs inline while keeping the toolbar download as an attachment', async () => {
+    const url = new URL(window.location.href)
+    url.searchParams.set('storageId', 'quark-main')
+    window.history.replaceState(null, '', url.pathname + url.search)
+    globalThis.fetch = mediaFetch([{ ...file('pdf-file', 'report.pdf'), extension: 'pdf' }])
+    wrapper = mount(CloudStoragePage, { attachTo: document.body })
+    await waitFor(() => expect(wrapper.find('.ocean-data-note').text()).toContain('覆盖当前有权限读取的目录'))
+    await wrapper.find('.ocean-nav--main .ocean-nav-item').trigger('click')
+    await wrapper.find('button[aria-label="预览 report.pdf"]').trigger('click')
+
+    const preview = wrapper.find('.pdf-preview')
+    const download = wrapper.find('.preview-header a[download="report.pdf"]')
+    expect(preview.exists()).toBe(true)
+    expect(new URL(preview.attributes('src'), location.href).searchParams.get('inline')).toBe('1')
+    expect(new URL(download.attributes('href'), location.href).searchParams.get('inline')).toBeNull()
   })
 
   it('keeps a 30 GB video on the direct download URL after a successful Range check', async () => {
@@ -166,11 +199,23 @@ describe('CloudStoragePage directory loading', () => {
     expect(video.attributes('src')).toContain('/api/storage-download')
     expect(video.attributes('preload')).toBe('metadata')
     expect(video.attributes('controls')).toBeDefined()
+    expect(video.attributes('crossorigin')).toBeUndefined()
     expect(fetch.mock.calls.some(([input]) => {
       const url = new URL(input, location.href)
       return url.pathname === '/api/storage-download' && url.searchParams.get('check') === 'range'
     })).toBe(true)
     expect(wrapper.find('.file-video-preview').attributes('src')).not.toContain('storage-preview')
+  })
+
+  it('uses credentialed CORS for Quark video Range requests', async () => {
+    window.history.replaceState(null, '', '/?storageId=quark-main')
+    globalThis.fetch = mediaFetch([{ ...file('quark-video', 'quark.mp4'), extension: 'mp4', type: 'video', size: 809 * 1024 ** 2 }])
+    wrapper = mount(CloudStoragePage, { attachTo: document.body })
+    await waitFor(() => expect(wrapper.find('.ocean-data-note').text()).toContain('覆盖当前有权限读取的目录'))
+    await wrapper.find('.ocean-nav--main .ocean-nav-item').trigger('click')
+    await wrapper.find('button[aria-label="预览 quark.mp4"]').trigger('click')
+    await waitFor(() => expect(wrapper.find('.file-video-preview').exists()).toBe(true))
+    expect(wrapper.find('.file-video-preview').attributes('crossorigin')).toBe('use-credentials')
   })
 
   it('shows the Provider Range limitation and keeps the original download available', async () => {

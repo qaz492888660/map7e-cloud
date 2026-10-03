@@ -41,7 +41,7 @@ Upstash and consumes the pending state.
 | Refresh | POST `/agent/v1/oauth/access_token/rotate` |
 | Account / member | GET `/open/v1/user/info`, `/open/v1/user/get_vip_info` |
 | List / item | POST `/open/v1/file/list`, GET `/open/v1/file/info` |
-| Download link | POST `/open/v1/file/get_download_url`; redirects only after an unauthenticated range probe succeeds |
+| Media delivery | POST `/open/v1/file/get_download_url` on the Gateway, then authenticated Quark CDN streaming; browser receives only a signed Map7e Gateway ticket |
 | Create directory | POST `/open/v1/dir` |
 | Upload / rename / move | Official CLI supports workflows, but there is no published general-purpose web contract; capability false |
 | Trash / recycle bin | Official Skill does not expose deletion; capability false |
@@ -53,17 +53,15 @@ in-process single flight. Pending authorization expires after 600 seconds and is
 bound to the signed administrator session plus an HttpOnly SameSite state cookie.
 A successful exchange consumes pending state; a replay fails.
 
-The official SDK sends `x_pan_access_token` as a Cookie for file data downloads.
-That account credential must not be copied into a browser cookie or URL. Therefore
-the adapter probes each official temporary link with a credential-free one-byte
-Range request and immediately cancels the body. Only confirmed HTTP 200/206 links
-are redirected. Credential-required or unverified links return explicit HTTP 501;
-no large file/image relay is introduced. Quota is shown only if the account
-response contains validated numeric capacity fields; missing values remain
-unknown rather than rendering as zero. Thumbnails containing an account token
-are discarded. Album grids do not load original images until the viewer opens.
+Quark media bytes are served by `services/media-gateway/`, not by the Vercel
+function. `storage-preview` and `storage-download` check `requireItemRead()` and
+redirect only with an HMAC ticket bound to one storage, file, parent and purpose.
+The Gateway resolves the current provider and encrypted Quark auth from the
+existing Upstash store, retrieves a fresh download URL, and streams original,
+preview or Range responses. Quark URLs and credentials never enter the browser.
+If the Gateway is not configured, the Quark routes return
+`media_gateway_not_configured`; PikPak keeps its existing delivery path.
 
-Run all tests: `node --test tests/*.test.js`. Storage tests use protocol fixtures,
-not live personal-account acceptance. Preview must additionally confirm PikPak
-list/download/write compatibility and authorize Quark before claiming live Quark
-account, list or download support.
+See [quark-official.md](./quark-official.md) for the checked 1.0.20 runtime
+fields and the remaining thumbnail/Production validation limits. Run `npm test`
+and `npm run build` for the Cloud and Gateway test/build gates.

@@ -1,0 +1,17 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "map7e-quark-media-gateway",
+  "main": "src/worker.js",
+  "compatibility_date": "2026-10-02",
+  "workers_dev": true,
+  "observability": {
+    "enabled": true,
+    "redact_query_string": true,
+    "logs": {
+      "invocation_logs": false
+    }
+  },
+  "vars": {
+    "MEDIA_GATEWAY_ALLOWED_ORIGIN": "https://cloud.map7e.com"
+  }
+}

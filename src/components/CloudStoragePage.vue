@@ -282,6 +282,18 @@ function formatDate(value) {
   return /^\d{4}-\d{2}-\d{2}/.test(text) ? text.slice(0, 10) : ''
 }
 
+function inlineMediaPath(file) {
+  const provider = storageProviders.value.find((storage) => storage.id === file?.storageId)?.provider
+  if (provider !== 'quark' || !file?.path) return file?.path || ''
+  const url = new URL(file.path, window.location.origin)
+  url.searchParams.set('inline', '1')
+  return url.pathname + url.search
+}
+
+function isQuarkMedia(file) {
+  return storageProviders.value.find((storage) => storage.id === file?.storageId)?.provider === 'quark'
+}
+
 function normalizePikPakItem(file, storageId = activeStorageId.value) {
   const isFolder = Boolean(file?.isFolder)
   const extension = String(file?.extension || extensionOf(file?.name))
@@ -1269,7 +1281,7 @@ function openPhotoViewer(file, items) {
     return {
       ...item,
       rawPreview,
-      viewerSource: rawPreview ? (item.previewPath || '') : (isBrowserPreviewImage(item) ? item.path : ''),
+      viewerSource: rawPreview ? (item.previewPath || '') : (isBrowserPreviewImage(item) ? inlineMediaPath(item) : ''),
     }
   })
   viewerIndex.value = Math.max(0, viewerItems.value.findIndex((item) => item.path === file.path))
@@ -1360,7 +1372,7 @@ async function openFile(file) {
     return
   }
 
-  previewFile.value = file
+  previewFile.value = { ...file, inlinePath: inlineMediaPath(file) }
   previewText.value = ''
   previewError.value = ''
   previewLoading.value = false
@@ -2048,8 +2060,8 @@ onBeforeUnmount(() => {
             <strong>{{ previewError }}</strong>
             <a class="primary-download" :href="previewFile.path" :download="previewFile.name">下载原文件</a>
           </div>
-          <iframe v-else-if="previewMode === 'pdf'" class="pdf-preview" :src="previewFile.path" :title="previewFile.name" />
-          <video v-else-if="previewMode === 'video'" class="file-video-preview" :src="previewFile.path" controls playsinline preload="metadata" @error="handleVideoError" />
+          <iframe v-else-if="previewMode === 'pdf'" class="pdf-preview" :src="previewFile.inlinePath || previewFile.path" :title="previewFile.name" />
+          <video v-else-if="previewMode === 'video'" class="file-video-preview" :src="previewFile.inlinePath || previewFile.path" :crossorigin="isQuarkMedia(previewFile) ? 'use-credentials' : undefined" controls playsinline preload="metadata" @error="handleVideoError" />
           <pre v-else-if="previewMode === 'text'" class="text-preview">{{ previewText }}</pre>
           <div v-else class="preview-message">
             <strong>这个格式暂不支持站内预览</strong>
