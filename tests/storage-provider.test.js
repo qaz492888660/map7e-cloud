@@ -569,10 +569,15 @@ await test('video Range check reports actual upstream headers without moving fil
   assert.equal(claims.purpose, 'video')
   assert.equal(claims.storageId, 'quark-main')
   assert.equal(claims.fileId, 'large-video')
-  assert.equal(claims.disposition, 'inline')
+  assert.equal(claims.disposition, 'attachment')
   assert.equal(download.headers.Location.includes('video.quark.cn'), false)
   assert.equal(download.headers.Location.includes('range-secret'), false)
   assert.equal(download.body, undefined, 'the video body remains on the Provider CDN')
+
+  const inlinePreview = res()
+  await storageDownload({ method: 'GET', query: { storageId: 'quark-main', id: 'large-video', parentId: '', inline: '1' }, headers: {} }, inlinePreview)
+  assert.equal(inlinePreview.statusCode, 302)
+  assert.equal(mediaClaimsFromResponse(inlinePreview).disposition, 'inline')
   } finally {
     httpsMock.restore()
     dns.lookup = originalLookup

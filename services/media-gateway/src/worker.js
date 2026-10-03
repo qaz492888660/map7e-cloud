@@ -1,6 +1,6 @@
 import { OFFICIAL_CLIENT_ID, OFFICIAL_SIGN_KEY } from '../../../lib/storage/providers/quark-client.js'
 
-export const MEDIA_GATEWAY_VERSION = '0.2.1'
+export const MEDIA_GATEWAY_VERSION = '0.2.2'
 export const MEDIA_SESSION_COOKIE = '__Host-map7e-media'
 const MAX_RANGE_LENGTH = 128
 const QUARK_API = 'https://open-api-drive.quark.cn'
@@ -97,7 +97,7 @@ function validClaims(claims) {
 function sameMediaIdentity(left, right) {
   if (!left || !right) return false
   const defaultDisposition = claims => claims.disposition
-    ?? (claims.purpose === 'preview' || claims.purpose === 'video' ? 'inline' : 'attachment')
+    ?? (claims.purpose === 'preview' ? 'inline' : 'attachment')
   return ['storageId', 'fileId', 'parentId', 'purpose', 'variant'].every(key => left[key] === right[key])
     && defaultDisposition(left) === defaultDisposition(right)
 }
@@ -949,7 +949,7 @@ async function resolveStorageForTicket(claims, env, fetchImpl) {
 function fileNameDisposition(purpose, item, requestedDisposition) {
   const name = String(item.name || 'download').replace(/[\r\n\u0000-\u001f\u007f\\/]/g, '_').slice(0, 240) || 'download'
   const encoded = encodeURIComponent(name).replace(/['()*]/g, character => '%' + character.charCodeAt(0).toString(16).toUpperCase())
-  return (requestedDisposition || (purpose === 'preview' || purpose === 'video' ? 'inline' : 'attachment')) + "; filename*=UTF-8''" + encoded
+  return (requestedDisposition || (purpose === 'preview' ? 'inline' : 'attachment')) + "; filename*=UTF-8''" + encoded
 }
 
 function mediaHeaders(response, item, claims, contentType) {
@@ -1171,7 +1171,9 @@ export function createMediaGatewayWorker({
           await finishLog()
           return new Response(null, { status, headers })
         }
-        if (parsedRange.range && !(parsedRange.ifRange && upstream.status === 200)) {
+        if (result.headProbe) {
+          validatePartialResponse(upstream, { header: 'bytes=0-0', start: 0, end: 0 }, item.size)
+        } else if (parsedRange.range && !(parsedRange.ifRange && upstream.status === 200)) {
           validatePartialResponse(upstream, parsedRange.range, item.size)
         }
         if (![200, 206].includes(upstream.status)) {

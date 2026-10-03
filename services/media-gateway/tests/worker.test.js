@@ -222,8 +222,10 @@ async function createFixture({
 }
 
 async function requestMedia(fixture, fileId, {
+  method = 'GET',
   purpose = 'video',
   variant,
+  disposition,
   parentId = '',
   range,
   ifRange,
@@ -231,14 +233,14 @@ async function requestMedia(fixture, fileId, {
   origin = allowedOrigin,
   now = fixedNow,
 } = {}) {
-  const token = ticketFor(fileId, { purpose, variant, parentId }, now)
+  const token = ticketFor(fileId, { purpose, variant, disposition, parentId }, now)
   const headers = new Headers()
   if (range !== undefined) headers.set('Range', range)
   if (ifRange !== undefined) headers.set('If-Range', ifRange)
   if (cookie) headers.set('Cookie', cookie)
   if (origin) headers.set('Origin', origin)
   const url = 'https://media.example.test/v1/media?ticket=' + encodeURIComponent(token)
-  return fixture.worker.fetch(new Request(url, { headers }), fixture.env)
+  return fixture.worker.fetch(new Request(url, { method, headers }), fixture.env)
 }
 
 test('Worker verifies Node-issued HMAC tickets and rejects expired or modified grants', async () => {
@@ -254,7 +256,7 @@ test('Worker health is minimal and works without media secrets', async () => {
   const fixture = await createFixture({ envOverrides: { MEDIA_GATEWAY_SIGNING_SECRET: undefined } })
   const response = await fixture.worker.fetch(new Request('https://media.example.test/health'), fixture.env)
   assert.equal(response.status, 200)
-  assert.deepEqual(await response.json(), { ok: true, version: '0.2.1' })
+  assert.deepEqual(await response.json(), { ok: true, version: '0.2.2' })
   assert.equal(fixture.state.redisRequests.length, 0)
 })
 
@@ -441,6 +443,43 @@ test('first and middle video ranges return streamed 206 headers for 30 GB metada
   assert.deepEqual(fixture.state.cdnRequests.map(value => value.range), ['bytes=0-1023', 'bytes=1610612736-1610612738'])
   assert.equal(fixture.state.logs.length, 2)
   assert.equal(fixture.state.logs[0].bytesStreamed, 1024)
+})
+
+test('Worker validates its synthetic HEAD Range probe before claiming range support', async () => {
+  const supported = await createFixture()
+  const head = await requestMedia(supported, 'head-probe-video', { method: 'HEAD' })
+  assert.equal(head.status, 200)
+  assert.equal(head.headers.get('accept-ranges'), 'bytes')
+  assert.equal(head.headers.get('content-length'), String(30 * 1024 * 1024 * 1024))
+  assert.equal(supported.state.cdnRequests[0].range, 'bytes=0-0')
+  assert.equal(head.body, null)
+
+  const ignored = await createFixture({
+    cdnHandler: async (_url, headers) => {
+      assert.equal(headers.get('range'), 'bytes=0-0')
+      return new Response(new Uint8Array([1, 2, 3]), {
+        status: 200,
+        headers: { 'Content-Type': 'video/mp4', 'Content-Length': '3', 'Accept-Ranges': 'bytes' },
+      })
+    },
+  })
+  const rejected = await requestMedia(ignored, 'head-probe-ignored-video', { method: 'HEAD' })
+  assert.equal(rejected.status, 502)
+  assert.deepEqual(await rejected.json(), { ok: false, error: 'range_not_supported' })
+  assert.equal(ignored.state.logs[0].status, 502)
+})
+
+test('Worker defaults video downloads to attachment and preserves explicit inline previews', async () => {
+  const fixture = await createFixture()
+  const download = await requestMedia(fixture, 'download-video')
+  assert.equal(download.status, 200)
+  assert.match(download.headers.get('content-disposition'), /^attachment;/)
+  await download.arrayBuffer()
+
+  const preview = await requestMedia(fixture, 'inline-video-preview', { disposition: 'inline' })
+  assert.equal(preview.status, 200)
+  assert.match(preview.headers.get('content-disposition'), /^inline;/)
+  await preview.arrayBuffer()
 })
 
 test('Worker keeps explicitly inline original media inline', async () => {
