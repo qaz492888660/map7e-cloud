@@ -82,6 +82,7 @@ async function createFixture({
   authorizeRefresh = false,
   redisHandler,
   quarkHandler,
+  cdnHeaderTimeoutMs,
 } = {}) {
   const state = {
     files,
@@ -174,7 +175,7 @@ async function createFixture({
       throw new Error('unexpected_quark_api_path')
     }
     if (url.hostname.endsWith('.quark.cn') || url.hostname === 'quark.cn') {
-      if (cdnHandler) return cdnHandler(url, headers, state)
+      if (cdnHandler) return cdnHandler(url, headers, state, init)
       state.cdnRequests.push({ url: url.toString(), headers, range: headers.get('range') })
       if (url.pathname.startsWith('/thumb/')) {
         return new Response(new Uint8Array([255, 216, 255]), {
@@ -221,6 +222,7 @@ async function createFixture({
     fetchImpl,
     now: () => nowValue,
     logger: entry => state.logs.push(entry),
+    ...(cdnHeaderTimeoutMs === undefined ? {} : { cdnHeaderTimeoutMs }),
   })
   return { worker, env, state, setNow(value) { nowValue = value } }
 }
@@ -260,8 +262,32 @@ test('Worker health is minimal and works without media secrets', async () => {
   const fixture = await createFixture({ envOverrides: { MEDIA_GATEWAY_SIGNING_SECRET: undefined } })
   const response = await fixture.worker.fetch(new Request('https://media.example.test/health'), fixture.env)
   assert.equal(response.status, 200)
-  assert.deepEqual(await response.json(), { ok: true, version: '0.2.5' })
+  assert.deepEqual(await response.json(), { ok: true, version: '0.2.6' })
   assert.equal(fixture.state.redisRequests.length, 0)
+})
+
+test('Worker caches storage config and auth across independent Range requests for the storage TTL', async () => {
+  const fixture = await createFixture()
+  const getCount = key => fixture.state.redisRequests.flat()
+    .filter(command => command[0] === 'GET' && command[1] === key).length
+  const configKey = 'map7e-cloud:storage:config:v1:'
+  const authKey = 'map7e-cloud:storage:auth:v1:quark-main'
+
+  const first = await requestMedia(fixture, 'cached-range-video', { range: 'bytes=0-1' })
+  assert.equal(first.status, 206)
+  await first.arrayBuffer()
+  const second = await requestMedia(fixture, 'cached-range-video', { range: 'bytes=2000000000-2000000001' })
+  assert.equal(second.status, 206)
+  await second.arrayBuffer()
+  assert.equal(getCount(configKey), 1)
+  assert.equal(getCount(authKey), 1)
+
+  fixture.setNow(fixedNow + 10_001)
+  const afterExpiry = await requestMedia(fixture, 'cached-range-video', { range: 'bytes=3000000000-3000000001' })
+  assert.equal(afterExpiry.status, 206)
+  await afterExpiry.arrayBuffer()
+  assert.equal(getCount(configKey), 2)
+  assert.equal(getCount(authKey), 2)
 })
 
 test('Worker returns media_gateway_not_configured instead of a generic 502 when storage secrets are absent', async () => {
@@ -447,6 +473,61 @@ test('first and middle video ranges return streamed 206 headers for 30 GB metada
   assert.deepEqual(fixture.state.cdnRequests.map(value => value.range), ['bytes=0-1023', 'bytes=1610612736-1610612738'])
   assert.equal(fixture.state.logs.length, 2)
   assert.equal(fixture.state.logs[0].bytesStreamed, 1024)
+})
+
+test('Worker times out stalled CDN response headers with a safe gateway error', async () => {
+  const fixture = await createFixture({
+    cdnHeaderTimeoutMs: 20,
+    cdnHandler: async (_url, _headers, _state, init) => new Promise((_, reject) => {
+      const timeout = setTimeout(() => reject(new Error('mock fetch ignored its abort signal')), 1000)
+      init.signal.addEventListener('abort', () => {
+        clearTimeout(timeout)
+        reject(new Error('mock fetch aborted before response headers'))
+      }, { once: true })
+    }),
+  })
+  const response = await requestMedia(fixture, 'stalled-cdn-video', { range: 'bytes=0-1' })
+  assert.equal(response.status, 504)
+  assert.deepEqual(await response.json(), { ok: false, error: 'quark_media_headers_timeout' })
+  assert.doesNotMatch(JSON.stringify(fixture.state.logs), /quark-access-token|auth_key/)
+})
+
+test('Worker clears the CDN header timeout as soon as headers arrive and streams the longer body', async () => {
+  let abortedAfterHeaders = false
+  const fixture = await createFixture({
+    cdnHeaderTimeoutMs: 20,
+    cdnHandler: async (_url, headers, _state, init) => {
+      assert.equal(headers.get('range'), 'bytes=0-1')
+      return new Response(new ReadableStream({
+        start(controller) {
+          const onAbort = () => {
+            abortedAfterHeaders = true
+            controller.error(new Error('header timer aborted the response body'))
+          }
+          init.signal.addEventListener('abort', onAbort, { once: true })
+          setTimeout(() => {
+            init.signal.removeEventListener('abort', onAbort)
+            controller.enqueue(new Uint8Array([7, 8]))
+            controller.close()
+          }, 50)
+        },
+      }), {
+        status: 206,
+        headers: {
+          'Content-Type': 'video/mp4',
+          'Accept-Ranges': 'bytes',
+          'Content-Range': 'bytes 0-1/32212254720',
+          'Content-Length': '2',
+        },
+      })
+    },
+  })
+  const response = await requestMedia(fixture, 'slow-stream-video', { range: 'bytes=0-1' })
+  assert.equal(response.status, 206)
+  assert.equal(response.headers.get('content-range'), 'bytes 0-1/32212254720')
+  assert.equal(response.headers.get('content-length'), '2')
+  assert.deepEqual([...new Uint8Array(await response.arrayBuffer())], [7, 8])
+  assert.equal(abortedAfterHeaders, false)
 })
 
 test('Worker validates its synthetic HEAD Range probe before claiming range support', async () => {
@@ -708,6 +789,7 @@ test('expired Quark access token is refreshed once and encrypted auth is written
   const fixture = await createFixture({ auth: expiredAuth, authorizeRefresh: true })
   const response = await requestMedia(fixture, 'auth-refresh-video', { range: 'bytes=0-0' })
   assert.equal(response.status, 206)
+  await response.arrayBuffer()
   assert.equal(fixture.state.storedRefreshes, 1)
   const fileInfo = fixture.state.apiRequests.find(value => value.url.includes('/open/v1/file/info'))
   assert.equal(fileInfo.accessToken, 'quark-access-token-refreshed')
@@ -715,6 +797,14 @@ test('expired Quark access token is refreshed once and encrypted auth is written
   assert.equal(saved.version, 1)
   assert.notEqual(saved.data, '')
   assert.equal(fixture.state.redisRequests.some(commands => commands.some(command => command[0] === 'EVAL')), true)
+
+  const nextRange = await requestMedia(fixture, 'auth-refresh-video', { range: 'bytes=100-100' })
+  assert.equal(nextRange.status, 206)
+  await nextRange.arrayBuffer()
+  assert.equal(fixture.state.storedRefreshes, 1, 'cached auth is updated after the refresh is persisted')
+  assert.equal(fixture.state.apiRequests
+    .filter(value => value.url.includes('/open/v1/file/info'))
+    .every(value => value.accessToken === 'quark-access-token-refreshed'), true)
 })
 
 test('ticket and session support independent seeks after the five-minute ticket expires without renewing the grant', async () => {

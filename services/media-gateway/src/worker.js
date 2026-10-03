@@ -1,11 +1,12 @@
 import { OFFICIAL_CLIENT_ID, OFFICIAL_SIGN_KEY } from '../../../lib/storage/providers/quark-client.js'
 
-export const MEDIA_GATEWAY_VERSION = '0.2.5'
+export const MEDIA_GATEWAY_VERSION = '0.2.6'
 export const MEDIA_SESSION_COOKIE = '__Host-map7e-media-'
 const MAX_RANGE_LENGTH = 128
 const QUARK_API = 'https://open-api-drive.quark.cn'
 const STORE_PREFIX = 'map7e-cloud:'
 const STORAGE_TTL_MS = 10_000
+const MEDIA_CDN_HEADER_TIMEOUT_MS = 15_000
 const MEDIA_URL_TTL_MS = 30_000
 const MEDIA_URL_MARGIN_MS = 5 * 60 * 1000
 const MEDIA_PURPOSES = new Set(['preview', 'original', 'video'])
@@ -35,6 +36,7 @@ const PREVIEW_KEYS = ['image_preview_url', 'preview_url', 'preview_image_url', '
 const THUMBNAIL_KEYS = ['thumbnail_url', 'thumbnail_link', 'thumbnail', 'thumb_url', 'thumb', 'image_thumbnail_url', 'image_thumbnail', 'icon_link']
 const UNLOCK_LOCK_SCRIPT = "if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL', KEYS[1]) end return 0"
 const downloadUrlCache = new Map()
+const storageReadCaches = new WeakMap()
 const encoder = new TextEncoder()
 
 class GatewayError extends Error {
@@ -433,32 +435,75 @@ function parseStored(value, code) {
   }
 }
 
-async function storageConfig(env, fetchImpl) {
-  const values = await redisPipeline([['GET', storageKey('config')]], env, fetchImpl)
-  if (values[0] == null) {
-    return { version: 1, defaultStorageId: 'pikpak-main', instances: [
-      { storageId: 'pikpak-main', provider: 'pikpak', displayName: 'PikPak', enabled: true },
-      { storageId: 'quark-main', provider: 'quark', displayName: '夸克网盘', enabled: true },
-    ] }
+function storageReadCache(env) {
+  if (!env || typeof env !== 'object') return null
+  let cache = storageReadCaches.get(env)
+  if (!cache) {
+    cache = { entries: new Map(), pending: new Map(), generations: new Map() }
+    storageReadCaches.set(env, cache)
   }
-  const config = parseStored(values[0], 'storage_config_invalid')
-  const validInstance = instance => instance
-    && storageIdValid(instance.storageId)
-    && ['pikpak', 'quark'].includes(instance.provider)
-    && typeof instance.displayName === 'string'
-    && instance.displayName.length <= 80
-    && typeof instance.enabled === 'boolean'
-    && (instance.rootFolderId === undefined || instance.rootFolderId === null
-      || (typeof instance.rootFolderId === 'string' && instance.rootFolderId.length <= 512))
-    && (instance.rootFolderName === undefined || instance.rootFolderName === null
-      || (typeof instance.rootFolderName === 'string' && instance.rootFolderName.length <= 255))
-  if (config?.version !== 1 || !Array.isArray(config.instances) || config.instances.length < 1
-    || config.instances.length > 50 || !config.instances.every(validInstance)
-    || new Set(config.instances.map(instance => instance.storageId)).size !== config.instances.length
-    || !config.instances.some(instance => instance.storageId === config.defaultStorageId)) {
-    throw storageError('storage_config_invalid', 503)
-  }
-  return config
+  return cache
+}
+
+async function cachedStorageRead(env, key, now, load) {
+  const cache = storageReadCache(env)
+  if (!cache) return load()
+  const current = now()
+  const entry = cache.entries.get(key)
+  if (entry && entry.expiresAt > current) return entry.value
+  if (entry) cache.entries.delete(key)
+  const generation = cache.generations.get(key) || 0
+  const pending = cache.pending.get(key)
+  if (pending && pending.generation === generation) return pending.promise
+  const promise = Promise.resolve().then(load).then(value => {
+    if ((cache.generations.get(key) || 0) === generation) {
+      cache.entries.set(key, { value, expiresAt: now() + STORAGE_TTL_MS })
+    }
+    return value
+  }).finally(() => {
+    if (cache.pending.get(key)?.promise === promise) cache.pending.delete(key)
+  })
+  cache.pending.set(key, { generation, promise })
+  return promise
+}
+
+function updateCachedStorageRead(env, key, value, now) {
+  const cache = storageReadCache(env)
+  if (!cache) return
+  const generation = (cache.generations.get(key) || 0) + 1
+  cache.generations.set(key, generation)
+  cache.pending.delete(key)
+  cache.entries.set(key, { value, expiresAt: now() + STORAGE_TTL_MS })
+}
+
+async function storageConfig(env, fetchImpl, now = Date.now) {
+  return cachedStorageRead(env, 'config', now, async () => {
+    const values = await redisPipeline([['GET', storageKey('config')]], env, fetchImpl)
+    if (values[0] == null) {
+      return { version: 1, defaultStorageId: 'pikpak-main', instances: [
+        { storageId: 'pikpak-main', provider: 'pikpak', displayName: 'PikPak', enabled: true },
+        { storageId: 'quark-main', provider: 'quark', displayName: '夸克网盘', enabled: true },
+      ] }
+    }
+    const config = parseStored(values[0], 'storage_config_invalid')
+    const validInstance = instance => instance
+      && storageIdValid(instance.storageId)
+      && ['pikpak', 'quark'].includes(instance.provider)
+      && typeof instance.displayName === 'string'
+      && instance.displayName.length <= 80
+      && typeof instance.enabled === 'boolean'
+      && (instance.rootFolderId === undefined || instance.rootFolderId === null
+        || (typeof instance.rootFolderId === 'string' && instance.rootFolderId.length <= 512))
+      && (instance.rootFolderName === undefined || instance.rootFolderName === null
+        || (typeof instance.rootFolderName === 'string' && instance.rootFolderName.length <= 255))
+    if (config?.version !== 1 || !Array.isArray(config.instances) || config.instances.length < 1
+      || config.instances.length > 50 || !config.instances.every(validInstance)
+      || new Set(config.instances.map(instance => instance.storageId)).size !== config.instances.length
+      || !config.instances.some(instance => instance.storageId === config.defaultStorageId)) {
+      throw storageError('storage_config_invalid', 503)
+    }
+    return config
+  })
 }
 
 async function encryptionKey(env) {
@@ -509,16 +554,19 @@ async function sealStoredAuth(storageId, auth, env) {
   })
 }
 
-async function getStoredAuth(storageId, env, fetchImpl) {
-  const authKey = storageKey('auth', storageId)
-  const values = await redisPipeline([['GET', authKey]], env, fetchImpl)
-  if (values[0] == null) throw storageError('storage_authorization_required', 409)
-  return decryptStoredAuth(storageId, values[0], env)
+async function getStoredAuth(storageId, env, fetchImpl, now = Date.now) {
+  return cachedStorageRead(env, 'auth:' + storageId, now, async () => {
+    const authKey = storageKey('auth', storageId)
+    const values = await redisPipeline([['GET', authKey]], env, fetchImpl)
+    if (values[0] == null) throw storageError('storage_authorization_required', 409)
+    return decryptStoredAuth(storageId, values[0], env)
+  })
 }
 
-async function writeStoredAuth(storageId, auth, env, fetchImpl) {
+async function writeStoredAuth(storageId, auth, env, fetchImpl, now = Date.now) {
   const authKey = storageKey('auth', storageId)
   await redisPipeline([['SET', authKey, await sealStoredAuth(storageId, auth, env)]], env, fetchImpl)
+  updateCachedStorageRead(env, 'auth:' + storageId, auth, now)
 }
 
 function authChanged(before, after) {
@@ -655,7 +703,7 @@ async function rotateQuarkAuth(storageId, before, env, fetchImpl, now) {
     const [acquired] = await redisPipeline([['SET', lockKey, owner, 'NX', 'EX', '90']], env, fetchImpl)
     if (acquired === 'OK') {
       try {
-        const stored = await getStoredAuth(storageId, env, fetchImpl)
+        const stored = await getStoredAuth(storageId, env, fetchImpl, now)
         if (authChanged(before, stored)) return stored
         if (!stored.refreshToken || (stored.refreshExpiresAt && stored.refreshExpiresAt <= now())) {
           throw storageError('storage_authorization_required', 401)
@@ -677,14 +725,14 @@ async function rotateQuarkAuth(storageId, before, env, fetchImpl, now) {
           refreshToken: payload.data.refresh_token,
           accessExpiresAt: Number.isFinite(duration) && duration > 0 ? now() + duration * 1000 : null,
         }
-        await writeStoredAuth(storageId, refreshed, env, fetchImpl)
+        await writeStoredAuth(storageId, refreshed, env, fetchImpl, now)
         return refreshed
       } finally {
         await redisPipeline([['EVAL', UNLOCK_LOCK_SCRIPT, '1', lockKey, owner]], env, fetchImpl).catch(() => {})
       }
     }
     await new Promise(resolve => setTimeout(resolve, 250))
-    const stored = await getStoredAuth(storageId, env, fetchImpl)
+    const stored = await getStoredAuth(storageId, env, fetchImpl, now)
     if (authChanged(before, stored)) return stored
   }
   throw storageError('storage_operation_busy', 409)
@@ -819,20 +867,58 @@ export function isAllowedQuarkUrl(value) {
   }
 }
 
-async function fetchQuarkCdn(value, { headers, signal, fetchImpl, maxRedirects = 3 }) {
+function combinedAbortSignal(signal, timeoutSignal) {
+  if (!signal) return timeoutSignal
+  if (typeof AbortSignal.any === 'function') return AbortSignal.any([signal, timeoutSignal])
+  const controller = new AbortController()
+  const forwardAbort = source => {
+    if (source.aborted) controller.abort(source.reason)
+    else source.addEventListener('abort', () => controller.abort(source.reason), { once: true })
+  }
+  forwardAbort(signal)
+  forwardAbort(timeoutSignal)
+  return controller.signal
+}
+
+async function fetchQuarkCdnHeaders(value, init, fetchImpl, timeoutMs) {
+  const timeoutController = new AbortController()
+  const signal = combinedAbortSignal(init.signal, timeoutController.signal)
+  let timedOut = false
+  const timer = setTimeout(() => {
+    timedOut = true
+    timeoutController.abort()
+  }, timeoutMs)
+  try {
+    return await fetchImpl(value, { ...init, signal })
+  } catch (error) {
+    if (timedOut) throw storageError('quark_media_headers_timeout', 504)
+    throw error
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+async function fetchQuarkCdn(value, {
+  headers,
+  signal,
+  fetchImpl,
+  maxRedirects = 3,
+  headerTimeoutMs = MEDIA_CDN_HEADER_TIMEOUT_MS,
+}) {
   let current = value
   for (let redirects = 0; ; redirects += 1) {
     if (!isAllowedQuarkUrl(current)) throw storageError('quark_media_host_rejected', 502)
     let response
     try {
-      response = await fetchImpl(current, {
+      response = await fetchQuarkCdnHeaders(current, {
         method: 'GET',
         headers,
         cache: 'no-store',
         redirect: 'manual',
         signal,
-      })
-    } catch {
+      }, fetchImpl, headerTimeoutMs)
+    } catch (error) {
+      if (error?.code === 'quark_media_headers_timeout') throw error
       throw storageError('quark_media_unavailable', 502)
     }
     if (![301, 302, 303, 307, 308].includes(response.status)) return response
@@ -909,17 +995,31 @@ async function getDownloadSource(client, storageId, fileId, env, now, refresh = 
   return entry
 }
 
-async function requestDownload(client, storageId, fileId, { range, ifRange, signal, env, fetchImpl, now, refresh = false } = {}) {
+async function requestDownload(client, storageId, fileId, {
+  range,
+  ifRange,
+  signal,
+  env,
+  fetchImpl,
+  now,
+  refresh = false,
+  cdnHeaderTimeoutMs = MEDIA_CDN_HEADER_TIMEOUT_MS,
+} = {}) {
   const headers = new Headers({ Accept: '*/*', 'Accept-Encoding': 'identity', Cookie: mediaCookie(client.auth, env) })
   if (range) headers.set('Range', range)
   if (ifRange) headers.set('If-Range', ifRange)
   let source = await getDownloadSource(client, storageId, fileId, env, now, refresh)
-  let response = await fetchQuarkCdn(source.url, { headers, signal, fetchImpl })
+  let response = await fetchQuarkCdn(source.url, { headers, signal, fetchImpl, headerTimeoutMs: cdnHeaderTimeoutMs })
   if (response.status === 401 || response.status === 403) {
     await response.body?.cancel().catch(() => {})
     for (const [key, value] of downloadUrlCache) if (value.url === source.url) downloadUrlCache.delete(key)
     source = await getDownloadSource(client, storageId, fileId, env, now, true)
-    response = await fetchQuarkCdn(source.url, { headers: new Headers({ ...Object.fromEntries(headers), Cookie: mediaCookie(client.auth, env) }), signal, fetchImpl })
+    response = await fetchQuarkCdn(source.url, {
+      headers: new Headers({ ...Object.fromEntries(headers), Cookie: mediaCookie(client.auth, env) }),
+      signal,
+      fetchImpl,
+      headerTimeoutMs: cdnHeaderTimeoutMs,
+    })
     if (response.status === 401 || response.status === 403) {
       await response.body?.cancel().catch(() => {})
       throw storageError('quark_media_upstream_forbidden', 502)
@@ -928,7 +1028,13 @@ async function requestDownload(client, storageId, fileId, { range, ifRange, sign
   return { response, source }
 }
 
-async function previewResponse(client, fileId, item, record, claims, { env, fetchImpl, signal, now }) {
+async function previewResponse(client, fileId, item, record, claims, {
+  env,
+  fetchImpl,
+  signal,
+  now,
+  cdnHeaderTimeoutMs = MEDIA_CDN_HEADER_TIMEOUT_MS,
+}) {
   const sourceFor = (value, auth) => fetchQuarkCdn(value, {
     headers: {
       Accept: 'image/avif,image/webp,image/png,image/jpeg,image/gif,*/*;q=0.1',
@@ -939,6 +1045,7 @@ async function previewResponse(client, fileId, item, record, claims, { env, fetc
     },
     signal,
     fetchImpl,
+    headerTimeoutMs: cdnHeaderTimeoutMs,
   })
   let source = previewSourceUrl(record, claims.variant)
   if (!source) throw storageError('preview_unavailable', 404)
@@ -963,18 +1070,19 @@ async function previewResponse(client, fileId, item, record, claims, { env, fetc
       env,
       fetchImpl,
       now,
+      cdnHeaderTimeoutMs,
     })
     return { response: downloaded.response }
   }
   throw storageError('preview_unavailable', 404)
 }
 
-async function resolveStorageForTicket(claims, env, fetchImpl) {
+async function resolveStorageForTicket(claims, env, fetchImpl, now) {
   if (!storageIdValid(claims.storageId)) throw storageError('storage_not_found', 404)
-  const config = await storageConfig(env, fetchImpl)
+  const config = await storageConfig(env, fetchImpl, now)
   const instance = config.instances.find(value => value.storageId === claims.storageId)
   if (!instance || !instance.enabled || instance.provider !== 'quark') throw storageError('storage_not_found', 404)
-  return { instance, auth: await getStoredAuth(claims.storageId, env, fetchImpl) }
+  return { instance, auth: await getStoredAuth(claims.storageId, env, fetchImpl, now) }
 }
 
 function fileNameDisposition(purpose, item, requestedDisposition) {
@@ -1088,6 +1196,7 @@ export function createMediaGatewayWorker({
   fetchImpl = fetch,
   now = Date.now,
   logger = entry => console.log(JSON.stringify(entry)),
+  cdnHeaderTimeoutMs = MEDIA_CDN_HEADER_TIMEOUT_MS,
 } = {}) {
   return {
     async fetch(request, env = {}) {
@@ -1173,7 +1282,7 @@ export function createMediaGatewayWorker({
           claims = sessionClaims
         }
         if (!MEDIA_PURPOSES.has(claims.purpose)) throw new GatewayError('media_ticket_invalid', 401)
-        const storage = await resolveStorageForTicket(claims, env, fetchImpl)
+        const storage = await resolveStorageForTicket(claims, env, fetchImpl, now)
         const client = createQuarkClient(claims.storageId, storage.auth, { env, fetchImpl, now })
         const resolved = await getItemRecord(client, claims.fileId)
         const item = resolved.item
@@ -1190,7 +1299,7 @@ export function createMediaGatewayWorker({
           parsedRange.range,
           parsedRange.ifRange,
           request,
-          { env, fetchImpl, now },
+          { env, fetchImpl, now, cdnHeaderTimeoutMs },
         )
         let upstream = result.response
         if (upstream.status === 416) {
