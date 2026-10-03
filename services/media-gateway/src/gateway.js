@@ -9,6 +9,7 @@ import { quarkFidsMatch } from '../../../lib/storage/providers/quark.js'
 import {
   createMediaSession,
   MEDIA_SESSION_TTL_SECONDS,
+  sameMediaIdentity,
   verifyMediaSession,
   verifyMediaTicket,
 } from '../../../lib/storage/media-ticket.js'
@@ -99,10 +100,10 @@ function safeHeader(value, pattern) {
   return typeof value === 'string' && value.length <= 512 && !/[\r\n\u0000-\u001f\u007f]/.test(value) && pattern.test(value) ? value : null
 }
 
-function disposition(purpose, item) {
+function disposition(purpose, item, requestedDisposition) {
   const name = String(item?.name || 'download').replace(/[\r\n\u0000-\u001f\u007f\\/]/g, '_').slice(0, 240) || 'download'
   const encoded = encodeURIComponent(name).replace(/['()*]/g, char => `%${char.charCodeAt(0).toString(16).toUpperCase()}`)
-  const type = purpose === 'preview' || purpose === 'video' ? 'inline' : 'attachment'
+  const type = requestedDisposition || (purpose === 'preview' || purpose === 'video' ? 'inline' : 'attachment')
   return `${type}; filename*=UTF-8''${encoded}`
 }
 
@@ -176,8 +177,10 @@ function sessionFromCookie(header) {
 }
 
 function setSessionCookie(res, claims, secret, now) {
-  const token = createMediaSession(claims, { secret, now })
-  res.setHeader('Set-Cookie', `${MEDIA_SESSION_COOKIE}=${token}; Path=/; Max-Age=${MEDIA_SESSION_TTL_SECONDS}; Secure; HttpOnly; SameSite=Strict`)
+  if (claims.grantType !== 'ticket') return
+  const token = createMediaSession(claims, { secret, now: claims.issuedAt * 1000 })
+  const maxAge = Math.max(0, claims.issuedAt + MEDIA_SESSION_TTL_SECONDS - Math.floor(now / 1000))
+  if (maxAge > 0) res.setHeader('Set-Cookie', `${MEDIA_SESSION_COOKIE}=${token}; Path=/; Max-Age=${maxAge}; Secure; HttpOnly; SameSite=Strict`)
 }
 
 function requestAbortSignal(req, res) {
@@ -230,7 +233,7 @@ function headersForMedia(res, response, item, claims, contentType) {
   res.setHeader('X-Content-Type-Options', 'nosniff')
   res.setHeader('Referrer-Policy', 'no-referrer')
   res.setHeader('Content-Type', contentType)
-  res.setHeader('Content-Disposition', disposition(claims.purpose, item))
+  res.setHeader('Content-Disposition', disposition(claims.purpose, item, claims.disposition))
   const length = safeHeader(response.headers.get('content-length'), /^\d+$/)
   if (length) res.setHeader('Content-Length', length)
   const range = contentRangeHeader(response)
@@ -288,18 +291,22 @@ export function createMediaGatewayHandler({
       }
       const secret = env.MEDIA_GATEWAY_SIGNING_SECRET
       if (!secret) throw new StorageError('media_gateway_not_configured', 503)
-      let grantType = 'ticket'
+      let expiredTicketClaims = null
       const ticket = parsed.searchParams.get('ticket')
       if (ticket) {
         try { claims = verifyMediaTicket(ticket, secret, { now: now() }) } catch (error) {
           if (error?.code !== 'media_ticket_expired') throw error
-          grantType = 'session'
+          expiredTicketClaims = verifyMediaTicket(ticket, secret, { now: now(), allowExpired: true })
         }
-      } else grantType = 'session'
+      }
       if (!claims) {
         const session = sessionFromCookie(req.headers.cookie)
         if (!session) throw new StorageError(ticket ? 'media_ticket_expired' : 'media_ticket_invalid', 401)
-        claims = verifyMediaSession(session, secret, { now: now() })
+        const sessionClaims = verifyMediaSession(session, secret, { now: now() })
+        if (expiredTicketClaims && !sameMediaIdentity(expiredTicketClaims, sessionClaims)) {
+          throw new StorageError('media_ticket_invalid', 401)
+        }
+        claims = sessionClaims
       }
 
       stage = 'storage_resolve'

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
 import { Writable } from 'node:stream'
 import test from 'node:test'
-import { createMediaTicket } from '../../../lib/storage/media-ticket.js'
+import { createMediaTicket, verifyMediaSession } from '../../../lib/storage/media-ticket.js'
 import { createMediaGatewayHandler, MEDIA_SESSION_COOKIE, parseSingleRange } from '../src/gateway.js'
 
 const secret = 'gateway-test-secret-with-at-least-32-bytes-long'
@@ -69,8 +69,8 @@ async function closeServer(server) {
   await server.close()
 }
 
-function ticket({ storageId = 'quark-main', fileId = 'video-1', parentId = '', purpose = 'video', variant } = {}, now = Date.now()) {
-  return createMediaTicket({ storageId, fileId, parentId, purpose, ...(variant ? { variant } : {}) }, { secret, now })
+function ticket({ storageId = 'quark-main', fileId = 'video-1', parentId = '', purpose = 'video', variant, disposition } = {}, now = Date.now()) {
+  return createMediaTicket({ storageId, fileId, parentId, purpose, ...(variant ? { variant } : {}), ...(disposition ? { disposition } : {}) }, { secret, now })
 }
 
 await test('health is minimal and media accepts only GET or HEAD', async () => {
@@ -160,13 +160,48 @@ await test('short ticket establishes a scoped session so later Range requests su
     assert.equal(first.status, 206)
     const sessionCookie = first.headers.get('set-cookie').split(';', 1)[0]
     assert.match(sessionCookie, new RegExp(`^${MEDIA_SESSION_COOKIE}=`))
+    const sessionToken = sessionCookie.slice(MEDIA_SESSION_COOKIE.length + 1)
+    const initialSession = verifyMediaSession(sessionToken, secret, { now })
+    assert.equal(initialSession.expiresAt, Math.floor(now / 1000) + 6 * 60 * 60)
     await first.arrayBuffer()
     now += 301_000
     const resumed = await fetch(`${baseUrl}/v1/media?ticket=${encodeURIComponent(grant)}`, { headers: { Range: 'bytes=100-101', Cookie: sessionCookie } })
     assert.equal(resumed.status, 206)
     assert.equal(resumed.headers.get('content-range'), 'bytes 100-101/32212254720')
+    assert.equal(resumed.headers.get('set-cookie'), null, 'session-authenticated ranges do not renew the six-hour grant')
     assert.equal((await resumed.arrayBuffer()).byteLength, 2)
+    assert.equal(verifyMediaSession(sessionToken, secret, { now }).expiresAt, initialSession.expiresAt)
     assert.deepEqual(ranges, ['bytes=0-0', 'bytes=100-101'])
+  } finally { await closeServer(server) }
+})
+
+await test('expired ticket cannot use a different file session and original downloads can be inline', async () => {
+  let now = 1_800_000_000_000
+  const reads = []
+  const provider = {
+    getItem: async id => { reads.push(id); return createItem({ id }) },
+    getFileResponse: async (id, { range }) => partialResponse(range || 'bytes=0-0'),
+  }
+  const { server, baseUrl } = await startServer({ provider, now: () => now })
+  try {
+    const fileATicket = ticket({ fileId: 'video-A' }, now)
+    const first = await fetch(`${baseUrl}/v1/media?ticket=${encodeURIComponent(fileATicket)}`, { headers: { Range: 'bytes=0-0' } })
+    const cookie = first.headers.get('set-cookie').split(';', 1)[0]
+    await first.arrayBuffer()
+    const inlineOriginal = ticket({ fileId: 'document.pdf', purpose: 'original', disposition: 'inline' }, now)
+    const inline = await fetch(`${baseUrl}/v1/media?ticket=${encodeURIComponent(inlineOriginal)}`)
+    assert.equal(inline.status, 206)
+    assert.match(inline.headers.get('content-disposition'), /^inline;/)
+    await inline.arrayBuffer()
+
+    const fileBTicket = ticket({ fileId: 'video-B' }, now)
+    now += 301_000
+    const mismatched = await fetch(`${baseUrl}/v1/media?ticket=${encodeURIComponent(fileBTicket)}`, {
+      headers: { Range: 'bytes=1-1', Cookie: cookie },
+    })
+    assert.equal(mismatched.status, 401)
+    assert.equal((await mismatched.json()).error, 'media_ticket_invalid')
+    assert.deepEqual(reads, ['video-A', 'document.pdf'], 'a mismatched expired ticket is rejected before a file lookup')
   } finally { await closeServer(server) }
 })
 

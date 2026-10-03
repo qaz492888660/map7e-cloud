@@ -5,6 +5,7 @@ import { createMediaTicket } from '../../../lib/storage/media-ticket.js'
 import {
   createMediaGatewayWorker,
   isAllowedQuarkUrl,
+  MEDIA_SESSION_COOKIE,
   parseSingleRange,
   quarkFidsMatch,
   verifyGrant,
@@ -64,6 +65,7 @@ function ticketFor(fileId, options = {}, now = fixedNow) {
     parentId: options.parentId || '',
     purpose: options.purpose || 'video',
     ...(options.purpose === 'preview' ? { variant: options.variant || 'preview' } : {}),
+    ...(options.disposition ? { disposition: options.disposition } : {}),
   }, { secret: options.secret || ticketSecret, now })
 }
 
@@ -75,6 +77,8 @@ async function createFixture({
   cdnHandler,
   expireFirstMediaUrl = false,
   authorizeRefresh = false,
+  redisHandler,
+  quarkHandler,
 } = {}) {
   const state = {
     files,
@@ -107,7 +111,11 @@ async function createFixture({
   const fetchImpl = async (input, init = {}) => {
     const url = new URL(typeof input === 'string' ? input : input.url)
     const headers = new Headers(init.headers || {})
-    if (url.hostname === 'test-redis.upstash.io') {
+    if (url.hostname.endsWith('.upstash.io')) {
+      if (redisHandler) {
+        const overridden = await redisHandler({ url, init, state })
+        if (overridden) return overridden
+      }
       const commands = JSON.parse(init.body)
       state.redisRequests.push(commands)
       const values = commands.map(command => {
@@ -125,7 +133,11 @@ async function createFixture({
       })
       return jsonResponse(values.map(result => ({ result })))
     }
-    if (url.hostname === 'open-api-drive.quark.cn') {
+    if (url.hostname === 'open-api-drive.quark.cn' || url.hostname === 'api.quark.cn') {
+      if (quarkHandler) {
+        const overridden = await quarkHandler({ url, init, headers, state })
+        if (overridden) return overridden
+      }
       const accessToken = url.searchParams.get('access_token')
       state.apiRequests.push({ url: url.toString(), method: init.method || 'GET', headers, accessToken, body: init.body })
       if (url.pathname === '/agent/v1/oauth/access_token/rotate') {
@@ -242,7 +254,7 @@ test('Worker health is minimal and works without media secrets', async () => {
   const fixture = await createFixture({ envOverrides: { MEDIA_GATEWAY_SIGNING_SECRET: undefined } })
   const response = await fixture.worker.fetch(new Request('https://media.example.test/health'), fixture.env)
   assert.equal(response.status, 200)
-  assert.deepEqual(await response.json(), { ok: true, version: '0.2.0' })
+  assert.deepEqual(await response.json(), { ok: true, version: '0.2.1' })
   assert.equal(fixture.state.redisRequests.length, 0)
 })
 
@@ -256,6 +268,143 @@ test('Worker returns media_gateway_not_configured instead of a generic 502 when 
   const response = await requestMedia(fixture, 'no-store')
   assert.equal(response.status, 503)
   assert.equal((await response.json()).error, 'media_gateway_not_configured')
+})
+
+test('Worker reports safe Redis request and HTTP error codes without returning upstream details', async () => {
+  const rejected = await createFixture({
+    redisHandler: async () => { throw new Error('https://secret-host.invalid token=do-not-return') },
+  })
+  const fetchFailure = await requestMedia(rejected, 'fetch-failure')
+  const fetchBody = await fetchFailure.json()
+  assert.equal(fetchFailure.status, 503)
+  assert.equal(fetchBody.error, 'persistent_storage_request_failed')
+  assert.doesNotMatch(JSON.stringify(fetchBody), /secret-host|do-not-return/)
+
+  const network = await createFixture({
+    redisHandler: async () => { throw new TypeError('fetch failed; token=do-not-return') },
+  })
+  const networkFailure = await requestMedia(network, 'network-failure')
+  const networkBody = await networkFailure.json()
+  assert.equal(networkFailure.status, 503)
+  assert.equal(networkBody.error, 'persistent_storage_network_failed')
+  assert.doesNotMatch(JSON.stringify(networkBody), /token=do-not-return/)
+
+  const unauthorized = await createFixture({
+    redisHandler: async () => jsonResponse({ error: 'secret token rejected' }, 401),
+  })
+  const httpFailure = await requestMedia(unauthorized, 'http-failure')
+  const httpBody = await httpFailure.json()
+  assert.equal(httpFailure.status, 503)
+  assert.equal(httpBody.error, 'persistent_storage_http_401')
+  assert.doesNotMatch(JSON.stringify(httpBody), /secret|token rejected/)
+})
+
+test('Worker follows bounded HTTPS redirects only within the configured Upstash host boundary', async () => {
+  const redisCalls = []
+  const fixture = await createFixture({
+    redisHandler: async ({ url, init }) => {
+      redisCalls.push({ hostname: url.hostname, redirect: init.redirect, authorization: new Headers(init.headers).get('authorization') })
+      if (url.hostname === 'test-redis.upstash.io') {
+        return new Response(null, { status: 307, headers: { Location: 'https://replica.upstash.io/pipeline' } })
+      }
+      return null
+    },
+  })
+  const response = await requestMedia(fixture, 'redirected-redis', { range: 'bytes=0-0' })
+  assert.equal(response.status, 206)
+  assert.ok(redisCalls.some(call => call.hostname === 'replica.upstash.io'))
+  assert.ok(redisCalls.every(call => call.redirect === 'manual'))
+  assert.ok(redisCalls.every(call => call.authorization === 'Bearer ' + redisToken))
+
+  const untrustedCalls = []
+  const rejected = await createFixture({
+    redisHandler: async ({ url }) => {
+      untrustedCalls.push(url.hostname)
+      return new Response(null, { status: 307, headers: { Location: 'https://attacker.example/pipeline' } })
+    },
+  })
+  const blocked = await requestMedia(rejected, 'untrusted-redis-redirect')
+  assert.equal(blocked.status, 503)
+  assert.equal((await blocked.json()).error, 'persistent_storage_redirect_host_rejected')
+  assert.deepEqual(untrustedCalls, ['test-redis.upstash.io'])
+})
+
+test('Worker reports safe Quark network and malformed-response errors', async () => {
+  let networkAttempts = 0
+  const network = await createFixture({
+    quarkHandler: async () => {
+      networkAttempts += 1
+      throw new TypeError('fetch failed for hidden endpoint; access_token=do-not-return')
+    },
+  })
+  const networkResponse = await requestMedia(network, 'quark-network-failure')
+  const networkBody = await networkResponse.json()
+  assert.equal(networkResponse.status, 502)
+  assert.equal(networkBody.error, 'quark_network_failed')
+  assert.equal(networkAttempts, 2)
+  assert.doesNotMatch(JSON.stringify(networkBody), /hidden endpoint|access_token|do-not-return/)
+
+  let invalidAttempts = 0
+  const malformed = await createFixture({
+    quarkHandler: async () => {
+      invalidAttempts += 1
+      return new Response('<html>credential must stay private</html>', { status: 412, headers: { 'Content-Type': 'text/html' } })
+    },
+  })
+  const malformedResponse = await requestMedia(malformed, 'quark-html-failure')
+  const malformedBody = await malformedResponse.json()
+  assert.equal(malformedResponse.status, 502)
+  assert.equal(malformedBody.error, 'quark_response_invalid')
+  assert.equal(invalidAttempts, 2)
+  assert.doesNotMatch(JSON.stringify(malformedBody), /credential must stay private/)
+})
+
+test('Worker preserves only safe Quark HTTP/API error numbers', async () => {
+  const apiFailure = await createFixture({
+    quarkHandler: async () => jsonResponse({ status: 0, errno: 73421, error_info: 'private account details' }),
+  })
+  const apiResponse = await requestMedia(apiFailure, 'quark-api-error')
+  assert.equal(apiResponse.status, 502)
+  assert.deepEqual(await apiResponse.json(), { ok: false, error: 'quark_api_error_73421' })
+
+  const httpFailure = await createFixture({
+    quarkHandler: async () => jsonResponse({ errno: 73421, error_info: 'private account details' }, 412),
+  })
+  const httpResponse = await requestMedia(httpFailure, 'quark-http-error')
+  assert.equal(httpResponse.status, 502)
+  assert.deepEqual(await httpResponse.json(), { ok: false, error: 'quark_http_412_api_73421' })
+})
+
+test('Worker follows HTTPS Quark API redirects within the Quark China domain only', async () => {
+  const calls = []
+  const fixture = await createFixture({
+    quarkHandler: async ({ url, init }) => {
+      calls.push({ hostname: url.hostname, method: init.method || 'GET', redirect: init.redirect })
+      if (url.hostname === 'open-api-drive.quark.cn') {
+        return new Response(null, {
+          status: 307,
+          headers: { Location: 'https://api.quark.cn' + url.pathname + url.search },
+        })
+      }
+      return null
+    },
+  })
+  const response = await requestMedia(fixture, 'quark-redirect', { range: 'bytes=0-0' })
+  assert.equal(response.status, 206)
+  assert.ok(calls.some(call => call.hostname === 'api.quark.cn'))
+  assert.ok(calls.every(call => call.redirect === 'manual'))
+
+  const untrustedCalls = []
+  const rejected = await createFixture({
+    quarkHandler: async ({ url }) => {
+      untrustedCalls.push(url.hostname)
+      return new Response(null, { status: 307, headers: { Location: 'https://attacker.example/open/v1/file/info' } })
+    },
+  })
+  const blocked = await requestMedia(rejected, 'quark-untrusted-redirect')
+  assert.equal(blocked.status, 502)
+  assert.equal((await blocked.json()).error, 'quark_redirect_host_rejected')
+  assert.deepEqual(untrustedCalls, ['open-api-drive.quark.cn'])
 })
 
 test('Quark upstream URL allowlist blocks arbitrary hosts, IPs, localhost and non-HTTPS', () => {
@@ -292,6 +441,17 @@ test('first and middle video ranges return streamed 206 headers for 30 GB metada
   assert.deepEqual(fixture.state.cdnRequests.map(value => value.range), ['bytes=0-1023', 'bytes=1610612736-1610612738'])
   assert.equal(fixture.state.logs.length, 2)
   assert.equal(fixture.state.logs[0].bytesStreamed, 1024)
+})
+
+test('Worker keeps explicitly inline original media inline', async () => {
+  const fixture = await createFixture()
+  const token = ticketFor('inline-document', { purpose: 'original', disposition: 'inline' })
+  const response = await fixture.worker.fetch(new Request(
+    'https://media.example.test/v1/media?ticket=' + encodeURIComponent(token),
+  ), fixture.env)
+  assert.equal(response.status, 200)
+  assert.match(response.headers.get('content-disposition'), /^inline;/)
+  await response.arrayBuffer()
 })
 
 test('Worker infers all ticketed video extensions when Quark returns octet-stream', async () => {
@@ -458,7 +618,7 @@ test('expired Quark access token is refreshed once and encrypted auth is written
   assert.equal(fixture.state.redisRequests.some(commands => commands.some(command => command[0] === 'EVAL')), true)
 })
 
-test('ticket and session support independent seeks after the five-minute ticket expires', async () => {
+test('ticket and session support independent seeks after the five-minute ticket expires without renewing the grant', async () => {
   const fixture = await createFixture()
   const token = ticketFor('seek-video', {}, fixedNow)
   const first = await fixture.worker.fetch(new Request(
@@ -467,6 +627,9 @@ test('ticket and session support independent seeks after the five-minute ticket 
   ), fixture.env)
   assert.equal(first.status, 206)
   const cookie = first.headers.get('set-cookie').split(';', 1)[0]
+  const sessionToken = cookie.slice(MEDIA_SESSION_COOKIE.length + 1)
+  const initialSession = await verifyGrant(sessionToken, ticketSecret, { now: fixedNow, grantType: 'session' })
+  assert.equal(initialSession.expiresAt, Math.floor(fixedNow / 1000) + 6 * 60 * 60)
   fixture.setNow(fixedNow + 301_000)
   const second = await fixture.worker.fetch(new Request(
     'https://media.example.test/v1/media?ticket=' + encodeURIComponent(token),
@@ -474,6 +637,31 @@ test('ticket and session support independent seeks after the five-minute ticket 
   ), fixture.env)
   assert.equal(second.status, 206)
   assert.equal(second.headers.get('content-range'), 'bytes 2000000000-2000000001/32212254720')
+  assert.equal(second.headers.get('set-cookie'), null, 'session-authenticated ranges do not extend their expiry')
+  const verifiedAgain = await verifyGrant(sessionToken, ticketSecret, { now: fixedNow + 301_000, grantType: 'session' })
+  assert.equal(verifiedAgain.expiresAt, initialSession.expiresAt)
+})
+
+test('expired Worker ticket cannot consume another file session', async () => {
+  const fixture = await createFixture()
+  const firstToken = ticketFor('video-A', {}, fixedNow)
+  const first = await fixture.worker.fetch(new Request(
+    'https://media.example.test/v1/media?ticket=' + encodeURIComponent(firstToken),
+    { headers: { Range: 'bytes=0-0', Origin: allowedOrigin } },
+  ), fixture.env)
+  assert.equal(first.status, 206)
+  const cookie = first.headers.get('set-cookie').split(';', 1)[0]
+  await first.arrayBuffer()
+  const apiCalls = fixture.state.apiRequests.length
+  fixture.setNow(fixedNow + 301_000)
+  const secondToken = ticketFor('video-B', {}, fixedNow)
+  const second = await fixture.worker.fetch(new Request(
+    'https://media.example.test/v1/media?ticket=' + encodeURIComponent(secondToken),
+    { headers: { Range: 'bytes=1-1', Cookie: cookie, Origin: allowedOrigin } },
+  ), fixture.env)
+  assert.equal(second.status, 401)
+  assert.equal((await second.json()).error, 'media_ticket_invalid')
+  assert.equal(fixture.state.apiRequests.length, apiCalls, 'a mismatched grant is rejected before Provider lookup')
 })
 
 test('wrong Origin, method, arbitrary URL and invalid FID do not reach Quark media', async () => {

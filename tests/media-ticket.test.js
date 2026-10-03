@@ -4,6 +4,7 @@ import {
   createMediaSession,
   createMediaTicket,
   mediaGatewayLocation,
+  sameMediaIdentity,
   verifyMediaSession,
   verifyMediaTicket,
 } from '../lib/storage/media-ticket.js'
@@ -34,6 +35,9 @@ await test('media ticket rejects expiration, tampering, invalid storage identity
   assert.throws(() => createMediaTicket({ ...fixture, storageId: '../../other' }, { secret, now }), /media_ticket_invalid/)
   assert.throws(() => createMediaTicket({ ...fixture, purpose: 'proxy' }, { secret, now }), /media_ticket_invalid/)
   assert.throws(() => verifyMediaTicket(ticket, `${secret}wrong`, { now }), /media_ticket_invalid/)
+  const expiredIdentity = verifyMediaTicket(ticket, secret, { now: now + 301_000, allowExpired: true })
+  assert.equal(expiredIdentity.fileId, fixture.fileId)
+  assert.throws(() => verifyMediaTicket(`${ticket.slice(0, -1)}x`, secret, { now: now + 301_000, allowExpired: true }), /media_ticket_invalid/)
 })
 
 await test('media Gateway URL requires HTTPS and includes only a signed Map7e ticket', () => {
@@ -53,10 +57,13 @@ await test('short ticket can establish a file-scoped HttpOnly session for later 
   const now = 1_800_000_000_000
   const ticket = createMediaTicket({ storageId: 'quark-main', fileId: 'video-1', parentId: '', purpose: 'video' }, { secret, now })
   const claims = verifyMediaTicket(ticket, secret, { now })
-  const session = createMediaSession(claims, { secret, now: now + 60_000 })
+  const session = createMediaSession(claims, { secret, now: claims.issuedAt * 1000 })
   const sessionClaims = verifyMediaSession(session, secret, { now: now + 60_000 })
   assert.equal(sessionClaims.fileId, 'video-1')
   assert.equal(sessionClaims.purpose, 'video')
   assert.equal(sessionClaims.expiresAt - sessionClaims.issuedAt, 6 * 60 * 60)
+  assert.equal(sessionClaims.expiresAt, claims.issuedAt + 6 * 60 * 60)
+  assert.equal(sameMediaIdentity(claims, sessionClaims), true)
+  assert.equal(sameMediaIdentity(claims, { ...sessionClaims, fileId: 'video-2' }), false)
   assert.throws(() => verifyMediaTicket(session, secret, { now: now + 60_000 }), /media_ticket_invalid/)
 })

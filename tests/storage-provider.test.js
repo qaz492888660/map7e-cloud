@@ -510,7 +510,14 @@ await test('video Range check reports actual upstream headers without moving fil
   await writeAuth('quark-main', auth)
   await setGlobalAccess('public')
   calls.length = 0
+  const gatewayRangeRequests = []
   upstream = async (url, options = {}) => {
+    if (url.hostname === 'media.test') {
+      gatewayRangeRequests.push({ url, options })
+      return new Response(null, { status: 206, headers: {
+        'Accept-Ranges': 'bytes', 'Content-Range': 'bytes 0-0/32212254720', 'Content-Length': '1', 'Content-Type': 'video/mp4', ETag: '"range-etag"',
+      } })
+    }
     if (url.hostname === 'video.quark.cn') {
       const range = options.headers?.Range || 'bytes=0-0'
       const contentRange = range === 'bytes=0-0' ? 'bytes 0-0/32212254720' : 'bytes 1024-2047/32212254720'
@@ -538,6 +545,13 @@ await test('video Range check reports actual upstream headers without moving fil
   assert.equal(check.body.totalLength, 32212254720)
   assert.equal(JSON.stringify(check.body).includes('video.quark.cn'), false)
   assert.equal(JSON.stringify(check.body).includes('range-secret'), false)
+  assert.equal(gatewayRangeRequests.length, 1)
+  assert.equal(gatewayRangeRequests[0].options.method, 'HEAD')
+  assert.equal(gatewayRangeRequests[0].options.headers.Range, 'bytes=0-0')
+  assert.equal(gatewayRangeRequests[0].options.redirect, 'manual')
+  assert.equal(gatewayRangeRequests[0].url.searchParams.get('ticket') !== null, true)
+  assert.equal(gatewayRangeRequests[0].url.searchParams.get('url'), null)
+  assert.equal(httpsMock.requests.some(call => call.url.hostname === 'video.quark.cn'), false, 'the Quark media body is requested by the Gateway rather than Vercel')
 
   const provider = createQuarkProvider({ storageId: 'quark-main', provider: 'quark' }, await readAuth('quark-main'))
   const middle = await provider.getFileResponse('large-video', { range: 'bytes=1024-2047' })
@@ -555,6 +569,7 @@ await test('video Range check reports actual upstream headers without moving fil
   assert.equal(claims.purpose, 'video')
   assert.equal(claims.storageId, 'quark-main')
   assert.equal(claims.fileId, 'large-video')
+  assert.equal(claims.disposition, 'inline')
   assert.equal(download.headers.Location.includes('video.quark.cn'), false)
   assert.equal(download.headers.Location.includes('range-secret'), false)
   assert.equal(download.body, undefined, 'the video body remains on the Provider CDN')

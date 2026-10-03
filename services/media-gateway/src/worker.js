@@ -1,6 +1,6 @@
 import { OFFICIAL_CLIENT_ID, OFFICIAL_SIGN_KEY } from '../../../lib/storage/providers/quark-client.js'
 
-export const MEDIA_GATEWAY_VERSION = '0.2.0'
+export const MEDIA_GATEWAY_VERSION = '0.2.1'
 export const MEDIA_SESSION_COOKIE = '__Host-map7e-media'
 const MAX_RANGE_LENGTH = 128
 const QUARK_API = 'https://open-api-drive.quark.cn'
@@ -10,6 +10,8 @@ const MEDIA_URL_TTL_MS = 30_000
 const MEDIA_URL_MARGIN_MS = 5 * 60 * 1000
 const MEDIA_PURPOSES = new Set(['preview', 'original', 'video'])
 const PREVIEW_VARIANTS = new Set(['preview', 'thumbnail'])
+const REDIS_REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308])
+const QUARK_REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308])
 const READ_PATHS = new Set([
   '/open/v1/file/info',
   '/open/v1/file/get_download_url',
@@ -86,12 +88,21 @@ function validClaims(claims) {
   if (claims.purpose === 'preview') {
     if (!PREVIEW_VARIANTS.has(claims.variant)) return false
   } else if (claims.variant !== undefined) return false
+  if (claims.disposition !== undefined && !['inline', 'attachment'].includes(claims.disposition)) return false
   return Number.isSafeInteger(claims.issuedAt)
     && Number.isSafeInteger(claims.expiresAt)
     && claims.expiresAt > claims.issuedAt
 }
 
-export async function verifyGrant(token, secret, { now = Date.now(), grantType } = {}) {
+function sameMediaIdentity(left, right) {
+  if (!left || !right) return false
+  const defaultDisposition = claims => claims.disposition
+    ?? (claims.purpose === 'preview' || claims.purpose === 'video' ? 'inline' : 'attachment')
+  return ['storageId', 'fileId', 'parentId', 'purpose', 'variant'].every(key => left[key] === right[key])
+    && defaultDisposition(left) === defaultDisposition(right)
+}
+
+export async function verifyGrant(token, secret, { now = Date.now(), grantType, allowExpired = false } = {}) {
   if (typeof token !== 'string' || token.length > 4096) throw new GatewayError('media_ticket_invalid', 401)
   const parts = token.split('.')
   if (parts.length !== 2 || !/^[A-Za-z0-9_-]+$/.test(parts[0]) || !/^[A-Za-z0-9_-]{43}$/.test(parts[1])) {
@@ -115,7 +126,9 @@ export async function verifyGrant(token, secret, { now = Date.now(), grantType }
   if (claims.issuedAt > current + 30 || claims.expiresAt - claims.issuedAt > maxLifetime) {
     throw new GatewayError('media_ticket_invalid', 401)
   }
-  if (claims.expiresAt <= current) throw new GatewayError('media_ticket_expired', 401)
+  if (claims.expiresAt <= current && !(allowExpired && grantType === 'ticket')) {
+    throw new GatewayError('media_ticket_expired', 401)
+  }
   return claims
 }
 
@@ -124,8 +137,8 @@ async function signClaims(claims, secret) {
   return encoded + '.' + bytesToBase64Url(await hmacBytes(secret, encoded))
 }
 
-async function makeSession(claims, secret, now) {
-  const issuedAt = Math.floor(now / 1000)
+async function makeSession(claims, secret) {
+  const issuedAt = claims.issuedAt
   const session = { ...claims, grantType: 'session', issuedAt, expiresAt: issuedAt + 6 * 60 * 60 }
   if (!validClaims(session)) throw new GatewayError('media_ticket_invalid', 401)
   return signClaims(session, secret)
@@ -275,6 +288,40 @@ function storageError(code, status = 502) {
   return new GatewayError(code, status)
 }
 
+function redisRequestErrorCode(error) {
+  const message = typeof error?.message === 'string' ? error.message.toLowerCase() : ''
+  if (error?.name === 'AbortError' || error?.name === 'TimeoutError' || /timed out|timeout/.test(message)) return 'persistent_storage_request_timeout'
+  if (/redirect/.test(message)) return 'persistent_storage_redirect_rejected'
+  if (/signal/.test(message)) return 'persistent_storage_signal_invalid'
+  if (/cache/.test(message)) return 'persistent_storage_cache_mode_unsupported'
+  if (/dns|resolve|hostname/.test(message)) return 'persistent_storage_dns_failed'
+  if (/tls|certificate/.test(message)) return 'persistent_storage_tls_failed'
+  if (/network|fetch failed/.test(message)) return 'persistent_storage_network_failed'
+  return 'persistent_storage_request_failed'
+}
+
+function quarkRequestErrorCode(error) {
+  const message = typeof error?.message === 'string' ? error.message.toLowerCase() : ''
+  if (error?.name === 'AbortError' || error?.name === 'TimeoutError' || /timed out|timeout/.test(message)) return 'quark_request_timeout'
+  if (/redirect/.test(message)) return 'quark_redirect_rejected'
+  if (/signal/.test(message)) return 'quark_signal_invalid'
+  if (/dns|resolve|hostname/.test(message)) return 'quark_dns_failed'
+  if (/tls|certificate/.test(message)) return 'quark_tls_failed'
+  if (/network|fetch failed/.test(message)) return 'quark_network_failed'
+  return 'quark_unreachable'
+}
+
+function quarkResponseErrorCode(response, payload) {
+  if (!response) return 'quark_unreachable'
+  const errno = Number.isSafeInteger(payload && payload.errno) && payload.errno !== 0 ? payload.errno : null
+  const apiStatus = Number.isSafeInteger(payload && payload.status) && payload.status !== 0 ? payload.status : null
+  const upstreamCode = errno ?? apiStatus
+  const apiSuffix = upstreamCode === null ? '' : '_api_' + Math.abs(upstreamCode)
+  if (!response.ok) return 'quark_http_' + response.status + apiSuffix
+  if (upstreamCode !== null && upstreamCode !== 0) return 'quark_api_error_' + Math.abs(upstreamCode)
+  return 'quark_request_failed'
+}
+
 function storageIdValid(id) {
   return typeof id === 'string' && /^[a-z][a-z0-9-]{0,63}$/.test(id)
 }
@@ -297,28 +344,51 @@ function redisCredentials(env) {
 
 async function redisPipeline(commands, env, fetchImpl) {
   const credentials = redisCredentials(env)
+  const configuredHost = new URL(credentials.base).hostname.toLowerCase()
+  let url = new URL(credentials.base + '/pipeline')
   let response
-  try {
-    response = await fetchImpl(credentials.base + '/pipeline', {
-      method: 'POST',
-      headers: {
-        Authorization: 'Bearer ' + credentials.token,
-        Accept: 'application/json',
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(commands),
-      cache: 'no-store',
-      redirect: 'error',
-      signal: AbortSignal.timeout(10_000),
-    })
-  } catch {
-    throw storageError('persistent_storage_unavailable', 503)
+  for (let redirects = 0; ; redirects += 1) {
+    let signal
+    try { signal = AbortSignal.timeout(10_000) } catch {
+      throw storageError('persistent_storage_timeout_signal_unavailable', 503)
+    }
+    try {
+      response = await fetchImpl(url.toString(), {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer ' + credentials.token,
+          Accept: 'application/json',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(commands),
+        cache: 'no-store',
+        redirect: 'manual',
+        signal,
+      })
+    } catch (error) {
+      throw storageError(redisRequestErrorCode(error), 503)
+    }
+    if (!REDIS_REDIRECT_STATUSES.has(response.status)) break
+
+    const location = response.headers.get('location')
+    await response.body?.cancel().catch(() => {})
+    if (!location || redirects >= 2) throw storageError('persistent_storage_redirect_rejected', 503)
+    if (![307, 308].includes(response.status)) throw storageError('persistent_storage_redirect_method_unsupported', 503)
+
+    let next
+    try { next = new URL(location, url) } catch { throw storageError('persistent_storage_redirect_rejected', 503) }
+    const hostname = next.hostname.toLowerCase()
+    const trustedUpstashHost = hostname === 'upstash.io' || hostname.endsWith('.upstash.io')
+    if (next.protocol !== 'https:' || next.username || next.password || (next.port && next.port !== '443')
+      || (hostname !== configuredHost && !trustedUpstashHost)) {
+      throw storageError('persistent_storage_redirect_host_rejected', 503)
+    }
+    url = next
   }
   let payload
-  try { payload = await response.json() } catch { throw storageError('persistent_storage_unavailable', 503) }
-  if (!response.ok || !Array.isArray(payload) || payload.length !== commands.length || payload.some(item => item && item.error)) {
-    throw storageError('persistent_storage_unavailable', 503)
-  }
+  try { payload = await response.json() } catch { throw storageError('persistent_storage_response_invalid', 503) }
+  if (!response.ok) throw storageError('persistent_storage_http_' + response.status, 503)
+  if (!Array.isArray(payload) || payload.length !== commands.length || payload.some(item => item && item.error)) throw storageError('persistent_storage_payload_invalid', 503)
   return payload.map(item => item ? item.result : null)
 }
 
@@ -455,6 +525,49 @@ async function quarkHeaders(method, path, env, now) {
   }
 }
 
+function isAllowedQuarkApiUrl(url) {
+  const host = url.hostname.toLowerCase()
+  return url.protocol === 'https:'
+    && !url.username
+    && !url.password
+    && (!url.port || url.port === '443')
+    && !url.hash
+    && (host === 'quark.cn' || host.endsWith('.quark.cn'))
+}
+
+async function fetchQuarkApi(url, { method, body, env, fetchImpl, now, signal }) {
+  let currentUrl = new URL(url)
+  let currentMethod = method
+  let currentBody = body
+  for (let redirects = 0; ; redirects += 1) {
+    const response = await fetchImpl(currentUrl.toString(), {
+      method: currentMethod,
+      headers: await quarkHeaders(currentMethod, currentUrl.pathname, env, now()),
+      ...(currentBody === undefined ? {} : { body: JSON.stringify(currentBody) }),
+      cache: 'no-store',
+      redirect: 'manual',
+      signal: timeoutSignal(signal, 15_000),
+    })
+    if (!QUARK_REDIRECT_STATUSES.has(response.status)) return response
+
+    const location = response.headers.get('location')
+    await response.body?.cancel().catch(() => {})
+    if (!location || redirects >= 2) throw storageError('quark_redirect_rejected', 502)
+    let next
+    try { next = new URL(location, currentUrl) } catch { throw storageError('quark_redirect_rejected', 502) }
+    if (!isAllowedQuarkApiUrl(next)) throw storageError('quark_redirect_host_rejected', 502)
+
+    if (response.status === 303 || ([301, 302].includes(response.status) && currentMethod === 'POST')) {
+      currentMethod = 'GET'
+      currentBody = undefined
+    }
+    for (const [name, value] of currentUrl.searchParams) {
+      if (!next.searchParams.has(name)) next.searchParams.set(name, value)
+    }
+    currentUrl = next
+  }
+}
+
 async function quarkRequest(path, { method = 'GET', query = {}, body, auth, env, fetchImpl, now, signal } = {}) {
   const url = new URL(path, QUARK_API)
   for (const [name, value] of Object.entries(query)) {
@@ -471,25 +584,32 @@ async function quarkRequest(path, { method = 'GET', query = {}, body, auth, env,
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
     url.searchParams.set('req_id', crypto.randomUUID())
     try {
-      response = await fetchImpl(url.toString(), {
+      response = await fetchQuarkApi(url, {
         method,
-        headers: await quarkHeaders(method, path, env, now()),
-        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-        cache: 'no-store',
-        redirect: 'error',
-        signal: timeoutSignal(signal, 15_000),
+        body,
+        env,
+        fetchImpl,
+        now,
+        signal,
       })
+    } catch (error) {
+      if (error instanceof GatewayError) throw error
+      if (attempt + 1 >= maxAttempts) throw storageError(quarkRequestErrorCode(error), 502)
+      await new Promise(resolve => setTimeout(resolve, 250))
+      continue
+    }
+    try {
       payload = await response.json()
       break
     } catch {
-      if (attempt + 1 >= maxAttempts) throw storageError('quark_unreachable', 502)
+      if (attempt + 1 >= maxAttempts) throw storageError('quark_response_invalid', 502)
       await new Promise(resolve => setTimeout(resolve, 250))
     }
   }
   if (!response || !payload || !response.ok || payload.status !== 0 || (payload.errno && payload.errno !== 0)) {
     const message = String(payload && (payload.error_info || payload.agent_msg) || '')
     const authFailure = Boolean(response && response.status === 401) || /token|授权|认证/i.test(message)
-    throw storageError(authFailure ? 'storage_token_expired' : 'quark_request_failed', authFailure ? 401 : 502)
+    throw storageError(authFailure ? 'storage_token_expired' : quarkResponseErrorCode(response, payload), authFailure ? 401 : 502)
   }
   return payload
 }
@@ -826,10 +946,10 @@ async function resolveStorageForTicket(claims, env, fetchImpl) {
   return { instance, auth: await getStoredAuth(claims.storageId, env, fetchImpl) }
 }
 
-function fileNameDisposition(purpose, item) {
+function fileNameDisposition(purpose, item, requestedDisposition) {
   const name = String(item.name || 'download').replace(/[\r\n\u0000-\u001f\u007f\\/]/g, '_').slice(0, 240) || 'download'
   const encoded = encodeURIComponent(name).replace(/['()*]/g, character => '%' + character.charCodeAt(0).toString(16).toUpperCase())
-  return (purpose === 'preview' || purpose === 'video' ? 'inline' : 'attachment') + "; filename*=UTF-8''" + encoded
+  return (requestedDisposition || (purpose === 'preview' || purpose === 'video' ? 'inline' : 'attachment')) + "; filename*=UTF-8''" + encoded
 }
 
 function mediaHeaders(response, item, claims, contentType) {
@@ -838,7 +958,7 @@ function mediaHeaders(response, item, claims, contentType) {
     'X-Content-Type-Options': 'nosniff',
     'Referrer-Policy': 'no-referrer',
     'Content-Type': contentType,
-    'Content-Disposition': fileNameDisposition(claims.purpose, item),
+    'Content-Disposition': fileNameDisposition(claims.purpose, item, claims.disposition),
   })
   const length = safeHeader(response.headers.get('content-length'), /^\d+$/)
   if (length) headers.set('Content-Length', length)
@@ -1000,17 +1120,21 @@ export function createMediaGatewayWorker({
         const token = url.searchParams.get('ticket')
         if (token && token.length > 4096) throw new GatewayError('media_ticket_invalid', 401)
         if (request.headers.get('range')) parseSingleRange(request.headers.get('range'))
-        let ticketExpired = false
+        let expiredTicketClaims = null
         if (token) {
           try { claims = await verifyGrant(token, secret, { now: now(), grantType: 'ticket' }) } catch (error) {
             if (error.code !== 'media_ticket_expired') throw error
-            ticketExpired = true
+            expiredTicketClaims = await verifyGrant(token, secret, { now: now(), grantType: 'ticket', allowExpired: true })
           }
         }
         if (!claims) {
           const session = readCookie(request.headers.get('cookie'))
-          if (!session) throw new GatewayError(ticketExpired ? 'media_ticket_expired' : 'media_ticket_invalid', 401)
-          claims = await verifyGrant(session, secret, { now: now(), grantType: 'session' })
+          if (!session) throw new GatewayError(expiredTicketClaims ? 'media_ticket_expired' : 'media_ticket_invalid', 401)
+          const sessionClaims = await verifyGrant(session, secret, { now: now(), grantType: 'session' })
+          if (expiredTicketClaims && !sameMediaIdentity(expiredTicketClaims, sessionClaims)) {
+            throw new GatewayError('media_ticket_invalid', 401)
+          }
+          claims = sessionClaims
         }
         if (!MEDIA_PURPOSES.has(claims.purpose)) throw new GatewayError('media_ticket_invalid', 401)
         const storage = await resolveStorageForTicket(claims, env, fetchImpl)
@@ -1066,9 +1190,12 @@ export function createMediaGatewayWorker({
         }
         const headers = new Headers(cors)
         for (const [name, value] of mediaHeaders(upstream, item, claims, contentType)) headers.set(name, value)
-        const session = await makeSession(claims, secret, now())
-        headers.set('Set-Cookie', MEDIA_SESSION_COOKIE + '=' + session
-          + '; Path=/; Max-Age=21600; Secure; HttpOnly; SameSite=Strict')
+        if (claims.grantType === 'ticket') {
+          const session = await makeSession(claims, secret)
+          const maxAge = Math.max(0, claims.issuedAt + 6 * 60 * 60 - Math.floor(now() / 1000))
+          if (maxAge > 0) headers.set('Set-Cookie', MEDIA_SESSION_COOKIE + '=' + session
+            + '; Path=/; Max-Age=' + maxAge + '; Secure; HttpOnly; SameSite=Strict')
+        }
         status = upstream.status
         if (request.method === 'HEAD' || !upstream.body) {
           await upstream.body?.cancel().catch(() => {})
