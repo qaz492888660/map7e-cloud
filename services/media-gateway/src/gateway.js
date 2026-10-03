@@ -198,7 +198,7 @@ function sessionFromCookie(header, cookieName) {
 }
 
 function setSessionCookie(res, claims, secret, now) {
-  if (claims.grantType !== 'ticket') return
+  if (claims.grantType !== 'ticket' || claims.purpose === 'preview') return
   const token = createMediaSession(claims, { secret, now: claims.issuedAt * 1000 })
   const cookieName = mediaSessionCookieName(claims, secret)
   const maxAge = Math.max(0, claims.issuedAt + MEDIA_SESSION_TTL_SECONDS - Math.floor(now / 1000))

@@ -290,6 +290,45 @@ test('Worker caches storage config and auth across independent Range requests fo
   assert.equal(getCount(authKey), 2)
 })
 
+test('Worker bypasses cached auth while waiting for another isolate to rotate the token', async () => {
+  const lockKey = 'map7e-cloud:storage:lock:v1:refresh-quark-main'
+  const fixture = await createFixture({
+    redisHandler: async ({ init }) => {
+      const commands = JSON.parse(init.body)
+      if (commands.some(command => command[0] === 'SET' && command[1] === lockKey)) {
+        return jsonResponse([{ result: null }])
+      }
+      return null
+    },
+  })
+
+  const warm = await requestMedia(fixture, 'auth-wait-video', { range: 'bytes=0-0' })
+  assert.equal(warm.status, 206)
+  await warm.arrayBuffer()
+
+  fixture.state.authRecord = await sealAuth('quark-main', {
+    ...defaultAuth,
+    accessToken: 'quark-access-token-refreshed',
+    refreshToken: 'refresh-rotated-by-another-isolate',
+    accessExpiresAt: fixedNow + 360_000,
+  })
+  fixture.state.authExpired = true
+
+  const waiting = await requestMedia(fixture, 'auth-wait-video', { range: 'bytes=100-100' })
+  const waitingError = waiting.status === 206 ? '' : (await waiting.clone().json()).error
+  assert.equal(waiting.status, 206, waitingError)
+  await waiting.arrayBuffer()
+  const fileInfo = fixture.state.apiRequests
+    .filter(value => value.url.includes('/open/v1/file/info'))
+    .at(-1)
+  assert.equal(fileInfo.accessToken, 'quark-access-token-refreshed')
+  assert.equal(fixture.state.storedRefreshes, 0, 'the waiting isolate must use the persisted rotation without rotating stale credentials')
+  const authKey = 'map7e-cloud:storage:auth:v1:quark-main'
+  const authReads = fixture.state.redisRequests.flat()
+    .filter(command => command[0] === 'GET' && command[1] === authKey).length
+  assert.equal(authReads, 2, 'the lock waiter performs a fresh Redis read despite the warm local cache')
+})
+
 test('Worker returns media_gateway_not_configured instead of a generic 502 when storage secrets are absent', async () => {
   const fixture = await createFixture({ envOverrides: {
     UPSTASH_REDIS_REST_URL: undefined,
@@ -647,14 +686,7 @@ test('JPG thumbnail streams with server-side Quark cookie and never returns cred
   assert.equal(imageBytes.byteLength, 3)
   assert.equal(fixture.state.cdnRequests[0].headers.get('cookie'),
     'x_pan_client_id=third_party_agent;x_pan_access_token=quark-access-token-server-only;x_pan_client_token=quark-client-token-server-only')
-  const cookie = cookiePair(response)
-  assert.ok(cookie.startsWith(MEDIA_SESSION_COOKIE))
-  const sessionToken = cookieValue(cookie)
-  assert.ok(sessionToken.length < 4096)
-  const sessionClaims = await verifyGrant(sessionToken, ticketSecret, { now: fixedNow, grantType: 'session' })
-  assert.equal('record' in sessionClaims, false)
-  assert.equal('extra_metadata' in sessionClaims, false)
-  assert.equal(JSON.stringify(sessionClaims).includes('secret-cdn-query'), false)
+  assert.equal(response.headers.get('set-cookie'), null, 'thumbnail previews do not create long-lived file-scoped browser cookies')
   const returned = JSON.stringify({
     headers: [...response.headers.entries()],
     logs: fixture.state.logs,

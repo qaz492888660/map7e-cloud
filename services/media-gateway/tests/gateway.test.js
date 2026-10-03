@@ -148,6 +148,7 @@ await test('SVG previews receive a sandbox CSP on the media response', async () 
     assert.equal(response.status, 200)
     assert.equal(response.headers.get('content-type'), 'image/svg+xml')
     assert.equal(response.headers.get('content-security-policy'), "default-src 'none'; sandbox")
+    assert.equal(response.headers.get('set-cookie'), null, 'preview responses do not create long-lived file-scoped browser cookies')
     await response.arrayBuffer()
   } finally { await closeServer(server) }
 })

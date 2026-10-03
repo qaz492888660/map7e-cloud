@@ -554,13 +554,20 @@ async function sealStoredAuth(storageId, auth, env) {
   })
 }
 
-async function getStoredAuth(storageId, env, fetchImpl, now = Date.now) {
-  return cachedStorageRead(env, 'auth:' + storageId, now, async () => {
+async function getStoredAuth(storageId, env, fetchImpl, now = Date.now, { bypassCache = false } = {}) {
+  const key = 'auth:' + storageId
+  const load = async () => {
     const authKey = storageKey('auth', storageId)
     const values = await redisPipeline([['GET', authKey]], env, fetchImpl)
     if (values[0] == null) throw storageError('storage_authorization_required', 409)
     return decryptStoredAuth(storageId, values[0], env)
-  })
+  }
+  if (bypassCache) {
+    const auth = await load()
+    updateCachedStorageRead(env, key, auth, now)
+    return auth
+  }
+  return cachedStorageRead(env, key, now, load)
 }
 
 async function writeStoredAuth(storageId, auth, env, fetchImpl, now = Date.now) {
@@ -703,7 +710,7 @@ async function rotateQuarkAuth(storageId, before, env, fetchImpl, now) {
     const [acquired] = await redisPipeline([['SET', lockKey, owner, 'NX', 'EX', '90']], env, fetchImpl)
     if (acquired === 'OK') {
       try {
-        const stored = await getStoredAuth(storageId, env, fetchImpl, now)
+        const stored = await getStoredAuth(storageId, env, fetchImpl, now, { bypassCache: true })
         if (authChanged(before, stored)) return stored
         if (!stored.refreshToken || (stored.refreshExpiresAt && stored.refreshExpiresAt <= now())) {
           throw storageError('storage_authorization_required', 401)
@@ -732,7 +739,7 @@ async function rotateQuarkAuth(storageId, before, env, fetchImpl, now) {
       }
     }
     await new Promise(resolve => setTimeout(resolve, 250))
-    const stored = await getStoredAuth(storageId, env, fetchImpl, now)
+    const stored = await getStoredAuth(storageId, env, fetchImpl, now, { bypassCache: true })
     if (authChanged(before, stored)) return stored
   }
   throw storageError('storage_operation_busy', 409)
@@ -1337,7 +1344,7 @@ export function createMediaGatewayWorker({
         }
         const headers = new Headers(cors)
         for (const [name, value] of mediaHeaders(upstream, item, claims, contentType)) headers.set(name, value)
-        if (claims.grantType === 'ticket') {
+        if (claims.grantType === 'ticket' && claims.purpose !== 'preview') {
           const session = await makeSession(claims, secret)
           const cookieName = await mediaSessionCookieName(claims, secret)
           const maxAge = Math.max(0, claims.issuedAt + 6 * 60 * 60 - Math.floor(now() / 1000))
