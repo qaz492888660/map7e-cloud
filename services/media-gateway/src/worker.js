@@ -1,8 +1,11 @@
 import { OFFICIAL_CLIENT_ID, OFFICIAL_SIGN_KEY } from '../../../lib/storage/providers/quark-client.js'
 
-export const MEDIA_GATEWAY_VERSION = '0.2.6'
-export const MEDIA_SESSION_COOKIE = '__Host-map7e-media-'
+export const MEDIA_GATEWAY_VERSION = '0.2.7'
+export const MEDIA_SESSION_COOKIE = '__Host-map7e-media'
 const MAX_RANGE_LENGTH = 128
+const MEDIA_SESSION_COOKIE_MAX_VALUE_LENGTH = 3800
+const MEDIA_SESSION_COOKIE_MAX_GRANTS = 8
+const QUARK_REFRESH_LOCK_WAIT_ATTEMPTS = 120
 const QUARK_API = 'https://open-api-drive.quark.cn'
 const STORE_PREFIX = 'map7e-cloud:'
 const STORAGE_TTL_MS = 10_000
@@ -157,23 +160,42 @@ async function makeSession(claims, secret) {
   return signClaims(session, secret)
 }
 
-async function mediaSessionCookieName(claims, secret) {
-  const disposition = claims.disposition ?? (claims.purpose === 'preview' ? 'inline' : 'attachment')
-  const identity = JSON.stringify([
-    claims.storageId, claims.fileId, claims.parentId, claims.purpose, claims.variant ?? null, disposition,
-  ])
-  return MEDIA_SESSION_COOKIE + bytesToBase64Url(await hmacBytes(secret, identity)).slice(0, 22)
+function sessionTokensFromCookie(header) {
+  if (typeof header !== 'string' || header.length > 8192) return []
+  const part = header.split(';').find(value => value.slice(0, value.indexOf('=')).trim() === MEDIA_SESSION_COOKIE)
+  if (!part) return []
+  const value = part.slice(part.indexOf('=') + 1).trim()
+  if (!value || value.length > MEDIA_SESSION_COOKIE_MAX_VALUE_LENGTH) return []
+  return value.split('~').filter(token => /^[A-Za-z0-9_.-]{40,4096}$/.test(token)).slice(-MEDIA_SESSION_COOKIE_MAX_GRANTS)
 }
 
-function readCookie(header, cookieName) {
-  if (typeof header !== 'string' || header.length > 8192) return null
-  for (const part of header.split(';')) {
-    const separator = part.indexOf('=')
-    if (separator < 0 || part.slice(0, separator).trim() !== cookieName) continue
-    const value = part.slice(separator + 1).trim()
-    return /^[A-Za-z0-9_.-]{40,4096}$/.test(value) ? value : null
+async function validSessionEntries(header, secret, now) {
+  const entries = []
+  for (const token of sessionTokensFromCookie(header)) {
+    try { entries.push({ token, claims: await verifyGrant(token, secret, { now, grantType: 'session' }) }) } catch {}
   }
-  return null
+  return entries
+}
+
+async function sessionFromCookie(header, expectedClaims, secret, now) {
+  return (await validSessionEntries(header, secret, now))
+    .find(entry => sameMediaIdentity(expectedClaims, entry.claims))?.claims || null
+}
+
+async function setSessionCookie(claims, secret, now, cookieHeader) {
+  if (claims.grantType !== 'ticket' || claims.purpose !== 'video') return null
+  const token = await makeSession(claims, secret)
+  const sessionClaims = await verifyGrant(token, secret, { now, grantType: 'session' })
+  const entries = (await validSessionEntries(cookieHeader, secret, now))
+    .filter(entry => !sameMediaIdentity(entry.claims, sessionClaims))
+  entries.push({ token, claims: sessionClaims })
+  while (entries.length > MEDIA_SESSION_COOKIE_MAX_GRANTS
+    || entries.map(entry => entry.token).join('~').length > MEDIA_SESSION_COOKIE_MAX_VALUE_LENGTH) entries.shift()
+  const value = entries.map(entry => entry.token).join('~')
+  const maxAge = Math.max(0, claims.issuedAt + 6 * 60 * 60 - Math.floor(now / 1000))
+  return maxAge > 0 && value
+    ? MEDIA_SESSION_COOKIE + '=' + value + '; Path=/; Max-Age=' + maxAge + '; Secure; HttpOnly; SameSite=Strict'
+    : null
 }
 
 function rangeError(size) {
@@ -700,12 +722,12 @@ async function quarkRequest(path, { method = 'GET', query = {}, body, auth, env,
   return payload
 }
 
-async function rotateQuarkAuth(storageId, before, env, fetchImpl, now) {
+async function rotateQuarkAuth(storageId, before, env, fetchImpl, now, sleep) {
   if (!before.refreshToken || (before.refreshExpiresAt && before.refreshExpiresAt <= now())) {
     throw storageError('storage_authorization_required', 401)
   }
   const lockKey = storageKey('lock', 'refresh-' + storageId)
-  for (let attempt = 0; attempt < 20; attempt += 1) {
+  for (let attempt = 0; attempt < QUARK_REFRESH_LOCK_WAIT_ATTEMPTS; attempt += 1) {
     const owner = crypto.randomUUID()
     const [acquired] = await redisPipeline([['SET', lockKey, owner, 'NX', 'EX', '90']], env, fetchImpl)
     if (acquired === 'OK') {
@@ -738,25 +760,25 @@ async function rotateQuarkAuth(storageId, before, env, fetchImpl, now) {
         await redisPipeline([['EVAL', UNLOCK_LOCK_SCRIPT, '1', lockKey, owner]], env, fetchImpl).catch(() => {})
       }
     }
-    await new Promise(resolve => setTimeout(resolve, 250))
+    await sleep(250)
     const stored = await getStoredAuth(storageId, env, fetchImpl, now, { bypassCache: true })
     if (authChanged(before, stored)) return stored
   }
   throw storageError('storage_operation_busy', 409)
 }
 
-function createQuarkClient(storageId, initialAuth, { env, fetchImpl, now }) {
+function createQuarkClient(storageId, initialAuth, { env, fetchImpl, now, sleep }) {
   let auth = initialAuth
   async function call(path, options = {}) {
     if (!auth || !auth.accessToken) throw storageError('storage_authorization_required', 409)
     if (auth.accessExpiresAt && auth.accessExpiresAt <= now() + 60_000) {
-      auth = await rotateQuarkAuth(storageId, auth, env, fetchImpl, now)
+      auth = await rotateQuarkAuth(storageId, auth, env, fetchImpl, now, sleep)
     }
     try {
       return await quarkRequest(path, { ...options, auth, env, fetchImpl, now })
     } catch (error) {
       if (error.code !== 'storage_token_expired' || !auth.refreshToken) throw error
-      auth = await rotateQuarkAuth(storageId, auth, env, fetchImpl, now)
+      auth = await rotateQuarkAuth(storageId, auth, env, fetchImpl, now, sleep)
       return quarkRequest(path, { ...options, auth, env, fetchImpl, now })
     }
   }
@@ -1140,6 +1162,9 @@ async function resolveMediaResponse(client, claims, item, record, range, ifRange
       requestIfRange: ifRange,
     }, { ...context, signal: request.signal })
   }
+  if (request.method === 'HEAD' && !range && item.size === 0) {
+    return { response: new Response(null, { status: 200, headers: { 'Content-Length': '0' } }) }
+  }
   const headProbe = request.method === 'HEAD' && !range
   const actualRange = range ? range.header : headProbe ? 'bytes=0-0' : undefined
   const downloaded = await requestDownload(client, claims.storageId, claims.fileId, {
@@ -1204,6 +1229,7 @@ export function createMediaGatewayWorker({
   now = Date.now,
   logger = entry => console.log(JSON.stringify(entry)),
   cdnHeaderTimeoutMs = MEDIA_CDN_HEADER_TIMEOUT_MS,
+  sleep = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds)),
 } = {}) {
   return {
     async fetch(request, env = {}) {
@@ -1279,18 +1305,12 @@ export function createMediaGatewayWorker({
         }
         if (!claims) {
           if (!expiredTicketClaims) throw new GatewayError(token ? 'media_ticket_expired' : 'media_ticket_invalid', 401)
-          const cookieName = await mediaSessionCookieName(expiredTicketClaims, secret)
-          const session = readCookie(request.headers.get('cookie'), cookieName)
-          if (!session) throw new GatewayError('media_ticket_expired', 401)
-          const sessionClaims = await verifyGrant(session, secret, { now: now(), grantType: 'session' })
-          if (expiredTicketClaims && !sameMediaIdentity(expiredTicketClaims, sessionClaims)) {
-            throw new GatewayError('media_ticket_invalid', 401)
-          }
-          claims = sessionClaims
+          claims = await sessionFromCookie(request.headers.get('cookie'), expiredTicketClaims, secret, now())
+          if (!claims) throw new GatewayError('media_ticket_expired', 401)
         }
         if (!MEDIA_PURPOSES.has(claims.purpose)) throw new GatewayError('media_ticket_invalid', 401)
         const storage = await resolveStorageForTicket(claims, env, fetchImpl, now)
-        const client = createQuarkClient(claims.storageId, storage.auth, { env, fetchImpl, now })
+        const client = createQuarkClient(claims.storageId, storage.auth, { env, fetchImpl, now, sleep })
         const resolved = await getItemRecord(client, claims.fileId)
         const item = resolved.item
         const expectedParent = claims.parentId === '0' ? '' : claims.parentId
@@ -1344,12 +1364,9 @@ export function createMediaGatewayWorker({
         }
         const headers = new Headers(cors)
         for (const [name, value] of mediaHeaders(upstream, item, claims, contentType)) headers.set(name, value)
-        if (claims.grantType === 'ticket' && claims.purpose !== 'preview') {
-          const session = await makeSession(claims, secret)
-          const cookieName = await mediaSessionCookieName(claims, secret)
-          const maxAge = Math.max(0, claims.issuedAt + 6 * 60 * 60 - Math.floor(now() / 1000))
-          if (maxAge > 0) headers.set('Set-Cookie', cookieName + '=' + session
-            + '; Path=/; Max-Age=' + maxAge + '; Secure; HttpOnly; SameSite=Strict')
+        if (request.method === 'GET') {
+          const sessionCookie = await setSessionCookie(claims, secret, now(), request.headers.get('cookie'))
+          if (sessionCookie) headers.set('Set-Cookie', sessionCookie)
         }
         status = upstream.status
         if (request.method === 'HEAD' || !upstream.body) {

@@ -83,7 +83,15 @@ async function createFixture({
   redisHandler,
   quarkHandler,
   cdnHeaderTimeoutMs,
+  sleep,
+  externalRefreshAfterLockAttempts,
 } = {}) {
+  const externalRefreshRecord = externalRefreshAfterLockAttempts === undefined ? null : await sealAuth('quark-main', {
+    ...auth,
+    accessToken: 'quark-access-token-refreshed',
+    refreshToken: 'refresh-rotated-by-another-isolate',
+    accessExpiresAt: fixedNow + 360_000,
+  })
   const state = {
     files,
     auth,
@@ -96,6 +104,7 @@ async function createFixture({
     media401Remaining: expireFirstMediaUrl ? 1 : 0,
     authExpired: authorizeRefresh,
     storedRefreshes: 0,
+    lockAttempts: 0,
   }
   const env = {
     MEDIA_GATEWAY_SIGNING_SECRET: ticketSecret,
@@ -127,7 +136,11 @@ async function createFixture({
         if (command[0] === 'GET' && command[1] === 'map7e-cloud:storage:config:v1:') return JSON.stringify(config)
         if (command[0] === 'GET' && command[1] === 'map7e-cloud:storage:auth:v1:quark-main') return state.authRecord
         if (command[0] === 'GET' && command[1] === 'map7e-cloud:storage:lock:v1:refresh-quark-main') return null
-        if (command[0] === 'SET' && command[1] === 'map7e-cloud:storage:lock:v1:refresh-quark-main') return 'OK'
+        if (command[0] === 'SET' && command[1] === 'map7e-cloud:storage:lock:v1:refresh-quark-main') {
+          state.lockAttempts += 1
+          if (state.lockAttempts === externalRefreshAfterLockAttempts) state.authRecord = externalRefreshRecord
+          return externalRefreshAfterLockAttempts !== undefined && state.lockAttempts <= externalRefreshAfterLockAttempts ? null : 'OK'
+        }
         if (command[0] === 'SET' && command[1] === 'map7e-cloud:storage:auth:v1:quark-main') {
           state.authRecord = command[2]
           state.storedRefreshes += 1
@@ -223,6 +236,7 @@ async function createFixture({
     now: () => nowValue,
     logger: entry => state.logs.push(entry),
     ...(cdnHeaderTimeoutMs === undefined ? {} : { cdnHeaderTimeoutMs }),
+    ...(sleep === undefined ? {} : { sleep }),
   })
   return { worker, env, state, setNow(value) { nowValue = value } }
 }
@@ -262,7 +276,7 @@ test('Worker health is minimal and works without media secrets', async () => {
   const fixture = await createFixture({ envOverrides: { MEDIA_GATEWAY_SIGNING_SECRET: undefined } })
   const response = await fixture.worker.fetch(new Request('https://media.example.test/health'), fixture.env)
   assert.equal(response.status, 200)
-  assert.deepEqual(await response.json(), { ok: true, version: '0.2.6' })
+  assert.deepEqual(await response.json(), { ok: true, version: '0.2.7' })
   assert.equal(fixture.state.redisRequests.length, 0)
 })
 
@@ -291,13 +305,11 @@ test('Worker caches storage config and auth across independent Range requests fo
 })
 
 test('Worker bypasses cached auth while waiting for another isolate to rotate the token', async () => {
-  const lockKey = 'map7e-cloud:storage:lock:v1:refresh-quark-main'
+  const externalRefreshAfterLockAttempts = 25
   const fixture = await createFixture({
+    sleep: async () => {},
+    externalRefreshAfterLockAttempts,
     redisHandler: async ({ init }) => {
-      const commands = JSON.parse(init.body)
-      if (commands.some(command => command[0] === 'SET' && command[1] === lockKey)) {
-        return jsonResponse([{ result: null }])
-      }
       return null
     },
   })
@@ -306,12 +318,6 @@ test('Worker bypasses cached auth while waiting for another isolate to rotate th
   assert.equal(warm.status, 206)
   await warm.arrayBuffer()
 
-  fixture.state.authRecord = await sealAuth('quark-main', {
-    ...defaultAuth,
-    accessToken: 'quark-access-token-refreshed',
-    refreshToken: 'refresh-rotated-by-another-isolate',
-    accessExpiresAt: fixedNow + 360_000,
-  })
   fixture.state.authExpired = true
 
   const waiting = await requestMedia(fixture, 'auth-wait-video', { range: 'bytes=100-100' })
@@ -323,10 +329,11 @@ test('Worker bypasses cached auth while waiting for another isolate to rotate th
     .at(-1)
   assert.equal(fileInfo.accessToken, 'quark-access-token-refreshed')
   assert.equal(fixture.state.storedRefreshes, 0, 'the waiting isolate must use the persisted rotation without rotating stale credentials')
+  assert.equal(fixture.state.lockAttempts, externalRefreshAfterLockAttempts)
   const authKey = 'map7e-cloud:storage:auth:v1:quark-main'
   const authReads = fixture.state.redisRequests.flat()
     .filter(command => command[0] === 'GET' && command[1] === authKey).length
-  assert.equal(authReads, 2, 'the lock waiter performs a fresh Redis read despite the warm local cache')
+  assert.equal(authReads, externalRefreshAfterLockAttempts + 1, 'every lock wait checks fresh Redis auth despite the warm local cache')
 })
 
 test('Worker returns media_gateway_not_configured instead of a generic 502 when storage secrets are absent', async () => {
@@ -593,6 +600,19 @@ test('Worker validates its synthetic HEAD Range probe before claiming range supp
   assert.equal(ignored.state.logs[0].status, 502)
 })
 
+test('Worker answers HEAD for a zero-byte original without probing Quark', async () => {
+  let cdnCalls = 0
+  const fixture = await createFixture({
+    files: { 'empty-video': mediaFile('empty-video', { file_name: 'empty.mp4', size: 0 }) },
+    cdnHandler: async () => { cdnCalls += 1; throw new Error('empty media must not reach CDN') },
+  })
+  const response = await requestMedia(fixture, 'empty-video', { method: 'HEAD' })
+  assert.equal(response.status, 200)
+  assert.equal(response.headers.get('content-type'), 'video/mp4')
+  assert.equal(response.headers.get('content-length'), '0')
+  assert.equal(cdnCalls, 0)
+})
+
 test('Worker defaults video downloads to attachment and preserves explicit inline previews', async () => {
   const fixture = await createFixture()
   const download = await requestMedia(fixture, 'download-video')
@@ -615,6 +635,7 @@ test('Worker keeps explicitly inline original media inline', async () => {
   assert.equal(response.status, 200)
   assert.match(response.headers.get('content-disposition'), /^inline;/)
   assert.equal(response.headers.get('content-security-policy'), "default-src 'none'; sandbox")
+  assert.equal(response.headers.get('set-cookie'), null, 'one-shot original responses do not create session cookies')
   await response.arrayBuffer()
 })
 
@@ -898,15 +919,18 @@ test('Worker keeps independent sessions for concurrently opened media files', as
   await firstA.arrayBuffer()
   const firstB = await fixture.worker.fetch(new Request(
     'https://media.example.test/v1/media?ticket=' + encodeURIComponent(tokenB),
-    { headers: { Range: 'bytes=0-0', Origin: allowedOrigin } },
+    { headers: { Range: 'bytes=0-0', Cookie: cookieA, Origin: allowedOrigin } },
   ), fixture.env)
   assert.equal(firstB.status, 206)
   const cookieB = cookiePair(firstB)
   await firstB.arrayBuffer()
-  assert.notEqual(cookieA.split('=', 1)[0], cookieB.split('=', 1)[0])
+  assert.equal(cookieA.split('=', 1)[0], MEDIA_SESSION_COOKIE)
+  assert.equal(cookieB.split('=', 1)[0], MEDIA_SESSION_COOKIE)
+  assert.equal(cookieValue(cookieB).split('~').length, 2)
+  assert.ok(cookieValue(cookieB).length <= 3800)
 
   fixture.setNow(fixedNow + 301_000)
-  const cookieHeader = cookieA + '; ' + cookieB
+  const cookieHeader = cookieB
   const resumedA = await fixture.worker.fetch(new Request(
     'https://media.example.test/v1/media?ticket=' + encodeURIComponent(tokenA),
     { headers: { Range: 'bytes=100-101', Cookie: cookieHeader, Origin: allowedOrigin } },
@@ -920,6 +944,43 @@ test('Worker keeps independent sessions for concurrently opened media files', as
   assert.equal(resumedB.status, 206)
   assert.equal(resumedB.headers.get('content-range'), 'bytes 200-201/32212254720')
   await resumedB.arrayBuffer()
+})
+
+test('Worker bounds its video session cookie to eight grants and evicts the oldest grant', async () => {
+  const fixture = await createFixture()
+  let cookie = ''
+  let oldestTicket = ''
+  let newestTicket = ''
+  for (let index = 0; index < 10; index += 1) {
+    const fileId = 'bounded-video-' + index
+    const token = ticketFor(fileId, {}, fixedNow)
+    if (index === 0) oldestTicket = token
+    if (index === 9) newestTicket = token
+    const response = await fixture.worker.fetch(new Request(
+      'https://media.example.test/v1/media?ticket=' + encodeURIComponent(token),
+      { headers: { Range: 'bytes=0-0', ...(cookie ? { Cookie: cookie } : {}), Origin: allowedOrigin } },
+    ), fixture.env)
+    assert.equal(response.status, 206)
+    cookie = cookiePair(response)
+    await response.arrayBuffer()
+  }
+  assert.equal(cookie.split('=', 1)[0], MEDIA_SESSION_COOKIE)
+  assert.equal(cookieValue(cookie).split('~').length, 8)
+  assert.ok(cookieValue(cookie).length <= 3800)
+  fixture.setNow(fixedNow + 301_000)
+  const oldest = await fixture.worker.fetch(new Request(
+    'https://media.example.test/v1/media?ticket=' + encodeURIComponent(oldestTicket),
+    { headers: { Range: 'bytes=100-100', Cookie: cookie, Origin: allowedOrigin } },
+  ), fixture.env)
+  assert.equal(oldest.status, 401)
+  assert.equal((await oldest.json()).error, 'media_ticket_expired')
+  const newest = await fixture.worker.fetch(new Request(
+    'https://media.example.test/v1/media?ticket=' + encodeURIComponent(newestTicket),
+    { headers: { Range: 'bytes=200-200', Cookie: cookie, Origin: allowedOrigin } },
+  ), fixture.env)
+  assert.equal(newest.status, 206)
+  assert.equal(newest.headers.get('content-range'), 'bytes 200-200/32212254720')
+  await newest.arrayBuffer()
 })
 
 test('wrong Origin, method, arbitrary URL and invalid FID do not reach Quark media', async () => {

@@ -928,6 +928,37 @@ await test('concurrent Quark providers wait for the winning token refresh instea
   assert.equal(rotateCount, 1)
 })
 
+await test('Quark refresh lock waiter reads a rotation that completes after more than 20 polls', async () => {
+  await writeAuth('quark-main', { accessToken: 'late-expired', refreshToken: 'late-refresh', deviceId: 'device', accessExpiresAt: 1 })
+  const initial = await readAuth('quark-main')
+  let releaseLock
+  const lockHeld = withLock('refresh-quark-main', () => new Promise(resolve => { releaseLock = resolve }))
+  await new Promise(resolve => setImmediate(resolve))
+  let polls = 0
+  const provider = createQuarkProvider({ storageId: 'quark-main' }, { ...initial }, {
+    sleep: async () => {
+      polls += 1
+      if (polls === 25) {
+        await writeAuth('quark-main', {
+          ...initial,
+          accessToken: 'late-rotated',
+          refreshToken: 'late-refresh-2',
+          accessExpiresAt: Date.now() + 7_200_000,
+        })
+        releaseLock()
+      }
+    },
+  })
+  upstream = async url => url.pathname.endsWith('/user/get_vip_info')
+    ? { status: 0, data: { capacity: '100', used: '25' } }
+    : { status: 0, data: { nickname: 'test' } }
+  const quota = await provider.getQuota()
+  await lockHeld
+  assert.deepEqual(quota, { total: 100, used: 25, free: 75 })
+  assert.equal(polls, 25)
+  assert.equal((await readAuth('quark-main', { fresh: true })).accessToken, 'late-rotated')
+})
+
 await test('adding a secondary PikPak instance validates its PAT before persistence', async () => {
   await writeConfig({ version: 1, defaultStorageId: 'pikpak-main', instances: [
     { storageId: 'pikpak-main', provider: 'pikpak', displayName: 'PikPak', enabled: true },
