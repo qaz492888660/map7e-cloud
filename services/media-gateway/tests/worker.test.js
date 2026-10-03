@@ -257,7 +257,7 @@ test('Worker health is minimal and works without media secrets', async () => {
   const fixture = await createFixture({ envOverrides: { MEDIA_GATEWAY_SIGNING_SECRET: undefined } })
   const response = await fixture.worker.fetch(new Request('https://media.example.test/health'), fixture.env)
   assert.equal(response.status, 200)
-  assert.deepEqual(await response.json(), { ok: true, version: '0.2.3' })
+  assert.deepEqual(await response.json(), { ok: true, version: '0.2.4' })
   assert.equal(fixture.state.redisRequests.length, 0)
 })
 
