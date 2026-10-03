@@ -31,6 +31,9 @@ function jsonResponse(value, status = 200, headers = {}) {
   return new Response(JSON.stringify(value), { status, headers: { 'Content-Type': 'application/json', ...headers } })
 }
 
+function cookiePair(response) { return response.headers.get('set-cookie').split(';', 1)[0] }
+function cookieValue(pair) { return pair.slice(pair.indexOf('=') + 1) }
+
 async function sealAuth(storageId, auth, secret = encryptionSecret) {
   const key = crypto.createHash('sha256').update('map7e-storage-v1\u0000' + secret).digest()
   const iv = crypto.randomBytes(12)
@@ -257,7 +260,7 @@ test('Worker health is minimal and works without media secrets', async () => {
   const fixture = await createFixture({ envOverrides: { MEDIA_GATEWAY_SIGNING_SECRET: undefined } })
   const response = await fixture.worker.fetch(new Request('https://media.example.test/health'), fixture.env)
   assert.equal(response.status, 200)
-  assert.deepEqual(await response.json(), { ok: true, version: '0.2.4' })
+  assert.deepEqual(await response.json(), { ok: true, version: '0.2.5' })
   assert.equal(fixture.state.redisRequests.length, 0)
 })
 
@@ -491,6 +494,7 @@ test('Worker keeps explicitly inline original media inline', async () => {
   ), fixture.env)
   assert.equal(response.status, 200)
   assert.match(response.headers.get('content-disposition'), /^inline;/)
+  assert.equal(response.headers.get('content-security-policy'), "default-src 'none'; sandbox")
   await response.arrayBuffer()
 })
 
@@ -562,8 +566,9 @@ test('JPG thumbnail streams with server-side Quark cookie and never returns cred
   assert.equal(imageBytes.byteLength, 3)
   assert.equal(fixture.state.cdnRequests[0].headers.get('cookie'),
     'x_pan_client_id=third_party_agent;x_pan_access_token=quark-access-token-server-only;x_pan_client_token=quark-client-token-server-only')
-  const cookie = response.headers.get('set-cookie').split(';', 1)[0]
-  const sessionToken = cookie.slice(MEDIA_SESSION_COOKIE.length + 1)
+  const cookie = cookiePair(response)
+  assert.ok(cookie.startsWith(MEDIA_SESSION_COOKIE))
+  const sessionToken = cookieValue(cookie)
   assert.ok(sessionToken.length < 4096)
   const sessionClaims = await verifyGrant(sessionToken, ticketSecret, { now: fixedNow, grantType: 'session' })
   assert.equal('record' in sessionClaims, false)
@@ -720,8 +725,8 @@ test('ticket and session support independent seeks after the five-minute ticket 
     { headers: { Range: 'bytes=0-0', Origin: allowedOrigin } },
   ), fixture.env)
   assert.equal(first.status, 206)
-  const cookie = first.headers.get('set-cookie').split(';', 1)[0]
-  const sessionToken = cookie.slice(MEDIA_SESSION_COOKIE.length + 1)
+  const cookie = cookiePair(first)
+  const sessionToken = cookieValue(cookie)
   const initialSession = await verifyGrant(sessionToken, ticketSecret, { now: fixedNow, grantType: 'session' })
   assert.equal(initialSession.expiresAt, Math.floor(fixedNow / 1000) + 6 * 60 * 60)
   fixture.setNow(fixedNow + 301_000)
@@ -744,7 +749,7 @@ test('expired Worker ticket cannot consume another file session', async () => {
     { headers: { Range: 'bytes=0-0', Origin: allowedOrigin } },
   ), fixture.env)
   assert.equal(first.status, 206)
-  const cookie = first.headers.get('set-cookie').split(';', 1)[0]
+  const cookie = cookiePair(first)
   await first.arrayBuffer()
   const apiCalls = fixture.state.apiRequests.length
   fixture.setNow(fixedNow + 301_000)
@@ -754,8 +759,45 @@ test('expired Worker ticket cannot consume another file session', async () => {
     { headers: { Range: 'bytes=1-1', Cookie: cookie, Origin: allowedOrigin } },
   ), fixture.env)
   assert.equal(second.status, 401)
-  assert.equal((await second.json()).error, 'media_ticket_invalid')
+  assert.equal((await second.json()).error, 'media_ticket_expired')
   assert.equal(fixture.state.apiRequests.length, apiCalls, 'a mismatched grant is rejected before Provider lookup')
+})
+
+test('Worker keeps independent sessions for concurrently opened media files', async () => {
+  const fixture = await createFixture()
+  const tokenA = ticketFor('video-A', {}, fixedNow)
+  const tokenB = ticketFor('video-B', {}, fixedNow)
+  const firstA = await fixture.worker.fetch(new Request(
+    'https://media.example.test/v1/media?ticket=' + encodeURIComponent(tokenA),
+    { headers: { Range: 'bytes=0-0', Origin: allowedOrigin } },
+  ), fixture.env)
+  assert.equal(firstA.status, 206)
+  const cookieA = cookiePair(firstA)
+  await firstA.arrayBuffer()
+  const firstB = await fixture.worker.fetch(new Request(
+    'https://media.example.test/v1/media?ticket=' + encodeURIComponent(tokenB),
+    { headers: { Range: 'bytes=0-0', Origin: allowedOrigin } },
+  ), fixture.env)
+  assert.equal(firstB.status, 206)
+  const cookieB = cookiePair(firstB)
+  await firstB.arrayBuffer()
+  assert.notEqual(cookieA.split('=', 1)[0], cookieB.split('=', 1)[0])
+
+  fixture.setNow(fixedNow + 301_000)
+  const cookieHeader = cookieA + '; ' + cookieB
+  const resumedA = await fixture.worker.fetch(new Request(
+    'https://media.example.test/v1/media?ticket=' + encodeURIComponent(tokenA),
+    { headers: { Range: 'bytes=100-101', Cookie: cookieHeader, Origin: allowedOrigin } },
+  ), fixture.env)
+  assert.equal(resumedA.status, 206)
+  await resumedA.arrayBuffer()
+  const resumedB = await fixture.worker.fetch(new Request(
+    'https://media.example.test/v1/media?ticket=' + encodeURIComponent(tokenB),
+    { headers: { Range: 'bytes=200-201', Cookie: cookieHeader, Origin: allowedOrigin } },
+  ), fixture.env)
+  assert.equal(resumedB.status, 206)
+  assert.equal(resumedB.headers.get('content-range'), 'bytes 200-201/32212254720')
+  await resumedB.arrayBuffer()
 })
 
 test('wrong Origin, method, arbitrary URL and invalid FID do not reach Quark media', async () => {
