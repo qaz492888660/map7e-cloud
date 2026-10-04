@@ -126,7 +126,7 @@ await test('video first and middle Range requests stream as 206 with safe header
   }
   const { server, baseUrl } = await startServer({ provider, logs })
   try {
-    const grant = ticket()
+    const grant = ticket({ disposition: 'inline' })
     const first = await fetch(`${baseUrl}/v1/media?ticket=${encodeURIComponent(grant)}`, { headers: { Range: 'bytes=0-1023', 'If-Range': '"media-v1"', Origin: allowedOrigin } })
     assert.equal(first.status, 206)
     assert.equal(first.headers.get('content-type'), 'video/mp4')
@@ -213,7 +213,7 @@ await test('short ticket establishes a scoped session so later Range requests su
   }
   const { server, baseUrl } = await startServer({ provider, now: () => now })
   try {
-    const grant = ticket({}, now)
+    const grant = ticket({ disposition: 'inline' }, now)
     const first = await fetch(`${baseUrl}/v1/media?ticket=${encodeURIComponent(grant)}`, { headers: { Range: 'bytes=0-0' } })
     assert.equal(first.status, 206)
     const sessionCookie = cookiePair(first)
@@ -242,7 +242,7 @@ await test('expired ticket cannot use a different file session and original down
   }
   const { server, baseUrl } = await startServer({ provider, now: () => now })
   try {
-    const fileATicket = ticket({ fileId: 'video-A' }, now)
+    const fileATicket = ticket({ fileId: 'video-A', disposition: 'inline' }, now)
     const first = await fetch(`${baseUrl}/v1/media?ticket=${encodeURIComponent(fileATicket)}`, { headers: { Range: 'bytes=0-0' } })
     const cookie = cookiePair(first)
     await first.arrayBuffer()
@@ -254,7 +254,7 @@ await test('expired ticket cannot use a different file session and original down
     assert.equal(inline.headers.get('set-cookie'), null, 'one-shot original responses do not create session cookies')
     await inline.arrayBuffer()
 
-    const fileBTicket = ticket({ fileId: 'video-B' }, now)
+    const fileBTicket = ticket({ fileId: 'video-B', disposition: 'inline' }, now)
     now += 301_000
     const mismatched = await fetch(`${baseUrl}/v1/media?ticket=${encodeURIComponent(fileBTicket)}`, {
       headers: { Range: 'bytes=1-1', Cookie: cookie },
@@ -262,10 +262,18 @@ await test('expired ticket cannot use a different file session and original down
     assert.equal(mismatched.status, 401)
     assert.equal((await mismatched.json()).error, 'media_ticket_expired')
     assert.deepEqual(reads, ['video-A', 'document.pdf'], 'a mismatched expired ticket is rejected before a file lookup')
+
+    const videoDownload = ticket({ fileId: 'video-download', disposition: 'attachment' }, now)
+    const download = await fetch(`${baseUrl}/v1/media?ticket=${encodeURIComponent(videoDownload)}`, {
+      headers: { Range: 'bytes=0-0' },
+    })
+    assert.equal(download.status, 206)
+    assert.equal(download.headers.get('set-cookie'), null, 'one-shot video downloads do not create session cookies')
+    await download.arrayBuffer()
   } finally { await closeServer(server) }
 })
 
-await test('parallel media files retain independent sessions after their tickets expire', async () => {
+await test('simultaneous first requests keep video sessions independent by media identity', async () => {
   let now = 1_800_000_000_000
   const provider = {
     getItem: async id => createItem({ id }),
@@ -273,28 +281,32 @@ await test('parallel media files retain independent sessions after their tickets
   }
   const { server, baseUrl } = await startServer({ provider, now: () => now })
   try {
-    const ticketA = ticket({ fileId: 'video-A' }, now)
-    const ticketB = ticket({ fileId: 'video-B' }, now)
-    const firstA = await fetch(`${baseUrl}/v1/media?ticket=${encodeURIComponent(ticketA)}`, { headers: { Range: 'bytes=0-0' } })
+    const ticketA = ticket({ fileId: 'video-A', disposition: 'inline' }, now)
+    const ticketB = ticket({ fileId: 'video-B', disposition: 'inline' }, now)
+    // Both initial requests use the same empty cookie snapshot.
+    const [firstA, firstB] = await Promise.all([
+      fetch(baseUrl + '/v1/media?ticket=' + encodeURIComponent(ticketA), { headers: { Range: 'bytes=0-0' } }),
+      fetch(baseUrl + '/v1/media?ticket=' + encodeURIComponent(ticketB), { headers: { Range: 'bytes=0-0' } }),
+    ])
+    assert.equal(firstA.status, 206)
+    assert.equal(firstB.status, 206)
     const cookieA = cookiePair(firstA)
-    await firstA.arrayBuffer()
-    // Keep both independent video sessions in the same bounded browser cookie.
-    const firstB = await fetch(`${baseUrl}/v1/media?ticket=${encodeURIComponent(ticketB)}`, { headers: { Range: 'bytes=0-0', Cookie: cookieA } })
     const cookieB = cookiePair(firstB)
-    await firstB.arrayBuffer()
-    assert.equal(cookieA.split('=', 1)[0], MEDIA_SESSION_COOKIE)
-    assert.equal(cookieB.split('=', 1)[0], MEDIA_SESSION_COOKIE)
-    assert.equal(cookieValue(cookieB).split('~').length, 2)
-    assert.ok(cookieValue(cookieB).length <= 3800)
+    await Promise.all([firstA.arrayBuffer(), firstB.arrayBuffer()])
+    const nameA = cookieA.split('=', 1)[0]
+    const nameB = cookieB.split('=', 1)[0]
+    assert.ok(nameA.startsWith(MEDIA_SESSION_COOKIE))
+    assert.ok(nameB.startsWith(MEDIA_SESSION_COOKIE))
+    assert.notEqual(nameA, nameB)
 
     now += 301_000
-    const cookieHeader = cookieB
-    const resumedA = await fetch(`${baseUrl}/v1/media?ticket=${encodeURIComponent(ticketA)}`, {
+    const cookieHeader = cookieA + '; ' + cookieB
+    const resumedA = await fetch(baseUrl + '/v1/media?ticket=' + encodeURIComponent(ticketA), {
       headers: { Range: 'bytes=100-101', Cookie: cookieHeader },
     })
     assert.equal(resumedA.status, 206)
     await resumedA.arrayBuffer()
-    const resumedB = await fetch(`${baseUrl}/v1/media?ticket=${encodeURIComponent(ticketB)}`, {
+    const resumedB = await fetch(baseUrl + '/v1/media?ticket=' + encodeURIComponent(ticketB), {
       headers: { Range: 'bytes=200-201', Cookie: cookieHeader },
     })
     assert.equal(resumedB.status, 206)
@@ -303,43 +315,34 @@ await test('parallel media files retain independent sessions after their tickets
   } finally { await closeServer(server) }
 })
 
-await test('video session cookie is bounded to eight grants and evicts the oldest grant', async () => {
-  let now = 1_800_000_000_000
+await test('filename truncation keeps Unicode Content-Disposition headers well formed', async () => {
+  const names = {
+    'emoji-video': 'x'.repeat(239) + '😀.mp4',
+    'lone-video': 'bad\uD800.mp4',
+  }
   const provider = {
-    getItem: async id => createItem({ id }),
+    getItem: async id => createItem({ id, name: names[id] }),
     getFileResponse: async (_id, { range }) => partialResponse(range || 'bytes=0-0'),
   }
+  const now = 1_800_000_000_000
   const { server, baseUrl } = await startServer({ provider, now: () => now })
   try {
-    let cookie = ''
-    let oldestTicket = ''
-    let newestTicket = ''
-    for (let index = 0; index < 10; index += 1) {
-      const token = ticket({ fileId: 'bounded-video-' + index }, now)
-      if (index === 0) oldestTicket = token
-      if (index === 9) newestTicket = token
-      const response = await fetch(`${baseUrl}/v1/media?ticket=${encodeURIComponent(token)}`, {
-        headers: { Range: 'bytes=0-0', ...(cookie ? { Cookie: cookie } : {}) },
+    const cases = [
+      ['emoji-video', 'x'.repeat(239)],
+      ['lone-video', 'bad\uFFFD.mp4'],
+    ]
+    for (const [fileId, expected] of cases) {
+      const grant = ticket({ fileId }, now)
+      const response = await fetch(baseUrl + '/v1/media?ticket=' + encodeURIComponent(grant), {
+        headers: { Range: 'bytes=0-0' },
       })
       assert.equal(response.status, 206)
-      cookie = cookiePair(response)
+      const disposition = response.headers.get('content-disposition')
+      const encodedName = /filename\*=UTF-8''([^;]+)/.exec(disposition)?.[1]
+      assert.ok(encodedName)
+      assert.equal(decodeURIComponent(encodedName), expected)
       await response.arrayBuffer()
     }
-    assert.equal(cookie.split('=', 1)[0], MEDIA_SESSION_COOKIE)
-    assert.equal(cookieValue(cookie).split('~').length, 8)
-    assert.ok(cookieValue(cookie).length <= 3800)
-    now += 301_000
-    const oldest = await fetch(`${baseUrl}/v1/media?ticket=${encodeURIComponent(oldestTicket)}`, {
-      headers: { Range: 'bytes=100-100', Cookie: cookie },
-    })
-    assert.equal(oldest.status, 401)
-    assert.equal((await oldest.json()).error, 'media_ticket_expired')
-    const newest = await fetch(`${baseUrl}/v1/media?ticket=${encodeURIComponent(newestTicket)}`, {
-      headers: { Range: 'bytes=200-200', Cookie: cookie },
-    })
-    assert.equal(newest.status, 206)
-    assert.equal(newest.headers.get('content-range'), 'bytes 200-200/32212254720')
-    await newest.arrayBuffer()
   } finally { await closeServer(server) }
 })
 

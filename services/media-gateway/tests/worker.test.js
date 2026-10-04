@@ -276,7 +276,7 @@ test('Worker health is minimal and works without media secrets', async () => {
   const fixture = await createFixture({ envOverrides: { MEDIA_GATEWAY_SIGNING_SECRET: undefined } })
   const response = await fixture.worker.fetch(new Request('https://media.example.test/health'), fixture.env)
   assert.equal(response.status, 200)
-  assert.deepEqual(await response.json(), { ok: true, version: '0.2.7' })
+  assert.deepEqual(await response.json(), { ok: true, version: '0.2.8' })
   assert.equal(fixture.state.redisRequests.length, 0)
 })
 
@@ -637,6 +637,15 @@ test('Worker keeps explicitly inline original media inline', async () => {
   assert.equal(response.headers.get('content-security-policy'), "default-src 'none'; sandbox")
   assert.equal(response.headers.get('set-cookie'), null, 'one-shot original responses do not create session cookies')
   await response.arrayBuffer()
+
+  const downloadToken = ticketFor('video-download', { disposition: 'attachment' })
+  const download = await fixture.worker.fetch(new Request(
+    'https://media.example.test/v1/media?ticket=' + encodeURIComponent(downloadToken),
+    { headers: { Range: 'bytes=0-0', Origin: allowedOrigin } },
+  ), fixture.env)
+  assert.equal(download.status, 206)
+  assert.equal(download.headers.get('set-cookie'), null, 'one-shot video downloads do not create session cookies')
+  await download.arrayBuffer()
 })
 
 test('Worker infers all ticketed video extensions when Quark returns octet-stream', async () => {
@@ -862,7 +871,7 @@ test('expired Quark access token is refreshed once and encrypted auth is written
 
 test('ticket and session support independent seeks after the five-minute ticket expires without renewing the grant', async () => {
   const fixture = await createFixture()
-  const token = ticketFor('seek-video', {}, fixedNow)
+  const token = ticketFor('seek-video', { disposition: 'inline' }, fixedNow)
   const first = await fixture.worker.fetch(new Request(
     'https://media.example.test/v1/media?ticket=' + encodeURIComponent(token),
     { headers: { Range: 'bytes=0-0', Origin: allowedOrigin } },
@@ -886,7 +895,7 @@ test('ticket and session support independent seeks after the five-minute ticket 
 
 test('expired Worker ticket cannot consume another file session', async () => {
   const fixture = await createFixture()
-  const firstToken = ticketFor('video-A', {}, fixedNow)
+  const firstToken = ticketFor('video-A', { disposition: 'inline' }, fixedNow)
   const first = await fixture.worker.fetch(new Request(
     'https://media.example.test/v1/media?ticket=' + encodeURIComponent(firstToken),
     { headers: { Range: 'bytes=0-0', Origin: allowedOrigin } },
@@ -896,7 +905,7 @@ test('expired Worker ticket cannot consume another file session', async () => {
   await first.arrayBuffer()
   const apiCalls = fixture.state.apiRequests.length
   fixture.setNow(fixedNow + 301_000)
-  const secondToken = ticketFor('video-B', {}, fixedNow)
+  const secondToken = ticketFor('video-B', { disposition: 'inline' }, fixedNow)
   const second = await fixture.worker.fetch(new Request(
     'https://media.example.test/v1/media?ticket=' + encodeURIComponent(secondToken),
     { headers: { Range: 'bytes=1-1', Cookie: cookie, Origin: allowedOrigin } },
@@ -906,31 +915,34 @@ test('expired Worker ticket cannot consume another file session', async () => {
   assert.equal(fixture.state.apiRequests.length, apiCalls, 'a mismatched grant is rejected before Provider lookup')
 })
 
-test('Worker keeps independent sessions for concurrently opened media files', async () => {
+test('Worker preserves video sessions from simultaneous initial requests', async () => {
   const fixture = await createFixture()
-  const tokenA = ticketFor('video-A', {}, fixedNow)
-  const tokenB = ticketFor('video-B', {}, fixedNow)
-  const firstA = await fixture.worker.fetch(new Request(
-    'https://media.example.test/v1/media?ticket=' + encodeURIComponent(tokenA),
-    { headers: { Range: 'bytes=0-0', Origin: allowedOrigin } },
-  ), fixture.env)
+  const tokenA = ticketFor('video-A', { disposition: 'inline' }, fixedNow)
+  const tokenB = ticketFor('video-B', { disposition: 'inline' }, fixedNow)
+  // Both initial requests use the same empty cookie snapshot.
+  const [firstA, firstB] = await Promise.all([
+    fixture.worker.fetch(new Request(
+      'https://media.example.test/v1/media?ticket=' + encodeURIComponent(tokenA),
+      { headers: { Range: 'bytes=0-0', Origin: allowedOrigin } },
+    ), fixture.env),
+    fixture.worker.fetch(new Request(
+      'https://media.example.test/v1/media?ticket=' + encodeURIComponent(tokenB),
+      { headers: { Range: 'bytes=0-0', Origin: allowedOrigin } },
+    ), fixture.env),
+  ])
   assert.equal(firstA.status, 206)
-  const cookieA = cookiePair(firstA)
-  await firstA.arrayBuffer()
-  const firstB = await fixture.worker.fetch(new Request(
-    'https://media.example.test/v1/media?ticket=' + encodeURIComponent(tokenB),
-    { headers: { Range: 'bytes=0-0', Cookie: cookieA, Origin: allowedOrigin } },
-  ), fixture.env)
   assert.equal(firstB.status, 206)
+  const cookieA = cookiePair(firstA)
   const cookieB = cookiePair(firstB)
-  await firstB.arrayBuffer()
-  assert.equal(cookieA.split('=', 1)[0], MEDIA_SESSION_COOKIE)
-  assert.equal(cookieB.split('=', 1)[0], MEDIA_SESSION_COOKIE)
-  assert.equal(cookieValue(cookieB).split('~').length, 2)
-  assert.ok(cookieValue(cookieB).length <= 3800)
+  await Promise.all([firstA.arrayBuffer(), firstB.arrayBuffer()])
+  const nameA = cookieA.split('=', 1)[0]
+  const nameB = cookieB.split('=', 1)[0]
+  assert.ok(nameA.startsWith(MEDIA_SESSION_COOKIE))
+  assert.ok(nameB.startsWith(MEDIA_SESSION_COOKIE))
+  assert.notEqual(nameA, nameB)
 
   fixture.setNow(fixedNow + 301_000)
-  const cookieHeader = cookieB
+  const cookieHeader = cookieA + '; ' + cookieB
   const resumedA = await fixture.worker.fetch(new Request(
     'https://media.example.test/v1/media?ticket=' + encodeURIComponent(tokenA),
     { headers: { Range: 'bytes=100-101', Cookie: cookieHeader, Origin: allowedOrigin } },
@@ -946,41 +958,29 @@ test('Worker keeps independent sessions for concurrently opened media files', as
   await resumedB.arrayBuffer()
 })
 
-test('Worker bounds its video session cookie to eight grants and evicts the oldest grant', async () => {
-  const fixture = await createFixture()
-  let cookie = ''
-  let oldestTicket = ''
-  let newestTicket = ''
-  for (let index = 0; index < 10; index += 1) {
-    const fileId = 'bounded-video-' + index
+test('Worker filename truncation keeps Unicode Content-Disposition headers well formed', async () => {
+  const files = {
+    'emoji-video': mediaFile('emoji-video', { file_name: 'x'.repeat(239) + '😀.mp4' }),
+    'lone-video': mediaFile('lone-video', { file_name: 'bad\uD800.mp4' }),
+  }
+  const fixture = await createFixture({ files })
+  const cases = [
+    ['emoji-video', 'x'.repeat(239)],
+    ['lone-video', 'bad\uFFFD.mp4'],
+  ]
+  for (const [fileId, expected] of cases) {
     const token = ticketFor(fileId, {}, fixedNow)
-    if (index === 0) oldestTicket = token
-    if (index === 9) newestTicket = token
     const response = await fixture.worker.fetch(new Request(
       'https://media.example.test/v1/media?ticket=' + encodeURIComponent(token),
-      { headers: { Range: 'bytes=0-0', ...(cookie ? { Cookie: cookie } : {}), Origin: allowedOrigin } },
+      { headers: { Range: 'bytes=0-0', Origin: allowedOrigin } },
     ), fixture.env)
     assert.equal(response.status, 206)
-    cookie = cookiePair(response)
+    const disposition = response.headers.get('content-disposition')
+    const encodedName = /filename\*=UTF-8''([^;]+)/.exec(disposition)?.[1]
+    assert.ok(encodedName)
+    assert.equal(decodeURIComponent(encodedName), expected)
     await response.arrayBuffer()
   }
-  assert.equal(cookie.split('=', 1)[0], MEDIA_SESSION_COOKIE)
-  assert.equal(cookieValue(cookie).split('~').length, 8)
-  assert.ok(cookieValue(cookie).length <= 3800)
-  fixture.setNow(fixedNow + 301_000)
-  const oldest = await fixture.worker.fetch(new Request(
-    'https://media.example.test/v1/media?ticket=' + encodeURIComponent(oldestTicket),
-    { headers: { Range: 'bytes=100-100', Cookie: cookie, Origin: allowedOrigin } },
-  ), fixture.env)
-  assert.equal(oldest.status, 401)
-  assert.equal((await oldest.json()).error, 'media_ticket_expired')
-  const newest = await fixture.worker.fetch(new Request(
-    'https://media.example.test/v1/media?ticket=' + encodeURIComponent(newestTicket),
-    { headers: { Range: 'bytes=200-200', Cookie: cookie, Origin: allowedOrigin } },
-  ), fixture.env)
-  assert.equal(newest.status, 206)
-  assert.equal(newest.headers.get('content-range'), 'bytes 200-200/32212254720')
-  await newest.arrayBuffer()
 })
 
 test('wrong Origin, method, arbitrary URL and invalid FID do not reach Quark media', async () => {

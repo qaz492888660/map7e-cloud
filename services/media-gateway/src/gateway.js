@@ -15,9 +15,7 @@ import {
 } from '../../../lib/storage/media-ticket.js'
 
 export const MEDIA_GATEWAY_VERSION = '0.1.0'
-export const MEDIA_SESSION_COOKIE = '__Host-map7e-media'
-const MEDIA_SESSION_COOKIE_MAX_VALUE_LENGTH = 3800
-const MEDIA_SESSION_COOKIE_MAX_GRANTS = 8
+export const MEDIA_SESSION_COOKIE = '__Host-map7e-media-'
 const RANGE_HEADER_MAX_LENGTH = 128
 const RASTER_EXTENSIONS = new Set(['avif', 'bmp', 'gif', 'heic', 'heif', 'jpe', 'jpeg', 'jpg', 'png', 'tif', 'tiff', 'webp'])
 const MIME_BY_EXTENSION = new Map([
@@ -102,11 +100,23 @@ function safeHeader(value, pattern) {
   return typeof value === 'string' && value.length <= 512 && !/[\r\n\u0000-\u001f\u007f]/.test(value) && pattern.test(value) ? value : null
 }
 
+function truncateFilename(value, maxLength) {
+  let result = ''
+  for (const character of value) {
+    const codePoint = character.codePointAt(0)
+    const width = codePoint > 0xffff ? 2 : 1
+    if (result.length + width > maxLength) break
+    result += codePoint >= 0xd800 && codePoint <= 0xdfff ? '\uFFFD' : character
+  }
+  return result
+}
+
 function disposition(purpose, item, requestedDisposition) {
-  const name = String(item?.name || 'download').replace(/[\r\n\u0000-\u001f\u007f\\/]/g, '_').slice(0, 240) || 'download'
-  const encoded = encodeURIComponent(name).replace(/['()*]/g, char => `%${char.charCodeAt(0).toString(16).toUpperCase()}`)
+  const unsafeName = String(item?.name || 'download').replace(/[\r\n\u0000-\u001f\u007f\\/]/g, '_')
+  const name = truncateFilename(unsafeName, 240) || 'download'
+  const encoded = encodeURIComponent(name).replace(/['()*]/g, char => '%' + char.charCodeAt(0).toString(16).toUpperCase())
   const type = requestedDisposition || (purpose === 'preview' || purpose === 'video' ? 'inline' : 'attachment')
-  return `${type}; filename*=UTF-8''${encoded}`
+  return type + "; filename*=UTF-8''" + encoded
 }
 
 function contentRangeHeader(response) {
@@ -179,39 +189,42 @@ function addCors(req, res, env) {
   }
 }
 
-function sessionTokensFromCookie(header) {
-  if (typeof header !== 'string' || header.length > 8192) return []
-  const part = header.split(';').find(value => value.slice(0, value.indexOf('=')).trim() === MEDIA_SESSION_COOKIE)
-  if (!part) return []
-  const value = part.slice(part.indexOf('=') + 1).trim()
-  if (!value || value.length > MEDIA_SESSION_COOKIE_MAX_VALUE_LENGTH) return []
-  return value.split('~').filter(token => /^[A-Za-z0-9_.-]{40,4096}$/.test(token)).slice(-MEDIA_SESSION_COOKIE_MAX_GRANTS)
+function mediaSessionCookieName(claims, secret) {
+  const disposition = claims.disposition ?? (claims.purpose === 'preview' ? 'inline' : 'attachment')
+  const identity = JSON.stringify([
+    claims.storageId, claims.fileId, claims.parentId, claims.purpose, claims.variant ?? null, disposition,
+  ])
+  const suffix = crypto.createHmac('sha256', String(secret)).update(identity).digest('base64url').slice(0, 22)
+  return MEDIA_SESSION_COOKIE + suffix
 }
 
-function validSessionEntries(header, secret, now) {
-  const entries = []
-  for (const token of sessionTokensFromCookie(header)) {
-    try { entries.push({ token, claims: verifyMediaSession(token, secret, { now }) }) } catch {}
+function readCookie(header, cookieName) {
+  if (typeof header !== 'string' || header.length > 8192) return null
+  for (const part of header.split(';')) {
+    const separator = part.indexOf('=')
+    if (separator < 0 || part.slice(0, separator).trim() !== cookieName) continue
+    const value = part.slice(separator + 1).trim()
+    return /^[A-Za-z0-9_.-]{40,4096}$/.test(value) ? value : null
   }
-  return entries
+  return null
 }
 
 function sessionFromCookie(header, expectedClaims, secret, now) {
-  return validSessionEntries(header, secret, now).find(entry => sameMediaIdentity(expectedClaims, entry.claims))?.claims || null
+  const cookieName = mediaSessionCookieName(expectedClaims, secret)
+  const token = readCookie(header, cookieName)
+  if (!token) return null
+  const claims = verifyMediaSession(token, secret, { now })
+  return sameMediaIdentity(expectedClaims, claims) ? claims : null
 }
 
-function setSessionCookie(res, claims, secret, now, cookieHeader, method) {
-  if (method !== 'GET' || claims.grantType !== 'ticket' || claims.purpose !== 'video') return
+function setSessionCookie(res, claims, secret, now, method) {
+  if (method !== 'GET' || claims.grantType !== 'ticket' || claims.purpose !== 'video' || claims.disposition !== 'inline') return
   const token = createMediaSession(claims, { secret, now: claims.issuedAt * 1000 })
-  const sessionClaims = verifyMediaSession(token, secret, { now })
-  const entries = validSessionEntries(cookieHeader, secret, now)
-    .filter(entry => !sameMediaIdentity(entry.claims, sessionClaims))
-  entries.push({ token, claims: sessionClaims })
-  while (entries.length > MEDIA_SESSION_COOKIE_MAX_GRANTS
-    || entries.map(entry => entry.token).join('~').length > MEDIA_SESSION_COOKIE_MAX_VALUE_LENGTH) entries.shift()
   const maxAge = Math.max(0, claims.issuedAt + MEDIA_SESSION_TTL_SECONDS - Math.floor(now / 1000))
-  const value = entries.map(entry => entry.token).join('~')
-  if (maxAge > 0 && value) res.setHeader('Set-Cookie', `${MEDIA_SESSION_COOKIE}=${value}; Path=/; Max-Age=${maxAge}; Secure; HttpOnly; SameSite=Strict`)
+  if (maxAge > 0) {
+    const cookieName = mediaSessionCookieName(claims, secret)
+    res.setHeader('Set-Cookie', cookieName + '=' + token + '; Path=/; Max-Age=' + maxAge + '; Secure; HttpOnly; SameSite=Strict')
+  }
 }
 
 function requestAbortSignal(req, res) {
@@ -396,7 +409,7 @@ export function createMediaGatewayHandler({
         response = { status: 200, headers }
       }
       headersForMedia(res, response, item, claims, contentType)
-      setSessionCookie(res, claims, secret, now(), req.headers.cookie, req.method)
+      setSessionCookie(res, claims, secret, now(), req.method)
       status = response.status
       res.statusCode = status
       if (req.method === 'HEAD') {
