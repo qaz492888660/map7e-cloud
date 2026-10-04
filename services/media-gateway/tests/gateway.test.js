@@ -21,8 +21,23 @@ function partialResponse(range, total = '32212254720') {
   } })
 }
 
-function cookiePair(response) { return response.headers.get('set-cookie').split(';', 1)[0] }
+function responseCookies(response) {
+  return typeof response.headers.getSetCookie === 'function'
+    ? response.headers.getSetCookie()
+    : [response.headers.get('set-cookie')].filter(Boolean)
+}
+function cookiePair(response) { return responseCookies(response).at(-1).split(';', 1)[0] }
 function cookieValue(pair) { return pair.slice(pair.indexOf('=') + 1) }
+function applySetCookies(lines, jar) {
+  for (const line of lines) {
+    const pair = line.split(';', 1)[0]
+    const separator = pair.indexOf('=')
+    if (separator < 0) continue
+    const name = pair.slice(0, separator)
+    if (/(?:^|;)\s*Max-Age=0(?:;|$)/i.test(line)) jar.delete(name)
+    else jar.set(name, pair.slice(separator + 1))
+  }
+}
 
 async function startServer({ provider, resolveStorage, now = Date.now, logs = [] } = {}) {
   const storageProvider = provider || {
@@ -62,7 +77,12 @@ async function startServer({ provider, resolveStorage, now = Date.now, logs = []
     const response = new MemoryResponse()
     await handler(request, response)
     const body = request.method === 'HEAD' || chunks.length === 0 ? null : Buffer.concat(chunks)
-    return new Response(body, { status: response.statusCode, headers: response.headers })
+    const headers = new Headers()
+    for (const [name, value] of Object.entries(response.headers)) {
+      if (Array.isArray(value)) for (const item of value) headers.append(name, item)
+      else headers.set(name, value)
+    }
+    return new Response(body, { status: response.statusCode, headers })
   }
   const server = { close: async () => { globalThis.fetch = originalFetch } }
   return { server, baseUrl, provider: storageProvider, logs }
@@ -312,6 +332,66 @@ await test('simultaneous first requests keep video sessions independent by media
     assert.equal(resumedB.status, 206)
     assert.equal(resumedB.headers.get('content-range'), 'bytes 200-201/32212254720')
     await resumedB.arrayBuffer()
+  } finally { await closeServer(server) }
+})
+
+await test('video session cookies stay bounded and evict the oldest grant', async () => {
+  let now = 1_800_000_000_000
+  const provider = {
+    getItem: async id => createItem({ id }),
+    getFileResponse: async (_id, { range }) => partialResponse(range || 'bytes=0-0'),
+  }
+  const { server, baseUrl } = await startServer({ provider, now: () => now })
+  try {
+    const jar = new Map()
+    const tickets = []
+    for (let index = 0; index < 12; index += 1) {
+      const grant = ticket({ fileId: 'bounded-video-' + index, disposition: 'inline' }, now)
+      tickets.push(grant)
+      const response = await fetch(baseUrl + '/v1/media?ticket=' + encodeURIComponent(grant), {
+        headers: { Range: 'bytes=0-0', Cookie: [...jar].map(([name, value]) => name + '=' + value).join('; ') },
+      })
+      assert.equal(response.status, 206)
+      applySetCookies(responseCookies(response), jar)
+      assert.ok(jar.size <= 8)
+      await response.arrayBuffer()
+    }
+    assert.equal(jar.size, 8)
+    now += 301_000
+    const cookie = [...jar].map(([name, value]) => name + '=' + value).join('; ')
+    const oldest = await fetch(baseUrl + '/v1/media?ticket=' + encodeURIComponent(tickets[0]), {
+      headers: { Range: 'bytes=100-100', Cookie: cookie },
+    })
+    assert.equal(oldest.status, 401)
+    const newest = await fetch(baseUrl + '/v1/media?ticket=' + encodeURIComponent(tickets.at(-1)), {
+      headers: { Range: 'bytes=200-200', Cookie: cookie },
+    })
+    assert.equal(newest.status, 206)
+    assert.equal(newest.headers.get('content-range'), 'bytes 200-200/32212254720')
+    await newest.arrayBuffer()
+  } finally { await closeServer(server) }
+})
+
+await test('oversized legacy cookie headers are parsed and stale media cookies are cleared', async () => {
+  const provider = {
+    getItem: async id => createItem({ id }),
+    getFileResponse: async (_id, { range }) => partialResponse(range || 'bytes=0-0'),
+  }
+  const { server, baseUrl } = await startServer({ provider })
+  try {
+    const legacyCookies = Array.from({ length: 24 }, (_, index) =>
+      MEDIA_SESSION_COOKIE + index.toString(36).padStart(22, 'a') + '=' + 'x'.repeat(400))
+    const cookie = legacyCookies.join('; ')
+    assert.ok(cookie.length > 8192)
+    const grant = ticket({ fileId: 'new-after-legacy-cookies', disposition: 'inline' })
+    const response = await fetch(baseUrl + '/v1/media?ticket=' + encodeURIComponent(grant), {
+      headers: { Range: 'bytes=0-0', Cookie: cookie },
+    })
+    assert.equal(response.status, 206)
+    const setCookies = responseCookies(response)
+    assert.equal(setCookies.filter(line => /(?:^|;)\s*Max-Age=0(?:;|$)/i.test(line)).length, 24)
+    assert.ok(setCookies.at(-1).startsWith(MEDIA_SESSION_COOKIE))
+    await response.arrayBuffer()
   } finally { await closeServer(server) }
 })
 

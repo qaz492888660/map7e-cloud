@@ -31,8 +31,23 @@ function jsonResponse(value, status = 200, headers = {}) {
   return new Response(JSON.stringify(value), { status, headers: { 'Content-Type': 'application/json', ...headers } })
 }
 
-function cookiePair(response) { return response.headers.get('set-cookie').split(';', 1)[0] }
+function responseCookies(response) {
+  return typeof response.headers.getSetCookie === 'function'
+    ? response.headers.getSetCookie()
+    : [response.headers.get('set-cookie')].filter(Boolean)
+}
+function cookiePair(response) { return responseCookies(response).at(-1).split(';', 1)[0] }
 function cookieValue(pair) { return pair.slice(pair.indexOf('=') + 1) }
+function applySetCookies(lines, jar) {
+  for (const line of lines) {
+    const pair = line.split(';', 1)[0]
+    const separator = pair.indexOf('=')
+    if (separator < 0) continue
+    const name = pair.slice(0, separator)
+    if (/(?:^|;)\s*Max-Age=0(?:;|$)/i.test(line)) jar.delete(name)
+    else jar.set(name, pair.slice(separator + 1))
+  }
+}
 
 async function sealAuth(storageId, auth, secret = encryptionSecret) {
   const key = crypto.createHash('sha256').update('map7e-storage-v1\u0000' + secret).digest()
@@ -276,7 +291,7 @@ test('Worker health is minimal and works without media secrets', async () => {
   const fixture = await createFixture({ envOverrides: { MEDIA_GATEWAY_SIGNING_SECRET: undefined } })
   const response = await fixture.worker.fetch(new Request('https://media.example.test/health'), fixture.env)
   assert.equal(response.status, 200)
-  assert.deepEqual(await response.json(), { ok: true, version: '0.2.8' })
+  assert.deepEqual(await response.json(), { ok: true, version: '0.2.9' })
   assert.equal(fixture.state.redisRequests.length, 0)
 })
 
@@ -956,6 +971,61 @@ test('Worker preserves video sessions from simultaneous initial requests', async
   assert.equal(resumedB.status, 206)
   assert.equal(resumedB.headers.get('content-range'), 'bytes 200-201/32212254720')
   await resumedB.arrayBuffer()
+})
+
+test('Worker bounds video session cookies and evicts the oldest grant', async () => {
+  const fixture = await createFixture()
+  const jar = new Map()
+  const tickets = []
+  for (let index = 0; index < 12; index += 1) {
+    const token = ticketFor('bounded-video-' + index, { disposition: 'inline' }, fixedNow)
+    tickets.push(token)
+    const response = await fixture.worker.fetch(new Request(
+      'https://media.example.test/v1/media?ticket=' + encodeURIComponent(token),
+      { headers: {
+        Range: 'bytes=0-0',
+        Origin: allowedOrigin,
+        Cookie: [...jar].map(([name, value]) => name + '=' + value).join('; '),
+      } },
+    ), fixture.env)
+    assert.equal(response.status, 206)
+    applySetCookies(responseCookies(response), jar)
+    assert.ok(jar.size <= 8)
+    await response.arrayBuffer()
+  }
+  assert.equal(jar.size, 8)
+  fixture.setNow(fixedNow + 301_000)
+  const cookie = [...jar].map(([name, value]) => name + '=' + value).join('; ')
+  const oldest = await fixture.worker.fetch(new Request(
+    'https://media.example.test/v1/media?ticket=' + encodeURIComponent(tickets[0]),
+    { headers: { Range: 'bytes=100-100', Cookie: cookie, Origin: allowedOrigin } },
+  ), fixture.env)
+  assert.equal(oldest.status, 401)
+  const newest = await fixture.worker.fetch(new Request(
+    'https://media.example.test/v1/media?ticket=' + encodeURIComponent(tickets.at(-1)),
+    { headers: { Range: 'bytes=200-200', Cookie: cookie, Origin: allowedOrigin } },
+  ), fixture.env)
+  assert.equal(newest.status, 206)
+  assert.equal(newest.headers.get('content-range'), 'bytes 200-200/32212254720')
+  await newest.arrayBuffer()
+})
+
+test('Worker parses oversized legacy Cookie headers and clears stale media cookies', async () => {
+  const fixture = await createFixture()
+  const legacyCookies = Array.from({ length: 24 }, (_, index) =>
+    MEDIA_SESSION_COOKIE + index.toString(36).padStart(22, 'a') + '=' + 'x'.repeat(400))
+  const cookie = legacyCookies.join('; ')
+  assert.ok(cookie.length > 8192)
+  const token = ticketFor('new-after-legacy-cookies', { disposition: 'inline' }, fixedNow)
+  const response = await fixture.worker.fetch(new Request(
+    'https://media.example.test/v1/media?ticket=' + encodeURIComponent(token),
+    { headers: { Range: 'bytes=0-0', Cookie: cookie, Origin: allowedOrigin } },
+  ), fixture.env)
+  assert.equal(response.status, 206)
+  const setCookies = responseCookies(response)
+  assert.equal(setCookies.filter(line => /(?:^|;)\s*Max-Age=0(?:;|$)/i.test(line)).length, 24)
+  assert.ok(setCookies.at(-1).startsWith(MEDIA_SESSION_COOKIE))
+  await response.arrayBuffer()
 })
 
 test('Worker filename truncation keeps Unicode Content-Disposition headers well formed', async () => {

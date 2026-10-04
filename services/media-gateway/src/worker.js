@@ -1,7 +1,10 @@
 import { OFFICIAL_CLIENT_ID, OFFICIAL_SIGN_KEY } from '../../../lib/storage/providers/quark-client.js'
 
-export const MEDIA_GATEWAY_VERSION = '0.2.8'
+export const MEDIA_GATEWAY_VERSION = '0.2.9'
 export const MEDIA_SESSION_COOKIE = '__Host-map7e-media-'
+const MEDIA_SESSION_COOKIE_MAX_GRANTS = 8
+const MEDIA_SESSION_COOKIE_HEADER_MAX_LENGTH = 65_536
+const MEDIA_SESSION_COOKIE_MAX_EVICTIONS = 32
 const MAX_RANGE_LENGTH = 128
 const QUARK_REFRESH_LOCK_WAIT_ATTEMPTS = 120
 const QUARK_API = 'https://open-api-drive.quark.cn'
@@ -167,7 +170,7 @@ async function mediaSessionCookieName(claims, secret) {
 }
 
 function readCookie(header, cookieName) {
-  if (typeof header !== 'string' || header.length > 8192) return null
+  if (typeof header !== 'string' || header.length > MEDIA_SESSION_COOKIE_HEADER_MAX_LENGTH) return null
   for (const part of header.split(';')) {
     const separator = part.indexOf('=')
     if (separator < 0 || part.slice(0, separator).trim() !== cookieName) continue
@@ -175,6 +178,31 @@ function readCookie(header, cookieName) {
     return /^[A-Za-z0-9_.-]{40,4096}$/.test(value) ? value : null
   }
   return null
+}
+
+async function mediaSessionCookiesToExpire(header, secret, now, currentCookieName) {
+  if (typeof header !== 'string' || header.length > MEDIA_SESSION_COOKIE_HEADER_MAX_LENGTH) return []
+  const candidates = []
+  const toExpire = new Set()
+  for (const part of header.split(';')) {
+    const separator = part.indexOf('=')
+    if (separator < 0) continue
+    const name = part.slice(0, separator).trim()
+    if (!name.startsWith(MEDIA_SESSION_COOKIE) || name === currentCookieName) continue
+    if (!/^__Host-map7e-media-[A-Za-z0-9_-]{22}$/.test(name)) continue
+    const token = part.slice(separator + 1).trim()
+    try {
+      const claims = await verifyGrant(token, secret, { now, grantType: 'session' })
+      if (await mediaSessionCookieName(claims, secret) !== name) throw new Error('media_session_cookie_mismatch')
+      candidates.push({ name, issuedAt: claims.issuedAt })
+    } catch {
+      toExpire.add(name)
+    }
+  }
+  candidates.sort((left, right) => left.issuedAt - right.issuedAt)
+  const excess = Math.max(0, candidates.length + 1 - MEDIA_SESSION_COOKIE_MAX_GRANTS)
+  for (const entry of candidates.slice(0, excess)) toExpire.add(entry.name)
+  return [...toExpire].slice(0, MEDIA_SESSION_COOKIE_MAX_EVICTIONS)
 }
 
 async function sessionFromCookie(header, expectedClaims, secret, now) {
@@ -185,13 +213,17 @@ async function sessionFromCookie(header, expectedClaims, secret, now) {
   return sameMediaIdentity(expectedClaims, claims) ? claims : null
 }
 
-async function setSessionCookie(claims, secret, now) {
+async function setSessionCookie(claims, secret, now, cookieHeader) {
   if (claims.grantType !== 'ticket' || claims.purpose !== 'video' || claims.disposition !== 'inline') return null
   const token = await makeSession(claims, secret)
   const maxAge = Math.max(0, claims.issuedAt + 6 * 60 * 60 - Math.floor(now / 1000))
   if (!maxAge) return null
   const cookieName = await mediaSessionCookieName(claims, secret)
-  return cookieName + '=' + token + '; Path=/; Max-Age=' + maxAge + '; Secure; HttpOnly; SameSite=Strict'
+  const expiredCookies = await mediaSessionCookiesToExpire(cookieHeader, secret, now, cookieName)
+  return [
+    ...expiredCookies.map(name => name + '=; Path=/; Max-Age=0; Secure; HttpOnly; SameSite=Strict'),
+    cookieName + '=' + token + '; Path=/; Max-Age=' + maxAge + '; Secure; HttpOnly; SameSite=Strict',
+  ]
 }
 
 function rangeError(size) {
@@ -1373,8 +1405,8 @@ export function createMediaGatewayWorker({
         const headers = new Headers(cors)
         for (const [name, value] of mediaHeaders(upstream, item, claims, contentType)) headers.set(name, value)
         if (request.method === 'GET') {
-          const sessionCookie = await setSessionCookie(claims, secret, now())
-          if (sessionCookie) headers.set('Set-Cookie', sessionCookie)
+          const sessionCookies = await setSessionCookie(claims, secret, now(), request.headers.get('cookie'))
+          for (const sessionCookie of sessionCookies || []) headers.append('Set-Cookie', sessionCookie)
         }
         status = upstream.status
         if (request.method === 'HEAD' || !upstream.body) {
