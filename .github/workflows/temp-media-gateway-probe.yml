@@ -1,0 +1,30 @@
+name: Temporary public media gateway probe
+'on':
+  push:
+    branches:
+      - feat/quark-media-gateway
+    paths:
+      - .github/workflows/temp-media-gateway-probe.yml
+
+permissions: {}
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Probe public endpoints
+        shell: bash
+        run: |
+          set +e
+          health_status=$(curl -sS -o /tmp/health-body -w "%{http_code}" https://media.map7e.com/health)
+          health_curl_exit=$?
+          media_status=$(curl -sS -o /tmp/media-body -w "%{http_code}" https://media.map7e.com/v1/media)
+          media_curl_exit=$?
+          set -e
+
+          printf 'health_http_status=%s curl_exit=%s\n' "$health_status" "$health_curl_exit"
+          printf 'health_body='
+          jq -c '{ok,version}' /tmp/health-body 2>/dev/null || printf '[non-JSON body suppressed]\n'
+          printf 'media_http_status=%s curl_exit=%s\n' "$media_status" "$media_curl_exit"
+          printf 'media_body='
+          jq -c '{ok,error}' /tmp/media-body 2>/dev/null || printf '[non-JSON body suppressed]\n'
