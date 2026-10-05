@@ -1,6 +1,6 @@
 import { OFFICIAL_CLIENT_ID, OFFICIAL_SIGN_KEY } from '../../../lib/storage/providers/quark-client.js'
 
-export const MEDIA_GATEWAY_VERSION = '0.2.9'
+export const MEDIA_GATEWAY_VERSION = '0.2.10'
 export const MEDIA_SESSION_COOKIE = '__Host-map7e-media-'
 const MEDIA_SESSION_COOKIE_MAX_GRANTS = 8
 const MEDIA_SESSION_COOKIE_HEADER_MAX_LENGTH = 65_536
@@ -745,7 +745,20 @@ async function quarkRequest(path, { method = 'GET', query = {}, body, auth, env,
   if (!response || !payload || !response.ok || payload.status !== 0 || (payload.errno && payload.errno !== 0)) {
     const message = String(payload && (payload.error_info || payload.agent_msg) || '')
     const authFailure = Boolean(response && response.status === 401) || /token|授权|认证/i.test(message)
-    throw storageError(authFailure ? 'storage_token_expired' : quarkResponseErrorCode(response, payload), authFailure ? 401 : 502)
+    const error = storageError(authFailure ? 'storage_token_expired' : quarkResponseErrorCode(response, payload), authFailure ? 401 : 502)
+    // Use local, fixed API identities and numeric response codes only. Never log
+    // the URL, payload, error_info/agent_msg, or request/response headers.
+    error.quarkFailure = {
+      upstreamStage: path === '/open/v1/file/info' ? 'quark_file_info'
+        : path === '/open/v1/file/get_download_url' ? 'quark_download_url'
+          : 'quark_token_refresh',
+      upstreamMethod: method,
+      ...(response ? { upstreamStatus: response.status } : {}),
+      ...(Number.isSafeInteger(payload && payload.errno) ? { upstreamErrno: payload.errno } : {}),
+      ...(Number.isSafeInteger(payload && payload.status) ? { upstreamApiStatus: payload.status } : {}),
+      upstreamRequestId: url.searchParams.get('req_id'),
+    }
+    throw error
   }
   return payload
 }
@@ -1280,6 +1293,7 @@ export function createMediaGatewayWorker({
       let status = 500
       let contentType = null
       let errorCode = null
+      let quarkFailure = null
       let bytesStreamed = 0
       let logged = false
       const finishLog = async streamError => {
@@ -1296,6 +1310,7 @@ export function createMediaGatewayWorker({
           contentType,
           durationMs: Math.max(0, now() - startedAt),
           bytesStreamed,
+          ...(quarkFailure || {}),
           ...((streamError || errorCode) ? { errorCode: streamError || errorCode } : {}),
         }
         safeLog(logger, entry)
@@ -1417,6 +1432,7 @@ export function createMediaGatewayWorker({
         const body = countStream(upstream.body, count => { bytesStreamed += count }, finalize)
         return new Response(body, { status, headers })
       } catch (error) {
+        if (error instanceof GatewayError) quarkFailure = error.quarkFailure || null
         errorCode = safeErrorCode(error)
         status = responseStatus(error)
         const headers = new Headers(cors)

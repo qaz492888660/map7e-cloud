@@ -291,7 +291,7 @@ test('Worker health is minimal and works without media secrets', async () => {
   const fixture = await createFixture({ envOverrides: { MEDIA_GATEWAY_SIGNING_SECRET: undefined } })
   const response = await fixture.worker.fetch(new Request('https://media.example.test/health'), fixture.env)
   assert.equal(response.status, 200)
-  assert.deepEqual(await response.json(), { ok: true, version: '0.2.9' })
+  assert.deepEqual(await response.json(), { ok: true, version: '0.2.10' })
   assert.equal(fixture.state.redisRequests.length, 0)
 })
 
@@ -466,6 +466,48 @@ test('Worker preserves only safe Quark HTTP/API error numbers', async () => {
   const httpResponse = await requestMedia(httpFailure, 'quark-http-error')
   assert.equal(httpResponse.status, 502)
   assert.deepEqual(await httpResponse.json(), { ok: false, error: 'quark_http_412_api_73421' })
+})
+
+test('Worker attributes production HEAD api_23018 to the failing Quark API without leaking upstream data', async () => {
+  for (const [path, stage, method] of [
+    ['/open/v1/file/info', 'quark_file_info', 'GET'],
+    ['/open/v1/file/get_download_url', 'quark_download_url', 'POST'],
+  ]) {
+    const apiCalls = []
+    const fixture = await createFixture({
+      quarkHandler: async ({ url, init, headers }) => {
+        apiCalls.push({ path: url.pathname, method: init.method, range: headers.get('range') })
+        if (url.pathname !== path) return
+        return jsonResponse({
+          status: -1,
+          errno: 23018,
+          error_info: 'upstream refused request',
+          agent_msg: defaultAuth.accessToken + ' https://cdn.quark.cn/private?signature=hidden',
+          req_id: defaultAuth.refreshToken,
+        }, 400)
+      },
+    })
+    const response = await requestMedia(fixture, 'production-private-file-id', { method: 'HEAD', range: 'bytes=0-0' })
+    assert.equal(response.status, 502)
+    assert.deepEqual(await response.json(), { ok: false, error: 'quark_http_400_api_23018' })
+    const log = fixture.state.logs.at(-1)
+    assert.equal(log.upstreamStage, stage)
+    assert.equal(log.upstreamMethod, method)
+    assert.equal(log.upstreamStatus, 400)
+    assert.equal(log.upstreamErrno, 23018)
+    assert.equal(log.upstreamApiStatus, -1)
+    assert.match(log.upstreamRequestId, /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/)
+    assert.equal(log.range, 'bytes=0-0')
+    assert.equal(log.bytesStreamed, 0)
+    assert.equal(fixture.state.cdnRequests.length, 0)
+    assert.equal(apiCalls.at(-1).method, method)
+    assert.equal(apiCalls.at(-1).range, null)
+    const serialized = JSON.stringify(log)
+    for (const hidden of [defaultAuth.accessToken, defaultAuth.refreshToken, defaultAuth.clientToken,
+      'production-private-file-id', 'upstream refused request', 'https://', 'signature=hidden']) {
+      assert.ok(!serialized.includes(hidden))
+    }
+  }
 })
 
 test('Worker follows HTTPS Quark API redirects within the Quark China domain only', async () => {
