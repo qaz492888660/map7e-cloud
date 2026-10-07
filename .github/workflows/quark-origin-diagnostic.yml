@@ -1,70 +1,52 @@
-name: Quark origin diagnostic
+name: Temporary Quark origin diagnostic
 on:
   push:
     branches: [feat/quark-media-gateway]
     paths: [.github/workflows/quark-origin-diagnostic.yml]
 permissions:
   contents: read
+  id-token: write
 jobs:
-  probe:
+  compare:
     runs-on: ubuntu-latest
-    timeout-minutes: 8
+    timeout-minutes: 5
     steps:
-      - name: Read public sample metadata and bounded media responses
-        shell: bash
+      - name: Read owner-authorized Quark diagnostic
         run: |
-          python - <<'PY'
-          import json, urllib.request, urllib.parse, urllib.error, collections
-          class NoRedirect(urllib.request.HTTPRedirectHandler):
-              def redirect_request(self, *args): return None
-          opener=urllib.request.build_opener(NoRedirect)
-          def request(url, method='GET', range_value=None, limit=1024):
-              if urllib.parse.urlsplit(url).scheme!='https': raise ValueError('https_required')
-              h={'Accept':'application/json' if '/api/' in url else '*/*'}
-              if range_value: h['Range']=range_value
-              try: r=opener.open(urllib.request.Request(url,headers=h,method=method),timeout=45)
-              except urllib.error.HTTPError as e: r=e
-              with r: return r.status,dict(r.headers.items()),r.read(limit)
-          def header(h,k): return next((v for n,v in h.items() if n.lower()==k.lower()),None)
-          def emit(**x): print(json.dumps(x,ensure_ascii=False),flush=True)
+          python3 - <<'PY'
+          import json,os,time,urllib.error,urllib.parse,urllib.request
+          audience='map7e-quark-readonly-diag-20261008'
+          issuer_url=os.environ['ACTIONS_ID_TOKEN_REQUEST_URL']+'&audience='+urllib.parse.quote(audience)
+          request=urllib.request.Request(issuer_url,headers={'Authorization':'Bearer '+os.environ['ACTIONS_ID_TOKEN_REQUEST_TOKEN']})
+          with urllib.request.urlopen(request,timeout=20) as response:
+              token=json.load(response)['value']
+          url='https://quarkdiag-oct8-map7e-quark-media-gateway.map7e-cloud.workers.dev/'
+          request=urllib.request.Request(url,headers={'Authorization':'Bearer '+token,'Accept':'application/json'})
           try:
-              queue=collections.deque(['']); seen=set(); found={}
-              while queue and len(seen)<12 and len(found)<2:
-                  parent=queue.popleft()
-                  if parent in seen: continue
-                  seen.add(parent)
-                  q=urllib.parse.urlencode({'storageId':'quark-main','parentId':parent})
-                  status,h,data=request('https://cloud.map7e.com/api/storage-files?'+q,limit=262144)
-                  if status!=200:
-                      emit(stage='public_listing',http=status); continue
-                  payload=json.loads(data)
-                  for item in payload.get('items',[]):
-                      if item.get('name') in ['壁纸_8.jpg','07(1).mp4']: found[item['name']]=item
-                      if item.get('isFolder') and item.get('effectiveAccess')=='public': queue.append(item['id'])
-              for name in ['壁纸_8.jpg','07(1).mp4']:
-                  item=found.get(name)
-                  if not item: emit(sample=name,stage='sample_lookup',found=False); continue
-                  emit(sample=name,stage='sample_metadata',fileSize=item.get('size'))
-                  q=urllib.parse.urlencode({'storageId':'quark-main','id':item['id'],'parentId':item.get('parentId') or ''})
-                  status,h,data=request('https://cloud.map7e.com/api/storage-download?'+q)
-                  location=header(h,'Location')
-                  emit(sample=name,stage='ticket_issuance',http=status)
-                  if status!=302 or not location: continue
-                  target=urllib.parse.urlsplit(location)
-                  if target.scheme!='https' or target.hostname!='media.map7e.com' or target.path!='/v1/media': raise ValueError('unexpected_gateway')
-                  for method,rv in [('HEAD','bytes=0-0'),('GET','bytes=0-0')]:
-                      status,h,data=request(location,method,rv)
-                      error=None
-                      if status>=400 and data:
-                          try:
-                              e=json.loads(data).get('error')
-                              if isinstance(e,str) and len(e)<80 and all(c.isalnum() or c in '_-' for c in e): error=e
-                          except: pass
-                      emit(sample=name,fileSize=item.get('size'),stage='production_gateway',method=method,range=rv,http=status,errorCode=error,contentType=header(h,'Content-Type'),contentRange=header(h,'Content-Range'),acceptRanges=header(h,'Accept-Ranges'),contentLength=header(h,'Content-Length'),bytesRead=len(data))
-                  if name.endswith('.mp4'):
-                      status,h,data=request('https://cloud.map7e.com/api/storage-download?'+q+'&check=range')
-                      emit(sample=name,stage='production_check_range',http=status)
-          except Exception as e:
-              emit(stage='probe_failure',failureType=type(e).__name__)
-              raise SystemExit(1)
+              try:
+                  response=urllib.request.urlopen(request,timeout=120)
+              except urllib.error.HTTPError as error:
+                  response=error
+              status=response.status
+              print(json.dumps({'diagnosticHttp':status}))
+              raw=response.read(65536)
+              try:
+                  body=json.loads(raw)
+              except (ValueError,UnicodeError):
+                  print(json.dumps({'responseReadable':False}))
+                  raise SystemExit(1)
+              if body.get('diagnostic')!='quark-readonly-v1':
+                  error=body.get('error')
+                  if error in ['diagnostic_expired','method_not_allowed','diagnostic_owner_required','diagnostic_owner_not_authorized']:
+                      print(json.dumps({'diagnosticError':error}))
+                  raise SystemExit(1)
+              allowed={'sample','stage','variant','upstreamStatus','upstreamErrno','upstreamApiStatus','hasDownloadUrl','upstreamReason','upstreamLimitBytes','upstreamRequestId','clientTokenPresent','fileSize','errorCode','found'}
+              for observation in body.get('observations',[]):
+                  print(json.dumps({key:value for key,value in observation.items() if key in allowed},ensure_ascii=False))
+              for key in ['failureType','errorCode']:
+                  if key in body: print(json.dumps({key:body[key]}))
+              if status!=200: raise SystemExit(1)
+          finally:
+              token=None
+              request=None
           PY
