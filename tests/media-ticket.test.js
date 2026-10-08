@@ -4,6 +4,7 @@ import {
   createMediaSession,
   createMediaTicket,
   mediaGatewayLocation,
+  mediaSessionPath,
   sameMediaIdentity,
   verifyMediaSession,
   verifyMediaTicket,
@@ -45,10 +46,14 @@ await test('media Gateway URL requires HTTPS and includes only a signed Map7e ti
   const location = mediaGatewayLocation(fixture, { env, now: 1_800_000_000_000 })
   const url = new URL(location)
   assert.equal(url.origin, 'https://media.map7e.com')
-  assert.equal(url.pathname, '/v1/media')
+  assert.equal(url.pathname, mediaSessionPath(fixture, secret))
   const claims = verifyMediaTicket(url.searchParams.get('ticket'), secret, { now: 1_800_000_000_000 })
   assert.equal(claims.fileId, fixture.fileId)
   assert.equal(location.includes('accessToken'), false)
+  const original = new URL(mediaGatewayLocation({ ...fixture, purpose: 'original' }, { env, now: 1_800_000_000_000 }))
+  const originalClaims = verifyMediaTicket(original.searchParams.get('ticket'), secret, { now: 1_800_000_000_000 })
+  assert.equal(originalClaims.variant, undefined)
+  assert.equal(original.pathname, mediaSessionPath(originalClaims, secret))
   assert.throws(() => mediaGatewayLocation(fixture, { env: { ...env, MEDIA_GATEWAY_URL: 'http://media.map7e.com' } }), /media_gateway_not_configured/)
   assert.throws(() => mediaGatewayLocation(fixture, { env: { ...env, MEDIA_GATEWAY_URL: 'https://map7e.workers.dev' } }), /media_gateway_not_configured/)
   assert.throws(() => mediaGatewayLocation(fixture, { env: { ...env, MEDIA_GATEWAY_SITE_DOMAIN: 'workers.dev', MEDIA_GATEWAY_URL: 'https://map7e.workers.dev' } }), /media_gateway_not_configured/)

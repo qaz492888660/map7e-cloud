@@ -2,6 +2,8 @@
 
 Recorded 2026-10-08 for `qaz492888660/map7e-cloud`, PR #25. The PR remains Open. This record distinguishes a verified Worker release, tested code and actual Production media delivery.
 
+**Historical checkpoint:** later Production activation, successful JPG file evidence, actual HTTP 422 large-video rejection and the new review fixes are recorded in [the PR #25 continuation checkpoint](media-gateway-pr25-resume-2026-10-08.md). Runtime failures and deployment blockers below describe the earlier window, not the latest continuation state.
+
 ## Code and release
 
 - Restored remote HEAD `18f273a232d1fd85e4592f22c3e5113d4000f5ff`; the recovered local file tree matched it. Existing worktrees and their branches were preserved.

@@ -2,9 +2,10 @@ import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
 import { Writable } from 'node:stream'
 import test from 'node:test'
-import { createMediaTicket, verifyMediaSession } from '../../../lib/storage/media-ticket.js'
+import { createMediaTicket, verifyMediaSession, mediaSessionPath } from '../../../lib/storage/media-ticket.js'
 import { createMediaGatewayHandler, MEDIA_SESSION_COOKIE, parseSingleRange } from '../src/gateway.js'
 import { StorageError } from '../../../lib/storage/errors.js'
+import { CookieJar, legacyCookie } from './session-cookie-fixture.js'
 
 const secret = 'gateway-test-secret-with-at-least-32-bytes-long'
 const allowedOrigin = 'https://cloud.map7e.com'
@@ -103,7 +104,7 @@ await test('health is minimal and media accepts only GET or HEAD', async () => {
   try {
     const health = await fetch(`${baseUrl}/health`)
     assert.deepEqual(await health.json(), { ok: true, version: '0.1.0' })
-    const post = await fetch(`${baseUrl}/v1/media?ticket=${encodeURIComponent(ticket())}`, { method: 'POST' })
+    const post = await fetch(scopedUrl(`${baseUrl}/v1/media?ticket=${encodeURIComponent(ticket())}`), { method: 'POST' })
     assert.equal(post.status, 405)
     assert.equal((await post.json()).error, 'method_not_allowed')
     assert.equal(resolutions, 0)
@@ -119,7 +120,7 @@ await test('HEAD on an empty original returns 200 without an upstream probe', as
   const { server, baseUrl } = await startServer({ provider })
   try {
     const emptyTicket = ticket({ purpose: 'original', fileId: 'empty-video' })
-    const response = await fetch(`${baseUrl}/v1/media?ticket=${encodeURIComponent(emptyTicket)}`, { method: 'HEAD' })
+    const response = await fetch(scopedUrl(`${baseUrl}/v1/media?ticket=${encodeURIComponent(emptyTicket)}`), { method: 'HEAD' })
     assert.equal(response.status, 200)
     assert.equal(response.headers.get('content-type'), 'video/mp4')
     assert.equal(response.headers.get('content-length'), '0')
@@ -138,7 +139,7 @@ await test('Node Gateway exposes safe size-policy headers for GET and bodyless H
   } })
   try {
     for (const method of ['GET', 'HEAD']) {
-      const result = await fetch(`${baseUrl}/v1/media?ticket=${encodeURIComponent(ticket())}`, { method, headers: { Range: 'bytes=0-0' } })
+      const result = await fetch(scopedUrl(`${baseUrl}/v1/media?ticket=${encodeURIComponent(ticket())}`), { method, headers: { Range: 'bytes=0-0' } })
       assert.equal(result.status, 422)
       assert.equal(result.headers.get('x-media-error'), 'quark_file_size_limit')
       assert.equal(result.headers.get('x-media-limit-bytes'), '52428800')
@@ -172,7 +173,7 @@ await test('video first and middle Range requests stream as 206 with safe header
   const { server, baseUrl } = await startServer({ provider, logs })
   try {
     const grant = ticket({ disposition: 'inline' })
-    const first = await fetch(`${baseUrl}/v1/media?ticket=${encodeURIComponent(grant)}`, { headers: { Range: 'bytes=0-1023', 'If-Range': '"media-v1"', Origin: allowedOrigin } })
+    const first = await fetch(scopedUrl(`${baseUrl}/v1/media?ticket=${encodeURIComponent(grant)}`), { headers: { Range: 'bytes=0-1023', 'If-Range': '"media-v1"', Origin: allowedOrigin } })
     assert.equal(first.status, 206)
     assert.equal(first.headers.get('content-type'), 'video/mp4')
     assert.equal(first.headers.get('content-range'), 'bytes 0-1023/32212254720')
@@ -183,7 +184,7 @@ await test('video first and middle Range requests stream as 206 with safe header
     assert.equal(firstBytes.length, 1024)
     assert.equal(first.headers.get('set-cookie').includes('server-only-quark-secret'), false)
 
-    const middle = await fetch(`${baseUrl}/v1/media?ticket=${encodeURIComponent(grant)}`, { headers: { Range: 'bytes=1048576-1049599', Origin: allowedOrigin } })
+    const middle = await fetch(scopedUrl(`${baseUrl}/v1/media?ticket=${encodeURIComponent(grant)}`), { headers: { Range: 'bytes=1048576-1049599', Origin: allowedOrigin } })
     assert.equal(middle.status, 206)
     assert.equal(middle.headers.get('content-range'), 'bytes 1048576-1049599/32212254720')
     assert.equal((await middle.arrayBuffer()).byteLength, 1024)
@@ -206,7 +207,7 @@ await test('SVG previews receive a sandbox CSP on the media response', async () 
   }
   const { server, baseUrl } = await startServer({ provider })
   try {
-    const response = await fetch(`${baseUrl}/v1/media?ticket=${encodeURIComponent(ticket({ purpose: 'preview', variant: 'thumbnail' }))}`)
+    const response = await fetch(scopedUrl(`${baseUrl}/v1/media?ticket=${encodeURIComponent(ticket({ purpose: 'preview', variant: 'thumbnail' }))}`))
     assert.equal(response.status, 200)
     assert.equal(response.headers.get('content-type'), 'image/svg+xml')
     assert.equal(response.headers.get('content-security-policy'), "default-src 'none'; sandbox")
@@ -225,7 +226,7 @@ await test('upstream 416 without a video MIME remains 416 for a stale unknown si
   }
   const { server, baseUrl } = await startServer({ provider })
   try {
-    const response = await fetch(`${baseUrl}/v1/media?ticket=${encodeURIComponent(ticket())}`, {
+    const response = await fetch(scopedUrl(`${baseUrl}/v1/media?ticket=${encodeURIComponent(ticket())}`), {
       headers: { Range: 'bytes=40000000000-', Origin: allowedOrigin },
     })
     assert.equal(response.status, 416)
@@ -243,7 +244,7 @@ await test('invalid upstream Content-Range and Content-Length are rejected', asy
   }
   const { server, baseUrl } = await startServer({ provider })
   try {
-    const response = await fetch(`${baseUrl}/v1/media?ticket=${encodeURIComponent(ticket())}`, { headers: { Range: 'bytes=100-109' } })
+    const response = await fetch(scopedUrl(`${baseUrl}/v1/media?ticket=${encodeURIComponent(ticket())}`), { headers: { Range: 'bytes=100-109' } })
     assert.equal(response.status, 502)
     assert.equal((await response.json()).error, 'range_response_invalid')
   } finally { await closeServer(server) }
@@ -272,7 +273,7 @@ await test('failed GET and HEAD Range validation cancels the upstream body witho
     }
     const { server, baseUrl, logs } = await startServer({ provider })
     try {
-      const response = await fetch(`${baseUrl}/v1/media?ticket=${encodeURIComponent(ticket())}`, {
+      const response = await fetch(scopedUrl(`${baseUrl}/v1/media?ticket=${encodeURIComponent(ticket())}`), {
         method, ...(method === 'GET' ? { headers: { Range: 'bytes=0-0' } } : {}),
       })
       assert.equal(response.status, 502)
@@ -294,7 +295,7 @@ await test('short ticket establishes a scoped session so later Range requests su
   const { server, baseUrl } = await startServer({ provider, now: () => now })
   try {
     const grant = ticket({ disposition: 'inline' }, now)
-    const first = await fetch(`${baseUrl}/v1/media?ticket=${encodeURIComponent(grant)}`, { headers: { Range: 'bytes=0-0' } })
+    const first = await fetch(scopedUrl(`${baseUrl}/v1/media?ticket=${encodeURIComponent(grant)}`), { headers: { Range: 'bytes=0-0' } })
     assert.equal(first.status, 206)
     const sessionCookie = cookiePair(first)
     assert.ok(sessionCookie.startsWith(MEDIA_SESSION_COOKIE))
@@ -303,7 +304,7 @@ await test('short ticket establishes a scoped session so later Range requests su
     assert.equal(initialSession.expiresAt, Math.floor(now / 1000) + 6 * 60 * 60)
     await first.arrayBuffer()
     now += 301_000
-    const resumed = await fetch(`${baseUrl}/v1/media?ticket=${encodeURIComponent(grant)}`, { headers: { Range: 'bytes=100-101', Cookie: sessionCookie } })
+    const resumed = await fetch(scopedUrl(`${baseUrl}/v1/media?ticket=${encodeURIComponent(grant)}`), { headers: { Range: 'bytes=100-101', Cookie: sessionCookie } })
     assert.equal(resumed.status, 206)
     assert.equal(resumed.headers.get('content-range'), 'bytes 100-101/32212254720')
     assert.equal(resumed.headers.get('set-cookie'), null, 'session-authenticated ranges do not renew the six-hour grant')
@@ -323,11 +324,11 @@ await test('expired ticket cannot use a different file session and original down
   const { server, baseUrl } = await startServer({ provider, now: () => now })
   try {
     const fileATicket = ticket({ fileId: 'video-A', disposition: 'inline' }, now)
-    const first = await fetch(`${baseUrl}/v1/media?ticket=${encodeURIComponent(fileATicket)}`, { headers: { Range: 'bytes=0-0' } })
+    const first = await fetch(scopedUrl(`${baseUrl}/v1/media?ticket=${encodeURIComponent(fileATicket)}`), { headers: { Range: 'bytes=0-0' } })
     const cookie = cookiePair(first)
     await first.arrayBuffer()
     const inlineOriginal = ticket({ fileId: 'document.pdf', purpose: 'original', disposition: 'inline' }, now)
-    const inline = await fetch(`${baseUrl}/v1/media?ticket=${encodeURIComponent(inlineOriginal)}`)
+    const inline = await fetch(scopedUrl(`${baseUrl}/v1/media?ticket=${encodeURIComponent(inlineOriginal)}`))
     assert.equal(inline.status, 206)
     assert.match(inline.headers.get('content-disposition'), /^inline;/)
     assert.equal(inline.headers.get('content-security-policy'), "default-src 'none'; sandbox")
@@ -336,7 +337,7 @@ await test('expired ticket cannot use a different file session and original down
 
     const fileBTicket = ticket({ fileId: 'video-B', disposition: 'inline' }, now)
     now += 301_000
-    const mismatched = await fetch(`${baseUrl}/v1/media?ticket=${encodeURIComponent(fileBTicket)}`, {
+    const mismatched = await fetch(scopedUrl(`${baseUrl}/v1/media?ticket=${encodeURIComponent(fileBTicket)}`), {
       headers: { Range: 'bytes=1-1', Cookie: cookie },
     })
     assert.equal(mismatched.status, 401)
@@ -344,7 +345,7 @@ await test('expired ticket cannot use a different file session and original down
     assert.deepEqual(reads, ['video-A', 'document.pdf'], 'a mismatched expired ticket is rejected before a file lookup')
 
     const videoDownload = ticket({ fileId: 'video-download', disposition: 'attachment' }, now)
-    const download = await fetch(`${baseUrl}/v1/media?ticket=${encodeURIComponent(videoDownload)}`, {
+    const download = await fetch(scopedUrl(`${baseUrl}/v1/media?ticket=${encodeURIComponent(videoDownload)}`), {
       headers: { Range: 'bytes=0-0' },
     })
     assert.equal(download.status, 206)
@@ -365,8 +366,8 @@ await test('simultaneous first requests keep video sessions independent by media
     const ticketB = ticket({ fileId: 'video-B', disposition: 'inline' }, now)
     // Both initial requests use the same empty cookie snapshot.
     const [firstA, firstB] = await Promise.all([
-      fetch(baseUrl + '/v1/media?ticket=' + encodeURIComponent(ticketA), { headers: { Range: 'bytes=0-0' } }),
-      fetch(baseUrl + '/v1/media?ticket=' + encodeURIComponent(ticketB), { headers: { Range: 'bytes=0-0' } }),
+      fetch(scopedUrl(baseUrl + '/v1/media?ticket=' + encodeURIComponent(ticketA)), { headers: { Range: 'bytes=0-0' } }),
+      fetch(scopedUrl(baseUrl + '/v1/media?ticket=' + encodeURIComponent(ticketB)), { headers: { Range: 'bytes=0-0' } }),
     ])
     assert.equal(firstA.status, 206)
     assert.equal(firstB.status, 206)
@@ -381,12 +382,12 @@ await test('simultaneous first requests keep video sessions independent by media
 
     now += 301_000
     const cookieHeader = cookieA + '; ' + cookieB
-    const resumedA = await fetch(baseUrl + '/v1/media?ticket=' + encodeURIComponent(ticketA), {
+    const resumedA = await fetch(scopedUrl(baseUrl + '/v1/media?ticket=' + encodeURIComponent(ticketA)), {
       headers: { Range: 'bytes=100-101', Cookie: cookieHeader },
     })
     assert.equal(resumedA.status, 206)
     await resumedA.arrayBuffer()
-    const resumedB = await fetch(baseUrl + '/v1/media?ticket=' + encodeURIComponent(ticketB), {
+    const resumedB = await fetch(scopedUrl(baseUrl + '/v1/media?ticket=' + encodeURIComponent(ticketB)), {
       headers: { Range: 'bytes=200-201', Cookie: cookieHeader },
     })
     assert.equal(resumedB.status, 206)
@@ -395,7 +396,7 @@ await test('simultaneous first requests keep video sessions independent by media
   } finally { await closeServer(server) }
 })
 
-await test('video session cookies stay bounded and evict the oldest grant', async () => {
+await test('video sessions use distinct cookie paths without evicting other files', async () => {
   let now = 1_800_000_000_000
   const provider = {
     getItem: async id => createItem({ id }),
@@ -408,22 +409,23 @@ await test('video session cookies stay bounded and evict the oldest grant', asyn
     for (let index = 0; index < 12; index += 1) {
       const grant = ticket({ fileId: 'bounded-video-' + index, disposition: 'inline' }, now)
       tickets.push(grant)
-      const response = await fetch(baseUrl + '/v1/media?ticket=' + encodeURIComponent(grant), {
+      const response = await fetch(scopedUrl(baseUrl + '/v1/media?ticket=' + encodeURIComponent(grant)), {
         headers: { Range: 'bytes=0-0', Cookie: [...jar].map(([name, value]) => name + '=' + value).join('; ') },
       })
       assert.equal(response.status, 206)
       applySetCookies(responseCookies(response), jar)
-      assert.ok(jar.size <= 8)
+      assert.equal(jar.size, index + 1)
       await response.arrayBuffer()
     }
-    assert.equal(jar.size, 8)
+    assert.equal(jar.size, 12)
     now += 301_000
     const cookie = [...jar].map(([name, value]) => name + '=' + value).join('; ')
-    const oldest = await fetch(baseUrl + '/v1/media?ticket=' + encodeURIComponent(tickets[0]), {
+    const oldest = await fetch(scopedUrl(baseUrl + '/v1/media?ticket=' + encodeURIComponent(tickets[0])), {
       headers: { Range: 'bytes=100-100', Cookie: cookie },
     })
-    assert.equal(oldest.status, 401)
-    const newest = await fetch(baseUrl + '/v1/media?ticket=' + encodeURIComponent(tickets.at(-1)), {
+    assert.equal(oldest.status, 206)
+    await oldest.arrayBuffer()
+    const newest = await fetch(scopedUrl(baseUrl + '/v1/media?ticket=' + encodeURIComponent(tickets.at(-1))), {
       headers: { Range: 'bytes=200-200', Cookie: cookie },
     })
     assert.equal(newest.status, 206)
@@ -440,11 +442,11 @@ await test('oversized legacy cookie headers are parsed and stale media cookies a
   const { server, baseUrl } = await startServer({ provider })
   try {
     const legacyCookies = Array.from({ length: 24 }, (_, index) =>
-      MEDIA_SESSION_COOKIE + index.toString(36).padStart(22, 'a') + '=' + 'x'.repeat(400))
+      '__Host-map7e-media-' + index.toString(36).padStart(22, 'a') + '=' + 'x'.repeat(400))
     const cookie = legacyCookies.join('; ')
     assert.ok(cookie.length > 8192)
     const grant = ticket({ fileId: 'new-after-legacy-cookies', disposition: 'inline' })
-    const response = await fetch(baseUrl + '/v1/media?ticket=' + encodeURIComponent(grant), {
+    const response = await fetch(scopedUrl(baseUrl + '/v1/media?ticket=' + encodeURIComponent(grant)), {
       headers: { Range: 'bytes=0-0', Cookie: cookie },
     })
     assert.equal(response.status, 206)
@@ -473,7 +475,7 @@ await test('filename truncation keeps Unicode Content-Disposition headers well f
     ]
     for (const [fileId, expected] of cases) {
       const grant = ticket({ fileId }, now)
-      const response = await fetch(baseUrl + '/v1/media?ticket=' + encodeURIComponent(grant), {
+      const response = await fetch(scopedUrl(baseUrl + '/v1/media?ticket=' + encodeURIComponent(grant)), {
         headers: { Range: 'bytes=0-0' },
       })
       assert.equal(response.status, 206)
@@ -494,15 +496,15 @@ await test('expired, tampered and wrong-storage tickets are refused before media
   try {
     const expired = ticket({}, now)
     now += 301_000
-    const expiredResponse = await fetch(`${baseUrl}/v1/media?ticket=${encodeURIComponent(expired)}`)
+    const expiredResponse = await fetch(scopedUrl(`${baseUrl}/v1/media?ticket=${encodeURIComponent(expired)}`))
     assert.equal(expiredResponse.status, 401)
     assert.equal((await expiredResponse.json()).error, 'media_ticket_expired')
 
-    const invalid = await fetch(`${baseUrl}/v1/media?ticket=bad`)
+    const invalid = await fetch(scopedUrl(`${baseUrl}/v1/media?ticket=bad`))
     assert.equal(invalid.status, 401)
 
     const otherStorage = ticket({ storageId: 'missing-storage' }, now)
-    const wrongStorage = await fetch(`${baseUrl}/v1/media?ticket=${encodeURIComponent(otherStorage)}`)
+    const wrongStorage = await fetch(scopedUrl(`${baseUrl}/v1/media?ticket=${encodeURIComponent(otherStorage)}`))
     assert.equal(wrongStorage.status, 404)
     assert.equal(reads, 0)
   } finally { await closeServer(server) }
@@ -514,11 +516,11 @@ await test('gateway rejects arbitrary URL input, extra purpose input, and unappr
   const { server, baseUrl } = await startServer({ provider })
   try {
     const grant = ticket()
-    const arbitrary = await fetch(`${baseUrl}/v1/media?url=${encodeURIComponent('https://attacker.test/file')}&ticket=${encodeURIComponent(grant)}`)
+    const arbitrary = await fetch(scopedUrl(`${baseUrl}/v1/media?url=${encodeURIComponent('https://attacker.test/file')}&ticket=${encodeURIComponent(grant)}`))
     assert.equal(arbitrary.status, 400)
-    const suppliedPurpose = await fetch(`${baseUrl}/v1/media?ticket=${encodeURIComponent(grant)}&purpose=original`)
+    const suppliedPurpose = await fetch(scopedUrl(`${baseUrl}/v1/media?ticket=${encodeURIComponent(grant)}&purpose=original`))
     assert.equal(suppliedPurpose.status, 400)
-    const wrongOrigin = await fetch(`${baseUrl}/v1/media?ticket=${encodeURIComponent(grant)}`, { headers: { Origin: 'https://attacker.test' } })
+    const wrongOrigin = await fetch(scopedUrl(`${baseUrl}/v1/media?ticket=${encodeURIComponent(grant)}`), { headers: { Origin: 'https://attacker.test' } })
     assert.equal(wrongOrigin.status, 403)
     assert.equal(reads, 0)
   } finally { await closeServer(server) }
@@ -535,12 +537,12 @@ await test('JPG preview falls back to original streaming while DNG preview remai
   const { server, baseUrl } = await startServer({ provider })
   try {
     const jpg = ticket({ fileId: 'jpg', purpose: 'preview', variant: 'preview' })
-    const jpgResponse = await fetch(`${baseUrl}/v1/media?ticket=${encodeURIComponent(jpg)}`)
+    const jpgResponse = await fetch(scopedUrl(`${baseUrl}/v1/media?ticket=${encodeURIComponent(jpg)}`))
     assert.equal(jpgResponse.status, 200)
     assert.equal(jpgResponse.headers.get('content-type'), 'image/jpeg')
     assert.deepEqual([...new Uint8Array(await jpgResponse.arrayBuffer())], [255, 216, 217])
     const raw = ticket({ fileId: 'raw', purpose: 'preview', variant: 'preview' })
-    const rawResponse = await fetch(`${baseUrl}/v1/media?ticket=${encodeURIComponent(raw)}`)
+    const rawResponse = await fetch(scopedUrl(`${baseUrl}/v1/media?ticket=${encodeURIComponent(raw)}`))
     assert.equal(rawResponse.status, 404)
     assert.equal((await rawResponse.json()).error, 'preview_unavailable')
     assert.equal(originalCalls, 1)
@@ -557,13 +559,13 @@ await test('thumbnail 412 does not fall back to full original and HEAD probes on
   const { server, baseUrl } = await startServer({ provider })
   try {
     const thumb = ticket({ purpose: 'preview', variant: 'thumbnail' })
-    const response = await fetch(`${baseUrl}/v1/media?ticket=${encodeURIComponent(thumb)}`)
+    const response = await fetch(scopedUrl(`${baseUrl}/v1/media?ticket=${encodeURIComponent(thumb)}`))
     assert.equal(response.status, 404)
     await response.arrayBuffer()
     assert.deepEqual(fullRanges, [])
 
     const video = ticket({ fileId: 'video-1', purpose: 'video' })
-    const head = await fetch(`${baseUrl}/v1/media?ticket=${encodeURIComponent(video)}`, { method: 'HEAD' })
+    const head = await fetch(scopedUrl(`${baseUrl}/v1/media?ticket=${encodeURIComponent(video)}`), { method: 'HEAD' })
     assert.equal(head.status, 200)
     assert.equal(head.headers.get('content-length'), '32212254720')
     assert.equal(head.headers.get('accept-ranges'), 'bytes')
@@ -582,7 +584,7 @@ await test('invalid and multipart Range requests return 416 before an upstream r
   try {
     const grant = ticket()
     for (const range of ['bytes=5-2', 'bytes=0-1,3-4', 'bytes=32212254720-']) {
-      const response = await fetch(`${baseUrl}/v1/media?ticket=${encodeURIComponent(grant)}`, { headers: { Range: range } })
+      const response = await fetch(scopedUrl(`${baseUrl}/v1/media?ticket=${encodeURIComponent(grant)}`), { headers: { Range: range } })
       assert.equal(response.status, 416)
       assert.equal((await response.json()).error, 'range_not_satisfiable')
     }
@@ -607,7 +609,7 @@ await test('30 GB Content-Length streams independently of the total file size', 
     logger: () => {},
   })
   const req = new EventEmitter()
-  req.url = `/v1/media?ticket=${encodeURIComponent(grant)}`
+  req.url = scopedUrl(`/v1/media?ticket=${encodeURIComponent(grant)}`)
   req.method = 'GET'
   req.headers = {}
   class CaptureResponse extends Writable {
@@ -623,4 +625,126 @@ await test('30 GB Content-Length streams independently of the total file size', 
   assert.equal(res.statusCode, 200)
   assert.equal(res.headers['content-length'], '32212254720')
   assert.equal(Buffer.concat(res.bytes).length, 3)
+})
+
+// Fixture URLs follow the same identity path that Cloud now issues.
+function scopedUrl(input) {
+  const url = new URL(input, 'http://media-gateway.test')
+  if (url.pathname !== '/v1/media') return input
+  try {
+    const token = url.searchParams.get('ticket')
+    const claims = JSON.parse(Buffer.from(token.split('.')[0], 'base64url').toString('utf8'))
+    url.pathname = mediaSessionPath(claims, secret)
+    return url.toString()
+  } catch { return input }
+}
+
+await test('concurrent videos at the former eight-cookie cap send only their own grant and retain six-hour expiry', async () => {
+  let now = 1_800_000_000_000
+  const { server, baseUrl } = await startServer({ now: () => now })
+  const jar = new CookieJar()
+  const urls = Array.from({ length: 20 }, (_, index) => scopedUrl(baseUrl + '/v1/media?ticket='
+    + encodeURIComponent(ticket({ fileId: 'parallel-' + index, disposition: 'inline' }, now))))
+  const request = url => fetch(url, { headers: { Range: 'bytes=0-0', Cookie: jar.header(url) } })
+  try {
+    for (const url of urls.slice(0, 8)) {
+      const response = await request(url)
+      assert.equal(response.status, 206)
+      jar.apply(responseCookies(response))
+      await response.arrayBuffer()
+    }
+    const responses = await Promise.all(urls.slice(8).map(request))
+    for (const response of responses.reverse()) {
+      assert.equal(response.status, 206)
+      const lines = responseCookies(response)
+      assert.equal(lines.length, 1)
+      assert.match(lines[0], /; Path=\/v1\/media\/[A-Za-z0-9_-]{22};/)
+      assert.match(lines[0], /; Secure; HttpOnly; SameSite=Strict$/)
+      assert.doesNotMatch(lines[0], /; Domain=/i)
+      jar.apply(lines)
+      await response.arrayBuffer()
+    }
+    assert.equal(jar.cookies.size, 20)
+    now += 301_000
+    for (const url of urls) {
+      assert.equal(jar.header(url).split('; ').length, 1)
+      const response = await request(url)
+      assert.equal(response.status, 206)
+      assert.equal(response.headers.get('set-cookie'), null)
+      await response.arrayBuffer()
+    }
+    now += 6 * 60 * 60 * 1000
+    assert.equal((await request(urls[0])).status, 401)
+  } finally { await closeServer(server) }
+})
+
+await test('legacy URLs redirect without reading upstream and legacy grants migrate without prolonging expiry or metadata', async () => {
+  let now = 1_800_000_000_000
+  const reads = []
+  const provider = { getItem: async id => { reads.push(id); return createItem({ id }) }, getFileResponse: async (_id, { range }) => partialResponse(range || 'bytes=0-0') }
+  const { server, baseUrl } = await startServer({ provider, now: () => now })
+  const tokens = ['legacy-A', 'legacy-B'].map(fileId => ticket({ fileId, disposition: 'inline' }, now))
+  const jar = new CookieJar()
+  jar.apply(tokens.map(token => legacyCookie(token, secret, now).line))
+  try {
+    now += 301_000
+    const redirect = await fetch(baseUrl + '/v1/media?ticket=' + encodeURIComponent(tokens[0]), { redirect: 'manual' })
+    assert.equal(redirect.status, 307)
+    assert.deepEqual(reads, [])
+    assert.equal(redirect.headers.get('set-cookie'), null)
+    assert.equal(redirect.headers.get('cache-control'), 'private, no-store')
+    const urlA = new URL(redirect.headers.get('location'), baseUrl).toString()
+    const upgraded = await fetch(urlA, { headers: { Range: 'bytes=0-0', Cookie: jar.header(urlA) } })
+    assert.equal(upgraded.status, 206)
+    jar.apply(responseCookies(upgraded))
+    await upgraded.arrayBuffer()
+    assert.equal(jar.cookies.size, 2, 'other valid legacy grants remain available for their own file request')
+    for (const cookie of jar.cookies.values()) {
+      const claims = verifyMediaSession(cookie.value, secret, { now })
+      assert.equal(claims.expiresAt, 1_800_000_000 + 1800)
+      if (cookie.path !== '/') assert.equal(claims.record, undefined)
+    }
+    const urlB = scopedUrl(baseUrl + '/v1/media?ticket=' + encodeURIComponent(tokens[1]))
+    const migratedB = await fetch(urlB, { headers: { Range: 'bytes=0-0', Cookie: jar.header(urlB) } })
+    assert.equal(migratedB.status, 206)
+    jar.apply(responseCookies(migratedB))
+    await migratedB.arrayBuffer()
+    assert.ok([...jar.cookies.values()].every(cookie => cookie.path.startsWith('/v1/media/')))
+    now = 1_800_000_000_000 + 1801_000
+    assert.equal((await fetch(urlB, { headers: { Range: 'bytes=0-0', Cookie: jar.header(urlB) } })).status, 401)
+  } finally { await closeServer(server) }
+})
+
+await test('scoped media path mismatches are rejected before Provider reads', async () => {
+  const reads = []
+  const { server, baseUrl } = await startServer({ provider: { getItem: async id => { reads.push(id); return createItem({ id }) } } })
+  try {
+    const urlA = new URL(scopedUrl(baseUrl + '/v1/media?ticket=' + encodeURIComponent(ticket({ fileId: 'path-A' }))))
+    const urlB = new URL(scopedUrl(baseUrl + '/v1/media?ticket=' + encodeURIComponent(ticket({ fileId: 'path-B' }))))
+    urlA.pathname = urlB.pathname
+    assert.equal((await fetch(urlA.toString())).status, 401)
+    assert.deepEqual(reads, [])
+  } finally { await closeServer(server) }
+})
+
+await test('legacy HEAD stays compatible with Cloud manual range checks and invalid duplicate cookies cannot shadow a valid grant', async () => {
+  let now = 1_800_000_000_000
+  const { server, baseUrl } = await startServer({ now: () => now })
+  const token = ticket({ fileId: 'legacy-head', disposition: 'inline' }, now)
+  try {
+    const legacy = baseUrl + '/v1/media?ticket=' + encodeURIComponent(token)
+    const head = await fetch(legacy, { method: 'HEAD', headers: { Range: 'bytes=0-0' }, redirect: 'manual' })
+    assert.equal(head.status, 206)
+    assert.equal(head.headers.get('content-range'), 'bytes 0-0/32212254720')
+    assert.equal(head.headers.get('set-cookie'), null)
+    const url = scopedUrl(legacy)
+    const first = await fetch(url, { headers: { Range: 'bytes=0-0' } })
+    const cookie = cookiePair(first)
+    await first.arrayBuffer()
+    now += 301_000
+    const spoofed = cookie.split('=', 1)[0] + '=' + 'x'.repeat(80) + '; ' + cookie
+    const resumed = await fetch(url, { headers: { Range: 'bytes=100-100', Cookie: spoofed } })
+    assert.equal(resumed.status, 206)
+    await resumed.arrayBuffer()
+  } finally { await closeServer(server) }
 })

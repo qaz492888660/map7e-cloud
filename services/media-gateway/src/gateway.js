@@ -10,14 +10,15 @@ import { quarkFidsMatch } from '../../../lib/storage/providers/quark.js'
 import {
   createMediaSession,
   MEDIA_SESSION_TTL_SECONDS,
+  mediaSessionPath,
   sameMediaIdentity,
   verifyMediaSession,
   verifyMediaTicket,
 } from '../../../lib/storage/media-ticket.js'
 
 export const MEDIA_GATEWAY_VERSION = '0.1.0'
-export const MEDIA_SESSION_COOKIE = '__Host-map7e-media-'
-const MEDIA_SESSION_COOKIE_MAX_GRANTS = 8
+export const MEDIA_SESSION_COOKIE = '__Secure-map7e-media-'
+const LEGACY_MEDIA_SESSION_COOKIE = '__Host-map7e-media-'
 const MEDIA_SESSION_COOKIE_HEADER_MAX_LENGTH = 65_536
 const MEDIA_SESSION_COOKIE_MAX_EVICTIONS = 32
 const RANGE_HEADER_MAX_LENGTH = 128
@@ -194,69 +195,75 @@ function addCors(req, res, env) {
 }
 
 function mediaSessionCookieName(claims, secret) {
-  const disposition = claims.disposition ?? (claims.purpose === 'preview' ? 'inline' : 'attachment')
-  const identity = JSON.stringify([
-    claims.storageId, claims.fileId, claims.parentId, claims.purpose, claims.variant ?? null, disposition,
-  ])
-  const suffix = crypto.createHmac('sha256', String(secret)).update(identity).digest('base64url').slice(0, 22)
-  return MEDIA_SESSION_COOKIE + suffix
+  return MEDIA_SESSION_COOKIE + mediaSessionPath(claims, secret).split('/').at(-1)
 }
 
-function readCookie(header, cookieName) {
-  if (typeof header !== 'string' || header.length > MEDIA_SESSION_COOKIE_HEADER_MAX_LENGTH) return null
+function readCookies(header, cookieName) {
+  if (typeof header !== 'string' || header.length > MEDIA_SESSION_COOKIE_HEADER_MAX_LENGTH) return []
+  const values = []
   for (const part of header.split(';')) {
     const separator = part.indexOf('=')
     if (separator < 0 || part.slice(0, separator).trim() !== cookieName) continue
     const value = part.slice(separator + 1).trim()
-    return /^[A-Za-z0-9_.-]{40,4096}$/.test(value) ? value : null
+    if (/^[A-Za-z0-9_.-]{40,4096}$/.test(value)) values.push(value)
+    if (values.length > 4) return []
   }
-  return null
+  return values
 }
 
-function mediaSessionCookiesToExpire(header, secret, now, currentCookieName) {
+function mediaSessionCookieUpdates(header, secret, now, currentCookieName) {
   if (typeof header !== 'string' || header.length > MEDIA_SESSION_COOKIE_HEADER_MAX_LENGTH) return []
-  const candidates = []
-  const toExpire = new Set()
+  const updates = []
+  const seen = new Set()
+  let budget = 3000
   for (const part of header.split(';')) {
     const separator = part.indexOf('=')
     if (separator < 0) continue
     const name = part.slice(0, separator).trim()
-    if (!name.startsWith(MEDIA_SESSION_COOKIE) || name === currentCookieName) continue
-    if (!/^__Host-map7e-media-[A-Za-z0-9_-]{22}$/.test(name)) continue
-    const token = part.slice(separator + 1).trim()
+    if ((!/^__Host-map7e-media-[A-Za-z0-9_-]{22}$/.test(name) && name !== '__Host-map7e-media') || seen.has(name)) continue
+    seen.add(name)
+    if (seen.size > MEDIA_SESSION_COOKIE_MAX_EVICTIONS) break
+    const lines = [name + '=; Path=/; Max-Age=0; Secure; HttpOnly; SameSite=Strict']
     try {
-      const claims = verifyMediaSession(token, secret, { now })
-      if (mediaSessionCookieName(claims, secret) !== name) throw new Error('media_session_cookie_mismatch')
-      candidates.push({ name, issuedAt: claims.issuedAt })
-    } catch {
-      toExpire.add(name)
-    }
+      const claims = verifyMediaSession(part.slice(separator + 1).trim(), secret, { now })
+      const scopedName = mediaSessionCookieName(claims, secret)
+      if (name !== '__Host-map7e-media' && name !== LEGACY_MEDIA_SESSION_COOKIE + scopedName.slice(MEDIA_SESSION_COOKIE.length)) throw new Error('media_session_cookie_mismatch')
+      if (scopedName !== currentCookieName) continue // Other valid grants migrate on their own file requests.
+    } catch {}
+    const length = lines.reduce((sum, line) => sum + Buffer.byteLength(line), 0)
+    // Bound legacy cleanup separately from the new file-scoped session.
+    if (length > budget) continue
+    budget -= length
+    updates.push(...lines)
   }
-  candidates.sort((left, right) => left.issuedAt - right.issuedAt)
-  const excess = Math.max(0, candidates.length + 1 - MEDIA_SESSION_COOKIE_MAX_GRANTS)
-  for (const entry of candidates.slice(0, excess)) toExpire.add(entry.name)
-  return [...toExpire].slice(0, MEDIA_SESSION_COOKIE_MAX_EVICTIONS)
+  return updates
 }
 
 function sessionFromCookie(header, expectedClaims, secret, now) {
   const cookieName = mediaSessionCookieName(expectedClaims, secret)
-  const token = readCookie(header, cookieName)
-  if (!token) return null
-  const claims = verifyMediaSession(token, secret, { now })
-  return sameMediaIdentity(expectedClaims, claims) ? claims : null
+  const legacyName = LEGACY_MEDIA_SESSION_COOKIE + cookieName.slice(MEDIA_SESSION_COOKIE.length)
+  for (const name of [cookieName, legacyName, '__Host-map7e-media']) {
+    for (const token of readCookies(header, name)) {
+      try {
+        const claims = verifyMediaSession(token, secret, { now })
+        if (sameMediaIdentity(expectedClaims, claims)) return { claims, legacyToken: name === cookieName ? null : token }
+      } catch {}
+    }
+  }
+  return null
 }
 
-function setSessionCookie(res, claims, secret, now, method, cookieHeader) {
-  if (method !== 'GET' || claims.grantType !== 'ticket' || claims.purpose !== 'video' || claims.disposition !== 'inline') return
-  const token = createMediaSession(claims, { secret, now: claims.issuedAt * 1000 })
-  const maxAge = Math.max(0, claims.issuedAt + MEDIA_SESSION_TTL_SECONDS - Math.floor(now / 1000))
-  if (maxAge > 0) {
-    const cookieName = mediaSessionCookieName(claims, secret)
-    const expiredCookies = mediaSessionCookiesToExpire(cookieHeader, secret, now, cookieName)
-      .map(name => name + '=; Path=/; Max-Age=0; Secure; HttpOnly; SameSite=Strict')
-    expiredCookies.push(cookieName + '=' + token + '; Path=/; Max-Age=' + maxAge + '; Secure; HttpOnly; SameSite=Strict')
-    res.setHeader('Set-Cookie', expiredCookies)
+function setSessionCookie(res, claims, secret, now, method, cookieHeader, legacyToken) {
+  if (method !== 'GET' || claims.purpose !== 'video' || claims.disposition !== 'inline') return
+  const cookies = mediaSessionCookieUpdates(cookieHeader, secret, now, mediaSessionCookieName(claims, secret))
+  if (claims.grantType === 'ticket' || legacyToken) {
+    const token = createMediaSession(claims, { secret, now: claims.issuedAt * 1000 })
+    const expiresAt = claims.grantType === 'session' ? claims.expiresAt : claims.issuedAt + MEDIA_SESSION_TTL_SECONDS
+    const maxAge = Math.max(0, expiresAt - Math.floor(now / 1000))
+    if (maxAge > 0) cookies.push(mediaSessionCookieName(claims, secret) + '=' + token
+      + '; Path=' + mediaSessionPath(claims, secret) + '; Max-Age=' + maxAge + '; Secure; HttpOnly; SameSite=Strict')
   }
+  if (cookies.length) res.setHeader('Set-Cookie', cookies)
 }
 
 function requestAbortSignal(req, res) {
@@ -343,6 +350,7 @@ export function createMediaGatewayHandler({
     let contentType = null
     let errorCode = null
     let bytesStreamed = 0
+    let legacySessionToken = null
     let stage = 'route'
     const requestRange = safeRangeForLog(req.headers.range)
 
@@ -357,7 +365,7 @@ export function createMediaGatewayHandler({
         res.setHeader('Content-Type', 'application/json; charset=utf-8')
         return res.end(JSON.stringify({ ok: true, version: MEDIA_GATEWAY_VERSION }))
       }
-      if (parsed.pathname !== '/v1/media') throw new MediaHttpError('not_found', 404)
+      if (parsed.pathname !== '/v1/media' && !/^\/v1\/media\/[A-Za-z0-9_-]{22}$/.test(parsed.pathname)) throw new MediaHttpError('not_found', 404)
       addCors(req, res, env)
       if (req.method === 'OPTIONS') {
         res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS')
@@ -381,10 +389,22 @@ export function createMediaGatewayHandler({
           expiredTicketClaims = verifyMediaTicket(ticket, secret, { now: now(), allowExpired: true })
         }
       }
+      const pathClaims = claims || expiredTicketClaims
+      if (parsed.pathname === '/v1/media' && pathClaims && req.method !== 'HEAD') {
+        status = 307
+        res.statusCode = status
+        res.setHeader('Location', mediaSessionPath(pathClaims, secret) + '?ticket=' + encodeURIComponent(ticket))
+        res.setHeader('Cache-Control', 'private, no-store')
+        res.setHeader('Referrer-Policy', 'no-referrer')
+        return res.end()
+      }
+      if (pathClaims && parsed.pathname !== '/v1/media' && parsed.pathname !== mediaSessionPath(pathClaims, secret)) throw new StorageError('media_ticket_invalid', 401)
       if (!claims) {
         if (!expiredTicketClaims) throw new StorageError(ticket ? 'media_ticket_expired' : 'media_ticket_invalid', 401)
-        claims = sessionFromCookie(req.headers.cookie, expiredTicketClaims, secret, now())
-        if (!claims) throw new StorageError('media_ticket_expired', 401)
+        const session = sessionFromCookie(req.headers.cookie, expiredTicketClaims, secret, now())
+        if (!session) throw new StorageError('media_ticket_expired', 401)
+        claims = session.claims
+        legacySessionToken = session.legacyToken
       }
 
       stage = 'storage_resolve'
@@ -446,7 +466,7 @@ export function createMediaGatewayHandler({
         response = { status: 200, headers }
       }
       headersForMedia(res, response, item, claims, contentType)
-      setSessionCookie(res, claims, secret, now(), req.method, req.headers.cookie)
+      setSessionCookie(res, claims, secret, now(), req.method, req.headers.cookie, legacySessionToken)
       status = response.status
       res.statusCode = status
       if (req.method === 'HEAD') {

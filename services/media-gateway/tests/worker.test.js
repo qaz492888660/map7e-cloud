@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict'
 import crypto from 'node:crypto'
 import test from 'node:test'
-import { createMediaTicket } from '../../../lib/storage/media-ticket.js'
+import { createMediaTicket, mediaSessionPath } from '../../../lib/storage/media-ticket.js'
+import { CookieJar, legacyCookie } from './session-cookie-fixture.js'
 import {
   createMediaGatewayWorker,
   isAllowedQuarkUrl,
@@ -275,7 +276,7 @@ async function requestMedia(fixture, fileId, {
   if (cookie) headers.set('Cookie', cookie)
   if (origin) headers.set('Origin', origin)
   const url = 'https://media.example.test/v1/media?ticket=' + encodeURIComponent(token)
-  return fixture.worker.fetch(new Request(url, { method, headers }), fixture.env)
+  return fixture.worker.fetch(new Request(scopedUrl(url), { method, headers }), fixture.env)
 }
 
 test('Worker verifies Node-issued HMAC tickets and rejects expired or modified grants', async () => {
@@ -289,9 +290,9 @@ test('Worker verifies Node-issued HMAC tickets and rejects expired or modified g
 
 test('Worker health is minimal and works without media secrets', async () => {
   const fixture = await createFixture({ envOverrides: { MEDIA_GATEWAY_SIGNING_SECRET: undefined } })
-  const response = await fixture.worker.fetch(new Request('https://media.example.test/health'), fixture.env)
+  const response = await fixture.worker.fetch(new Request(scopedUrl('https://media.example.test/health')), fixture.env)
   assert.equal(response.status, 200)
-  assert.deepEqual(await response.json(), { ok: true, version: '0.2.12' })
+  assert.deepEqual(await response.json(), { ok: true, version: '0.2.13' })
   assert.equal(fixture.state.redisRequests.length, 0)
 })
 
@@ -781,7 +782,7 @@ test('Worker keeps explicitly inline original media inline', async () => {
   const fixture = await createFixture()
   const token = ticketFor('inline-document', { purpose: 'original', disposition: 'inline' })
   const response = await fixture.worker.fetch(new Request(
-    'https://media.example.test/v1/media?ticket=' + encodeURIComponent(token),
+    scopedUrl('https://media.example.test/v1/media?ticket=' + encodeURIComponent(token)),
   ), fixture.env)
   assert.equal(response.status, 200)
   assert.match(response.headers.get('content-disposition'), /^inline;/)
@@ -791,7 +792,7 @@ test('Worker keeps explicitly inline original media inline', async () => {
 
   const downloadToken = ticketFor('video-download', { disposition: 'attachment' })
   const download = await fixture.worker.fetch(new Request(
-    'https://media.example.test/v1/media?ticket=' + encodeURIComponent(downloadToken),
+    scopedUrl('https://media.example.test/v1/media?ticket=' + encodeURIComponent(downloadToken)),
     { headers: { Range: 'bytes=0-0', Origin: allowedOrigin } },
   ), fixture.env)
   assert.equal(download.status, 206)
@@ -918,7 +919,7 @@ test('configured site domain rejects cross-site Worker media hosts', async () =>
   const fixture = await createFixture()
   const token = ticketFor('cross-site-video', {}, fixedNow)
   const response = await fixture.worker.fetch(new Request(
-    'https://map7e-cloud.workers.dev/v1/media?ticket=' + encodeURIComponent(token),
+    scopedUrl('https://map7e-cloud.workers.dev/v1/media?ticket=' + encodeURIComponent(token)),
     { headers: { Origin: allowedOrigin } },
   ), fixture.env)
   assert.equal(response.status, 403)
@@ -1024,7 +1025,7 @@ test('ticket and session support independent seeks after the five-minute ticket 
   const fixture = await createFixture()
   const token = ticketFor('seek-video', { disposition: 'inline' }, fixedNow)
   const first = await fixture.worker.fetch(new Request(
-    'https://media.example.test/v1/media?ticket=' + encodeURIComponent(token),
+    scopedUrl('https://media.example.test/v1/media?ticket=' + encodeURIComponent(token)),
     { headers: { Range: 'bytes=0-0', Origin: allowedOrigin } },
   ), fixture.env)
   assert.equal(first.status, 206)
@@ -1034,7 +1035,7 @@ test('ticket and session support independent seeks after the five-minute ticket 
   assert.equal(initialSession.expiresAt, Math.floor(fixedNow / 1000) + 6 * 60 * 60)
   fixture.setNow(fixedNow + 301_000)
   const second = await fixture.worker.fetch(new Request(
-    'https://media.example.test/v1/media?ticket=' + encodeURIComponent(token),
+    scopedUrl('https://media.example.test/v1/media?ticket=' + encodeURIComponent(token)),
     { headers: { Range: 'bytes=2000000000-2000000001', Cookie: cookie, Origin: allowedOrigin } },
   ), fixture.env)
   assert.equal(second.status, 206)
@@ -1048,7 +1049,7 @@ test('expired Worker ticket cannot consume another file session', async () => {
   const fixture = await createFixture()
   const firstToken = ticketFor('video-A', { disposition: 'inline' }, fixedNow)
   const first = await fixture.worker.fetch(new Request(
-    'https://media.example.test/v1/media?ticket=' + encodeURIComponent(firstToken),
+    scopedUrl('https://media.example.test/v1/media?ticket=' + encodeURIComponent(firstToken)),
     { headers: { Range: 'bytes=0-0', Origin: allowedOrigin } },
   ), fixture.env)
   assert.equal(first.status, 206)
@@ -1058,7 +1059,7 @@ test('expired Worker ticket cannot consume another file session', async () => {
   fixture.setNow(fixedNow + 301_000)
   const secondToken = ticketFor('video-B', { disposition: 'inline' }, fixedNow)
   const second = await fixture.worker.fetch(new Request(
-    'https://media.example.test/v1/media?ticket=' + encodeURIComponent(secondToken),
+    scopedUrl('https://media.example.test/v1/media?ticket=' + encodeURIComponent(secondToken)),
     { headers: { Range: 'bytes=1-1', Cookie: cookie, Origin: allowedOrigin } },
   ), fixture.env)
   assert.equal(second.status, 401)
@@ -1073,11 +1074,11 @@ test('Worker preserves video sessions from simultaneous initial requests', async
   // Both initial requests use the same empty cookie snapshot.
   const [firstA, firstB] = await Promise.all([
     fixture.worker.fetch(new Request(
-      'https://media.example.test/v1/media?ticket=' + encodeURIComponent(tokenA),
+      scopedUrl('https://media.example.test/v1/media?ticket=' + encodeURIComponent(tokenA)),
       { headers: { Range: 'bytes=0-0', Origin: allowedOrigin } },
     ), fixture.env),
     fixture.worker.fetch(new Request(
-      'https://media.example.test/v1/media?ticket=' + encodeURIComponent(tokenB),
+      scopedUrl('https://media.example.test/v1/media?ticket=' + encodeURIComponent(tokenB)),
       { headers: { Range: 'bytes=0-0', Origin: allowedOrigin } },
     ), fixture.env),
   ])
@@ -1095,13 +1096,13 @@ test('Worker preserves video sessions from simultaneous initial requests', async
   fixture.setNow(fixedNow + 301_000)
   const cookieHeader = cookieA + '; ' + cookieB
   const resumedA = await fixture.worker.fetch(new Request(
-    'https://media.example.test/v1/media?ticket=' + encodeURIComponent(tokenA),
+    scopedUrl('https://media.example.test/v1/media?ticket=' + encodeURIComponent(tokenA)),
     { headers: { Range: 'bytes=100-101', Cookie: cookieHeader, Origin: allowedOrigin } },
   ), fixture.env)
   assert.equal(resumedA.status, 206)
   await resumedA.arrayBuffer()
   const resumedB = await fixture.worker.fetch(new Request(
-    'https://media.example.test/v1/media?ticket=' + encodeURIComponent(tokenB),
+    scopedUrl('https://media.example.test/v1/media?ticket=' + encodeURIComponent(tokenB)),
     { headers: { Range: 'bytes=200-201', Cookie: cookieHeader, Origin: allowedOrigin } },
   ), fixture.env)
   assert.equal(resumedB.status, 206)
@@ -1109,7 +1110,7 @@ test('Worker preserves video sessions from simultaneous initial requests', async
   await resumedB.arrayBuffer()
 })
 
-test('Worker bounds video session cookies and evicts the oldest grant', async () => {
+test('Worker video sessions use distinct cookie paths without evicting other files', async () => {
   const fixture = await createFixture()
   const jar = new Map()
   const tickets = []
@@ -1117,7 +1118,7 @@ test('Worker bounds video session cookies and evicts the oldest grant', async ()
     const token = ticketFor('bounded-video-' + index, { disposition: 'inline' }, fixedNow)
     tickets.push(token)
     const response = await fixture.worker.fetch(new Request(
-      'https://media.example.test/v1/media?ticket=' + encodeURIComponent(token),
+      scopedUrl('https://media.example.test/v1/media?ticket=' + encodeURIComponent(token)),
       { headers: {
         Range: 'bytes=0-0',
         Origin: allowedOrigin,
@@ -1126,19 +1127,20 @@ test('Worker bounds video session cookies and evicts the oldest grant', async ()
     ), fixture.env)
     assert.equal(response.status, 206)
     applySetCookies(responseCookies(response), jar)
-    assert.ok(jar.size <= 8)
+    assert.equal(jar.size, index + 1)
     await response.arrayBuffer()
   }
-  assert.equal(jar.size, 8)
+  assert.equal(jar.size, 12)
   fixture.setNow(fixedNow + 301_000)
   const cookie = [...jar].map(([name, value]) => name + '=' + value).join('; ')
   const oldest = await fixture.worker.fetch(new Request(
-    'https://media.example.test/v1/media?ticket=' + encodeURIComponent(tickets[0]),
+    scopedUrl('https://media.example.test/v1/media?ticket=' + encodeURIComponent(tickets[0])),
     { headers: { Range: 'bytes=100-100', Cookie: cookie, Origin: allowedOrigin } },
   ), fixture.env)
-  assert.equal(oldest.status, 401)
+  assert.equal(oldest.status, 206)
+  await oldest.arrayBuffer()
   const newest = await fixture.worker.fetch(new Request(
-    'https://media.example.test/v1/media?ticket=' + encodeURIComponent(tickets.at(-1)),
+    scopedUrl('https://media.example.test/v1/media?ticket=' + encodeURIComponent(tickets.at(-1))),
     { headers: { Range: 'bytes=200-200', Cookie: cookie, Origin: allowedOrigin } },
   ), fixture.env)
   assert.equal(newest.status, 206)
@@ -1149,12 +1151,12 @@ test('Worker bounds video session cookies and evicts the oldest grant', async ()
 test('Worker parses oversized legacy Cookie headers and clears stale media cookies', async () => {
   const fixture = await createFixture()
   const legacyCookies = Array.from({ length: 24 }, (_, index) =>
-    MEDIA_SESSION_COOKIE + index.toString(36).padStart(22, 'a') + '=' + 'x'.repeat(400))
+    '__Host-map7e-media-' + index.toString(36).padStart(22, 'a') + '=' + 'x'.repeat(400))
   const cookie = legacyCookies.join('; ')
   assert.ok(cookie.length > 8192)
   const token = ticketFor('new-after-legacy-cookies', { disposition: 'inline' }, fixedNow)
   const response = await fixture.worker.fetch(new Request(
-    'https://media.example.test/v1/media?ticket=' + encodeURIComponent(token),
+    scopedUrl('https://media.example.test/v1/media?ticket=' + encodeURIComponent(token)),
     { headers: { Range: 'bytes=0-0', Cookie: cookie, Origin: allowedOrigin } },
   ), fixture.env)
   assert.equal(response.status, 206)
@@ -1177,7 +1179,7 @@ test('Worker filename truncation keeps Unicode Content-Disposition headers well 
   for (const [fileId, expected] of cases) {
     const token = ticketFor(fileId, {}, fixedNow)
     const response = await fixture.worker.fetch(new Request(
-      'https://media.example.test/v1/media?ticket=' + encodeURIComponent(token),
+      scopedUrl('https://media.example.test/v1/media?ticket=' + encodeURIComponent(token)),
       { headers: { Range: 'bytes=0-0', Origin: allowedOrigin } },
     ), fixture.env)
     assert.equal(response.status, 206)
@@ -1193,13 +1195,123 @@ test('wrong Origin, method, arbitrary URL and invalid FID do not reach Quark med
   const fixture = await createFixture()
   const grant = ticketFor('guarded-video')
   const url = 'https://media.example.test/v1/media?ticket=' + encodeURIComponent(grant)
-  const wrongOrigin = await fixture.worker.fetch(new Request(url, { headers: { Origin: 'https://evil.example' } }), fixture.env)
+  const wrongOrigin = await fixture.worker.fetch(new Request(scopedUrl(url), { headers: { Origin: 'https://evil.example' } }), fixture.env)
   assert.equal(wrongOrigin.status, 403)
-  const post = await fixture.worker.fetch(new Request(url, { method: 'POST' }), fixture.env)
+  const post = await fixture.worker.fetch(new Request(scopedUrl(url), { method: 'POST' }), fixture.env)
   assert.equal(post.status, 405)
-  const arbitrary = await fixture.worker.fetch(new Request(url + '&url=https%3A%2F%2Fevil.example%2Ffile'), fixture.env)
+  const arbitrary = await fixture.worker.fetch(new Request(scopedUrl(url + '&url=https%3A%2F%2Fevil.example%2Ffile')), fixture.env)
   assert.equal(arbitrary.status, 400)
   assert.equal(fixture.state.apiRequests.length, 0)
   assert.equal(quarkFidsMatch('a|opaque', 'b|opaque'), true)
   assert.equal(quarkFidsMatch('opaque-a', 'opaque-b'), false)
+})
+
+// Fixture URLs follow the same identity path that Cloud now issues.
+function scopedUrl(input) {
+  const url = new URL(input, 'http://media-gateway.test')
+  if (url.pathname !== '/v1/media') return input
+  try {
+    const token = url.searchParams.get('ticket')
+    const claims = JSON.parse(Buffer.from(token.split('.')[0], 'base64url').toString('utf8'))
+    url.pathname = mediaSessionPath(claims, ticketSecret)
+    return url.toString()
+  } catch { return input }
+}
+
+test('Worker concurrent videos at the former eight-cookie cap each send one grant and retain six-hour expiry', async () => {
+  const fixture = await createFixture()
+  const jar = new CookieJar()
+  const urls = Array.from({ length: 20 }, (_, index) => scopedUrl('https://media.example.test/v1/media?ticket='
+    + encodeURIComponent(ticketFor('parallel-' + index, { disposition: 'inline' }, fixedNow))))
+  const request = url => fixture.worker.fetch(new Request(url, { headers: { Range: 'bytes=0-0', Origin: allowedOrigin, Cookie: jar.header(url) } }), fixture.env)
+  for (const url of urls.slice(0, 8)) {
+    const response = await request(url)
+    assert.equal(response.status, 206)
+    jar.apply(responseCookies(response))
+    await response.arrayBuffer()
+  }
+  const responses = await Promise.all(urls.slice(8).map(request))
+  for (const response of responses.reverse()) {
+    assert.equal(response.status, 206)
+    const lines = responseCookies(response)
+    assert.equal(lines.length, 1)
+    assert.match(lines[0], /; Path=\/v1\/media\/[A-Za-z0-9_-]{22};/)
+    assert.match(lines[0], /; Secure; HttpOnly; SameSite=Strict$/)
+    assert.doesNotMatch(lines[0], /; Domain=/i)
+    jar.apply(lines)
+    await response.arrayBuffer()
+  }
+  assert.equal(jar.cookies.size, 20)
+  fixture.setNow(fixedNow + 301_000)
+  for (const url of urls) {
+    assert.equal(jar.header(url).split('; ').length, 1)
+    const response = await request(url)
+    assert.equal(response.status, 206)
+    assert.equal(response.headers.get('set-cookie'), null)
+    await response.arrayBuffer()
+  }
+  fixture.setNow(fixedNow + 6 * 60 * 60 * 1000 + 1000)
+  assert.equal((await request(urls[0])).status, 401)
+})
+
+test('Worker legacy URLs redirect without upstream reads and legacy grants migrate with their original deadline', async () => {
+  const fixture = await createFixture()
+  const tokens = ['legacy-A', 'legacy-B'].map(fileId => ticketFor(fileId, { disposition: 'inline' }, fixedNow))
+  const jar = new CookieJar()
+  jar.apply(tokens.map(token => legacyCookie(token, ticketSecret, fixedNow).line))
+  fixture.setNow(fixedNow + 301_000)
+  const redirect = await fixture.worker.fetch(new Request('https://media.example.test/v1/media?ticket=' + encodeURIComponent(tokens[0])), fixture.env)
+  assert.equal(redirect.status, 307)
+  assert.equal(fixture.state.apiRequests.length, 0)
+  assert.equal(redirect.headers.get('set-cookie'), null)
+  assert.equal(redirect.headers.get('cache-control'), 'private, no-store')
+  const urlA = new URL(redirect.headers.get('location'), 'https://media.example.test').toString()
+  const upgraded = await fixture.worker.fetch(new Request(urlA, { headers: { Range: 'bytes=0-0', Cookie: jar.header(urlA), Origin: allowedOrigin } }), fixture.env)
+  assert.equal(upgraded.status, 206)
+  jar.apply(responseCookies(upgraded))
+  await upgraded.arrayBuffer()
+  assert.equal(jar.cookies.size, 2)
+  for (const cookie of jar.cookies.values()) {
+    const claims = await verifyGrant(cookie.value, ticketSecret, { now: fixedNow + 301_000, grantType: 'session' })
+    assert.equal(claims.expiresAt, Math.floor(fixedNow / 1000) + 1800)
+    if (cookie.path !== '/') assert.equal(claims.record, undefined)
+  }
+  const urlB = scopedUrl('https://media.example.test/v1/media?ticket=' + encodeURIComponent(tokens[1]))
+  const resumed = await fixture.worker.fetch(new Request(urlB, { headers: { Range: 'bytes=0-0', Cookie: jar.header(urlB), Origin: allowedOrigin } }), fixture.env)
+  assert.equal(resumed.status, 206)
+  jar.apply(responseCookies(resumed))
+  await resumed.arrayBuffer()
+  assert.ok([...jar.cookies.values()].every(cookie => cookie.path.startsWith('/v1/media/')))
+  fixture.setNow(fixedNow + 1801_000)
+  assert.equal((await fixture.worker.fetch(new Request(urlB, { headers: { Range: 'bytes=0-0', Cookie: jar.header(urlB) } }), fixture.env)).status, 401)
+})
+
+test('Worker rejects mismatched scoped media paths before Quark reads', async () => {
+  const fixture = await createFixture()
+  const urlA = new URL(scopedUrl('https://media.example.test/v1/media?ticket=' + encodeURIComponent(ticketFor('path-A'))))
+  const urlB = new URL(scopedUrl('https://media.example.test/v1/media?ticket=' + encodeURIComponent(ticketFor('path-B'))))
+  urlA.pathname = urlB.pathname
+  assert.equal((await fixture.worker.fetch(new Request(urlA.toString()), fixture.env)).status, 401)
+  assert.equal(fixture.state.apiRequests.length, 0)
+})
+
+test('Worker legacy HEAD stays compatible with manual Cloud probes and invalid duplicate cookies cannot shadow a valid grant', async () => {
+  const fixture = await createFixture()
+  const token = ticketFor('legacy-head', { disposition: 'inline' }, fixedNow)
+  const legacy = 'https://media.example.test/v1/media?ticket=' + encodeURIComponent(token)
+  const head = await fixture.worker.fetch(new Request(legacy, {
+    method: 'HEAD', headers: { Range: 'bytes=0-0', Origin: allowedOrigin },
+  }), fixture.env)
+  assert.equal(head.status, 206)
+  assert.equal(head.headers.get('content-range'), 'bytes 0-0/32212254720')
+  assert.equal(head.headers.get('set-cookie'), null)
+  const url = scopedUrl(legacy)
+  const first = await fixture.worker.fetch(new Request(url, { headers: { Range: 'bytes=0-0', Origin: allowedOrigin } }), fixture.env)
+  const cookie = cookiePair(first)
+  await first.arrayBuffer()
+  fixture.setNow(fixedNow + 301_000)
+  const spoofed = cookie.split('=', 1)[0] + '=' + 'x'.repeat(80) + '; ' + cookie
+  const resumed = await fixture.worker.fetch(new Request(url, { headers: { Range: 'bytes=100-100', Cookie: spoofed, Origin: allowedOrigin } }), fixture.env)
+  assert.equal(resumed.status, 206)
+  await resumed.arrayBuffer()
 })

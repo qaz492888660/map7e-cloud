@@ -1,9 +1,9 @@
 import { OFFICIAL_CLIENT_ID, OFFICIAL_SIGN_KEY } from '../../../lib/storage/providers/quark-client.js'
 import { QUARK_FILE_SIZE_LIMIT, quarkDownloadLimit, quarkDownloadLimitBody } from '../../../lib/storage/quark-download-limit.js'
 
-export const MEDIA_GATEWAY_VERSION = '0.2.12'
-export const MEDIA_SESSION_COOKIE = '__Host-map7e-media-'
-const MEDIA_SESSION_COOKIE_MAX_GRANTS = 8
+export const MEDIA_GATEWAY_VERSION = '0.2.13'
+export const MEDIA_SESSION_COOKIE = '__Secure-map7e-media-'
+const LEGACY_MEDIA_SESSION_COOKIE = '__Host-map7e-media-'
 const MEDIA_SESSION_COOKIE_HEADER_MAX_LENGTH = 65_536
 const MEDIA_SESSION_COOKIE_MAX_EVICTIONS = 32
 const MAX_RANGE_LENGTH = 128
@@ -156,7 +156,7 @@ async function makeSession(claims, secret) {
     ...(claims.variant === undefined ? {} : { variant: claims.variant }),
     ...(claims.disposition === undefined ? {} : { disposition: claims.disposition }),
     issuedAt,
-    expiresAt: issuedAt + 6 * 60 * 60,
+    expiresAt: claims.grantType === 'session' ? Math.min(claims.expiresAt, issuedAt + 6 * 60 * 60) : issuedAt + 6 * 60 * 60,
   }
   if (!validClaims(session)) throw new GatewayError('media_ticket_invalid', 401)
   return signClaims(session, secret)
@@ -165,66 +165,82 @@ async function makeSession(claims, secret) {
 async function mediaSessionCookieName(claims, secret) {
   const disposition = claims.disposition ?? (claims.purpose === 'preview' ? 'inline' : 'attachment')
   const identity = JSON.stringify([
-    claims.storageId, claims.fileId, claims.parentId, claims.purpose, claims.variant ?? null, disposition,
+    claims.storageId, claims.fileId, claims.parentId, claims.purpose,
+    claims.purpose === 'preview' ? claims.variant ?? null : null, disposition,
   ])
   return MEDIA_SESSION_COOKIE + bytesToBase64Url(await hmacBytes(secret, identity)).slice(0, 22)
 }
 
-function readCookie(header, cookieName) {
-  if (typeof header !== 'string' || header.length > MEDIA_SESSION_COOKIE_HEADER_MAX_LENGTH) return null
+async function mediaSessionPath(claims, secret) {
+  return '/v1/media/' + (await mediaSessionCookieName(claims, secret)).slice(MEDIA_SESSION_COOKIE.length)
+}
+
+function readCookies(header, cookieName) {
+  if (typeof header !== 'string' || header.length > MEDIA_SESSION_COOKIE_HEADER_MAX_LENGTH) return []
+  const values = []
   for (const part of header.split(';')) {
     const separator = part.indexOf('=')
     if (separator < 0 || part.slice(0, separator).trim() !== cookieName) continue
     const value = part.slice(separator + 1).trim()
-    return /^[A-Za-z0-9_.-]{40,4096}$/.test(value) ? value : null
+    if (/^[A-Za-z0-9_.-]{40,4096}$/.test(value)) values.push(value)
+    if (values.length > 4) return []
   }
-  return null
+  return values
 }
 
-async function mediaSessionCookiesToExpire(header, secret, now, currentCookieName) {
+async function mediaSessionCookieUpdates(header, secret, now, currentCookieName) {
   if (typeof header !== 'string' || header.length > MEDIA_SESSION_COOKIE_HEADER_MAX_LENGTH) return []
-  const candidates = []
-  const toExpire = new Set()
+  const updates = []
+  const seen = new Set()
+  let budget = 3000
   for (const part of header.split(';')) {
     const separator = part.indexOf('=')
     if (separator < 0) continue
     const name = part.slice(0, separator).trim()
-    if (!name.startsWith(MEDIA_SESSION_COOKIE) || name === currentCookieName) continue
-    if (!/^__Host-map7e-media-[A-Za-z0-9_-]{22}$/.test(name)) continue
-    const token = part.slice(separator + 1).trim()
+    if ((!/^__Host-map7e-media-[A-Za-z0-9_-]{22}$/.test(name) && name !== '__Host-map7e-media') || seen.has(name)) continue
+    seen.add(name)
+    if (seen.size > MEDIA_SESSION_COOKIE_MAX_EVICTIONS) break
+    const lines = [name + '=; Path=/; Max-Age=0; Secure; HttpOnly; SameSite=Strict']
     try {
-      const claims = await verifyGrant(token, secret, { now, grantType: 'session' })
-      if (await mediaSessionCookieName(claims, secret) !== name) throw new Error('media_session_cookie_mismatch')
-      candidates.push({ name, issuedAt: claims.issuedAt })
-    } catch {
-      toExpire.add(name)
-    }
+      const claims = await verifyGrant(part.slice(separator + 1).trim(), secret, { now, grantType: 'session' })
+      const scopedName = await mediaSessionCookieName(claims, secret)
+      if (name !== '__Host-map7e-media' && name !== LEGACY_MEDIA_SESSION_COOKIE + scopedName.slice(MEDIA_SESSION_COOKIE.length)) throw new Error('media_session_cookie_mismatch')
+      if (scopedName !== currentCookieName) continue // Other valid grants migrate on their own file requests.
+    } catch {}
+    const length = lines.reduce((sum, line) => sum + encoder.encode(line).length, 0)
+    // Bound legacy cleanup separately from the new file-scoped session.
+    if (length > budget) continue
+    budget -= length
+    updates.push(...lines)
   }
-  candidates.sort((left, right) => left.issuedAt - right.issuedAt)
-  const excess = Math.max(0, candidates.length + 1 - MEDIA_SESSION_COOKIE_MAX_GRANTS)
-  for (const entry of candidates.slice(0, excess)) toExpire.add(entry.name)
-  return [...toExpire].slice(0, MEDIA_SESSION_COOKIE_MAX_EVICTIONS)
+  return updates
 }
 
 async function sessionFromCookie(header, expectedClaims, secret, now) {
   const cookieName = await mediaSessionCookieName(expectedClaims, secret)
-  const token = readCookie(header, cookieName)
-  if (!token) return null
-  const claims = await verifyGrant(token, secret, { now, grantType: 'session' })
-  return sameMediaIdentity(expectedClaims, claims) ? claims : null
+  const legacyName = LEGACY_MEDIA_SESSION_COOKIE + cookieName.slice(MEDIA_SESSION_COOKIE.length)
+  for (const name of [cookieName, legacyName, '__Host-map7e-media']) {
+    for (const token of readCookies(header, name)) {
+      try {
+        const claims = await verifyGrant(token, secret, { now, grantType: 'session' })
+        if (sameMediaIdentity(expectedClaims, claims)) return { claims, legacyToken: name === cookieName ? null : token }
+      } catch {}
+    }
+  }
+  return null
 }
 
-async function setSessionCookie(claims, secret, now, cookieHeader) {
-  if (claims.grantType !== 'ticket' || claims.purpose !== 'video' || claims.disposition !== 'inline') return null
-  const token = await makeSession(claims, secret)
-  const maxAge = Math.max(0, claims.issuedAt + 6 * 60 * 60 - Math.floor(now / 1000))
-  if (!maxAge) return null
-  const cookieName = await mediaSessionCookieName(claims, secret)
-  const expiredCookies = await mediaSessionCookiesToExpire(cookieHeader, secret, now, cookieName)
-  return [
-    ...expiredCookies.map(name => name + '=; Path=/; Max-Age=0; Secure; HttpOnly; SameSite=Strict'),
-    cookieName + '=' + token + '; Path=/; Max-Age=' + maxAge + '; Secure; HttpOnly; SameSite=Strict',
-  ]
+async function setSessionCookie(claims, secret, now, cookieHeader, legacyToken) {
+  if (claims.purpose !== 'video' || claims.disposition !== 'inline') return null
+  const cookies = await mediaSessionCookieUpdates(cookieHeader, secret, now, await mediaSessionCookieName(claims, secret))
+  if (claims.grantType === 'ticket' || legacyToken) {
+    const token = await makeSession(claims, secret)
+    const expiresAt = claims.grantType === 'session' ? claims.expiresAt : claims.issuedAt + 6 * 60 * 60
+    const maxAge = Math.max(0, expiresAt - Math.floor(now / 1000))
+    if (maxAge > 0) cookies.push(await mediaSessionCookieName(claims, secret) + '=' + token
+      + '; Path=' + await mediaSessionPath(claims, secret) + '; Max-Age=' + maxAge + '; Secure; HttpOnly; SameSite=Strict')
+  }
+  return cookies.length ? cookies : null
 }
 
 function rangeError(size) {
@@ -1305,6 +1321,7 @@ export function createMediaGatewayWorker({
       let quarkFailure = null
       let fileSize = null
       let bytesStreamed = 0
+      let legacySessionToken = null
       let logged = false
       const finishLog = async streamError => {
         if (logged) return
@@ -1343,7 +1360,7 @@ export function createMediaGatewayWorker({
           await finishLog()
           return response
         }
-        if (url.pathname !== '/v1/media') throw new GatewayError('not_found', 404)
+        if (url.pathname !== '/v1/media' && !/^\/v1\/media\/[A-Za-z0-9_-]{22}$/.test(url.pathname)) throw new GatewayError('not_found', 404)
         cors = corsHeaders(request, env)
         if (request.method === 'OPTIONS') {
           cors.set('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS')
@@ -1369,10 +1386,23 @@ export function createMediaGatewayWorker({
             expiredTicketClaims = await verifyGrant(token, secret, { now: now(), grantType: 'ticket', allowExpired: true })
           }
         }
+        const pathClaims = claims || expiredTicketClaims
+        if (url.pathname === '/v1/media' && pathClaims && request.method !== 'HEAD') {
+          status = 307
+          const headers = new Headers(cors)
+          headers.set('Location', await mediaSessionPath(pathClaims, secret) + '?ticket=' + encodeURIComponent(token))
+          headers.set('Cache-Control', 'private, no-store')
+          headers.set('Referrer-Policy', 'no-referrer')
+          await finishLog()
+          return new Response(null, { status, headers })
+        }
+        if (pathClaims && url.pathname !== '/v1/media' && url.pathname !== await mediaSessionPath(pathClaims, secret)) throw new GatewayError('media_ticket_invalid', 401)
         if (!claims) {
           if (!expiredTicketClaims) throw new GatewayError(token ? 'media_ticket_expired' : 'media_ticket_invalid', 401)
-          claims = await sessionFromCookie(request.headers.get('cookie'), expiredTicketClaims, secret, now())
-          if (!claims) throw new GatewayError('media_ticket_expired', 401)
+          const session = await sessionFromCookie(request.headers.get('cookie'), expiredTicketClaims, secret, now())
+          if (!session) throw new GatewayError('media_ticket_expired', 401)
+          claims = session.claims
+          legacySessionToken = session.legacyToken
         }
         if (!MEDIA_PURPOSES.has(claims.purpose)) throw new GatewayError('media_ticket_invalid', 401)
         const storage = await resolveStorageForTicket(claims, env, fetchImpl, now)
@@ -1437,7 +1467,7 @@ export function createMediaGatewayWorker({
         const headers = new Headers(cors)
         for (const [name, value] of mediaHeaders(upstream, item, claims, contentType)) headers.set(name, value)
         if (request.method === 'GET') {
-          const sessionCookies = await setSessionCookie(claims, secret, now(), request.headers.get('cookie'))
+          const sessionCookies = await setSessionCookie(claims, secret, now(), request.headers.get('cookie'), legacySessionToken)
           for (const sessionCookie of sessionCookies || []) headers.append('Set-Cookie', sessionCookie)
         }
         status = upstream.status

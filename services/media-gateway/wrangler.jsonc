@@ -12,6 +12,7 @@
     }
   },
   "vars": {
-    "MEDIA_GATEWAY_ALLOWED_ORIGIN": "https://cloud.map7e.com"
+    "MEDIA_GATEWAY_ALLOWED_ORIGIN": "https://cloud.map7e.com",
+    "MEDIA_GATEWAY_SITE_DOMAIN": "map7e.com"
   }
 }
