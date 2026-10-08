@@ -584,6 +584,62 @@ await test('video Range check reports actual upstream headers without moving fil
     dns.lookup = originalLookup
   }
 })
+await test('Vercel preserves a Gateway size-policy error from a bodyless HEAD probe', async () => {
+  await writeConfig({ version: 1, defaultStorageId: 'quark-main', instances: [
+    { storageId: 'quark-main', provider: 'quark', displayName: '夸克网盘', enabled: true },
+  ] })
+  await writeAuth('quark-main', { accessToken: 'size-limit-access', refreshToken: 'size-limit-refresh', deviceId: 'device' })
+  await setGlobalAccess('public')
+  for (const sample of [
+    { status: 422, code: 'quark_file_size_limit', bytes: '52428800', expected: 422 },
+    { status: 422, code: 'quark_file_size_limit', bytes: 'invalid-private-token', expected: 422 },
+    { status: 502, code: 'quark_http_400_api_23018', bytes: '52428800', expected: 502 },
+  ]) {
+    calls.length = 0
+    upstream = async (url, options) => {
+      if (url.pathname.endsWith('/file/info')) return { status: 0, data: { fid: 'policy-video', pdir_fid: '0', file_type: 1, file_name: '07(1).mp4', size: 848086961 } }
+      if (url.hostname === 'media.map7e.com') {
+        assert.equal(options.method, 'HEAD')
+        assert.equal(options.headers.Range, 'bytes=0-0')
+        return new Response(null, { status: sample.status, headers: { 'X-Media-Error': sample.code, 'X-Media-Limit-Bytes': sample.bytes } })
+      }
+      throw Error('unexpected upstream request')
+    }
+    const target = res()
+    await storageDownload({ method: 'GET', query: { storageId: 'quark-main', id: 'policy-video', parentId: '', check: 'range' }, headers: {} }, target)
+    assert.equal(target.statusCode, sample.expected)
+    assert.equal(calls.filter(call => call.url.hostname === 'media.map7e.com').length, 1)
+    assert.equal(target.headers.Location, undefined, 'a rejected file never produces a browser media redirect')
+    if (sample.expected === 422) {
+      assert.equal(target.body.error, 'quark_file_size_limit')
+      assert.equal(target.body.limitBytes, sample.bytes === '52428800' ? 52428800 : undefined)
+      if (sample.bytes === '52428800') assert.equal(target.body.message, '当前夸克接口限制单文件下载大小为 50 MiB，此文件暂不支持站内播放或下载。')
+    } else assert.equal(target.body.error, 'storage_range_probe_failed')
+    for (const hidden of ['size-limit-access', 'size-limit-refresh', 'invalid-private-token', 'ticket=', 'media.map7e.com']) {
+      assert.ok(!JSON.stringify(target.body).includes(hidden))
+    }
+  }
+})
+await test('Quark Provider surfaces explicit size rejection without retrying or refreshing credentials', async () => {
+  calls.length = 0
+  upstream = async url => {
+    if (url.pathname.endsWith('/get_download_url')) return response({ status: -1, errno: 23018, error_info: 'download file size limit[52428800]' }, 400)
+    throw Error('size rejection must not refresh or fetch another endpoint')
+  }
+  const provider = createQuarkProvider({ storageId: 'quark-main', provider: 'quark' }, {
+    accessToken: 'limit-provider-access', refreshToken: 'limit-provider-refresh', deviceId: 'limit-device',
+  })
+  await assert.rejects(() => provider.getFileResponse('large-limit-file', { range: 'bytes=0-0' }), error => {
+    assert.equal(error.code, 'quark_file_size_limit')
+    assert.equal(error.status, 422)
+    assert.equal(error.limitBytes, 52428800)
+    return true
+  })
+  assert.equal(calls.length, 1)
+  assert.equal(calls[0].method, 'POST')
+  assert.equal(calls[0].headers.Range, undefined)
+  assert.deepEqual(JSON.parse(calls[0].body), { fid: 'large-limit-file' })
+})
 await test('OAuth uses official exchange and stores expiry fields from response', async () => {
   upstream = async url => url.pathname.endsWith('get_authorize_page_url') ? { status: 0, data: { authorize_page_url: 'https://pan.quark.cn/open/v1/oauth/agent?page_code=page', page_code: 'page', device_id: 'device' } } : url.pathname.endsWith('get_aac_by_pagecode') ? { status: 0, data: {} } : { status: 0, data: { access_token: 'new-access', refresh_token: 'new-refresh', user_id: 'user', device_id: 'device', access_token_expires_at: 1900000000, refresh_token_expires_at: 2000000000 } }
   const pending = await beginQuarkAuthorization('quark-main')

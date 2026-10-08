@@ -4,6 +4,7 @@ import { Readable, Transform } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 import { resolveStorage } from '../../../lib/storage/registry.js'
 import { StorageError } from '../../../lib/storage/errors.js'
+import { QUARK_FILE_SIZE_LIMIT, quarkDownloadLimitBody } from '../../../lib/storage/quark-download-limit.js'
 import { isAllowedPreviewContentType } from '../../../lib/storage/previews.js'
 import { quarkFidsMatch } from '../../../lib/storage/providers/quark.js'
 import {
@@ -34,11 +35,11 @@ class MediaHttpError extends Error {
   constructor(code, status, headers = {}) { super(code); this.code = code; this.status = status; this.headers = headers }
 }
 
-function json(res, status, error) {
+function json(res, status, error, limitBytes) {
   res.statusCode = status
   res.setHeader('Content-Type', 'application/json; charset=utf-8')
   res.setHeader('Cache-Control', 'no-store')
-  res.end(JSON.stringify({ ok: false, error }))
+  res.end(JSON.stringify(error === QUARK_FILE_SIZE_LIMIT ? quarkDownloadLimitBody(limitBytes) : { ok: false, error }))
 }
 
 function safeLog(logger, entry) {
@@ -464,8 +465,12 @@ export function createMediaGatewayHandler({
         return
       }
       for (const [name, value] of Object.entries(error?.headers || {})) res.setHeader(name, value)
+      if (errorCode === QUARK_FILE_SIZE_LIMIT) {
+        res.setHeader('X-Media-Error', errorCode)
+        if (Number.isSafeInteger(error.limitBytes) && error.limitBytes > 0) res.setHeader('X-Media-Limit-Bytes', String(error.limitBytes))
+      }
       if (status === 405 && !res.hasHeader('Allow')) res.setHeader('Allow', 'GET, HEAD')
-      json(res, status, errorCode)
+      json(res, status, errorCode, error?.limitBytes)
     } finally {
       const entry = {
         requestId,

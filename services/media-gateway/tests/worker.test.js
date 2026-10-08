@@ -291,7 +291,7 @@ test('Worker health is minimal and works without media secrets', async () => {
   const fixture = await createFixture({ envOverrides: { MEDIA_GATEWAY_SIGNING_SECRET: undefined } })
   const response = await fixture.worker.fetch(new Request('https://media.example.test/health'), fixture.env)
   assert.equal(response.status, 200)
-  assert.deepEqual(await response.json(), { ok: true, version: '0.2.11' })
+  assert.deepEqual(await response.json(), { ok: true, version: '0.2.12' })
   assert.equal(fixture.state.redisRequests.length, 0)
 })
 
@@ -510,7 +510,7 @@ test('Worker attributes production HEAD api_23018 to the failing Quark API witho
   }
 })
 
-test('Worker logs only an explicit Quark file-size policy and never infers it from errno alone', async () => {
+test('Worker returns a business error only for an explicit Quark file-size policy', async () => {
   for (const sample of [
     { message: 'download file size limit[52428800]', errno: 23018, classified: true },
     { message: 'upstream refused request', errno: 23018, classified: false },
@@ -527,8 +527,12 @@ test('Worker logs only an explicit Quark file-size policy and never infers it fr
       },
     })
     const response = await requestMedia(fixture, 'large-video', { method: 'HEAD', range: 'bytes=0-0' })
-    assert.equal(response.status, 502)
-    assert.equal((await response.json()).error, 'quark_http_400_api_' + sample.errno)
+    assert.equal(response.status, sample.classified ? 422 : 502)
+    const body = await response.json()
+    assert.equal(body.error, sample.classified ? 'quark_file_size_limit' : 'quark_http_400_api_' + sample.errno)
+    assert.equal(response.headers.get('x-media-error'), sample.classified ? 'quark_file_size_limit' : null)
+    assert.equal(response.headers.get('x-media-limit-bytes'), sample.classified ? '52428800' : null)
+    if (sample.classified) assert.equal(body.message, '当前夸克接口限制单文件下载大小为 50 MiB，此文件暂不支持站内播放或下载。')
     const log = fixture.state.logs.at(-1)
     assert.equal(log.upstreamStage, 'quark_download_url')
     assert.equal(log.fileSize, 848086961)
@@ -540,6 +544,35 @@ test('Worker logs only an explicit Quark file-size policy and never infers it fr
     for (const hidden of [sample.message, defaultAuth.accessToken, 'https://', 'signature=hidden', 'large-video']) {
       assert.ok(!serialized.includes(hidden))
     }
+  }
+})
+
+test('Worker never retries, refreshes credentials or reads the CDN after an explicit size rejection', async () => {
+  for (const method of ['GET', 'HEAD']) {
+    let downloadCalls = 0
+    const fixture = await createFixture({
+      files: { 'large-rejected': mediaFile('large-rejected', { size: 848086961 }) },
+      quarkHandler: async ({ url, headers, init }) => {
+        if (url.pathname !== '/open/v1/file/get_download_url') return
+        downloadCalls += 1
+        assert.equal(init.method, 'POST')
+        assert.equal(headers.get('range'), null, 'browser Range is never a Quark API parameter')
+        return jsonResponse({ status: -1, errno: 23018, error_info: 'download file size limit[52428800]' }, 400)
+      },
+    })
+    const response = await requestMedia(fixture, 'large-rejected', { method, range: 'bytes=0-0' })
+    assert.equal(response.status, 422)
+    assert.equal(response.headers.get('x-media-error'), 'quark_file_size_limit')
+    assert.equal(response.headers.get('x-media-limit-bytes'), '52428800')
+    assert.equal(downloadCalls, 1)
+    assert.equal(fixture.state.storedRefreshes, 0)
+    assert.equal(fixture.state.cdnRequests.length, 0)
+    const log = fixture.state.logs.at(-1)
+    assert.equal(log.errorCode, 'quark_file_size_limit')
+    assert.equal(log.upstreamStage, 'quark_download_url')
+    assert.equal(log.upstreamStatus, 400)
+    assert.equal(log.upstreamErrno, 23018)
+    assert.equal(log.bytesStreamed, 0)
   }
 })
 

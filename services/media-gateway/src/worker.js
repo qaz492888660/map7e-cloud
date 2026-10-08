@@ -1,6 +1,7 @@
 import { OFFICIAL_CLIENT_ID, OFFICIAL_SIGN_KEY } from '../../../lib/storage/providers/quark-client.js'
+import { QUARK_FILE_SIZE_LIMIT, quarkDownloadLimit, quarkDownloadLimitBody } from '../../../lib/storage/quark-download-limit.js'
 
-export const MEDIA_GATEWAY_VERSION = '0.2.11'
+export const MEDIA_GATEWAY_VERSION = '0.2.12'
 export const MEDIA_SESSION_COOKIE = '__Host-map7e-media-'
 const MEDIA_SESSION_COOKIE_MAX_GRANTS = 8
 const MEDIA_SESSION_COOKIE_HEADER_MAX_LENGTH = 65_536
@@ -359,12 +360,12 @@ function corsHeaders(request, env) {
   return headers
 }
 
-function jsonResponse(status, code, headers = new Headers()) {
+function jsonResponse(status, code, headers = new Headers(), limitBytes) {
   const output = new Headers(headers)
   output.set('Content-Type', 'application/json; charset=utf-8')
   output.set('Cache-Control', 'no-store')
   output.set('X-Content-Type-Options', 'nosniff')
-  return new Response(JSON.stringify({ ok: false, error: code }), { status, headers: output })
+  return new Response(JSON.stringify(code === QUARK_FILE_SIZE_LIMIT ? quarkDownloadLimitBody(limitBytes) : { ok: false, error: code }), { status, headers: output })
 }
 
 function storageError(code, status = 502) {
@@ -745,11 +746,12 @@ async function quarkRequest(path, { method = 'GET', query = {}, body, auth, env,
   if (!response || !payload || !response.ok || payload.status !== 0 || (payload.errno && payload.errno !== 0)) {
     const message = String(payload && (payload.error_info || payload.agent_msg) || '')
     const authFailure = Boolean(response && response.status === 401) || /token|授权|认证/i.test(message)
-    const error = storageError(authFailure ? 'storage_token_expired' : quarkResponseErrorCode(response, payload), authFailure ? 401 : 502)
-    const sizeLimit = path === '/open/v1/file/get_download_url' && payload?.errno === 23018
-      && typeof payload.error_info === 'string'
-      ? /^download file size limit\[(\d{1,15})\]$/i.exec(payload.error_info.trim()) : null
-    const limitBytes = sizeLimit ? Number(sizeLimit[1]) : null
+    const limitBytes = quarkDownloadLimit(path, response, payload)
+    const error = storageError(limitBytes !== null ? QUARK_FILE_SIZE_LIMIT : authFailure ? 'storage_token_expired' : quarkResponseErrorCode(response, payload), limitBytes !== null ? 422 : authFailure ? 401 : 502)
+    if (limitBytes !== null) {
+      error.limitBytes = limitBytes
+      error.headers = { 'X-Media-Error': QUARK_FILE_SIZE_LIMIT, 'X-Media-Limit-Bytes': String(limitBytes) }
+    }
     // Log fixed identities, numeric codes and an exact, allowlisted policy reason.
     // Never log URLs, payloads, raw messages, or request/response headers.
     error.quarkFailure = {
@@ -1454,7 +1456,7 @@ export function createMediaGatewayWorker({
         for (const [name, value] of Object.entries(error && error.headers || {})) headers.set(name, value)
         if (status === 405 && !headers.has('Allow')) headers.set('Allow', 'GET, HEAD')
         await finishLog()
-        return jsonResponse(status, errorCode, headers)
+        return jsonResponse(status, errorCode, headers, error?.limitBytes)
       }
     },
   }

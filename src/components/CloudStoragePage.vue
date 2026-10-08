@@ -1,6 +1,7 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import CloudCategoryIcon from './CloudCategoryIcon.vue'
+import { QUARK_FILE_SIZE_LIMIT, quarkDownloadLimitMessage } from '../../lib/storage/quark-download-limit.js'
 
 const BLOG_VIDEO_URL = 'https://blog.map7e.com/videos/underwater.mp4'
 const TEXT_EXTENSIONS = ['txt', 'md', 'markdown', 'json', 'csv', 'xml', 'yaml', 'yml', 'log', 'ini']
@@ -87,6 +88,7 @@ const previewMode = ref('')
 const previewText = ref('')
 const previewLoading = ref(false)
 const previewError = ref('')
+const previewErrorCode = ref('')
 const selectedAction = ref(null)
 const managementDialog = ref('')
 const managementItem = ref(null)
@@ -1375,6 +1377,7 @@ async function openFile(file) {
   previewFile.value = { ...file, inlinePath: inlineMediaPath(file) }
   previewText.value = ''
   previewError.value = ''
+  previewErrorCode.value = ''
   previewLoading.value = false
   if (file.extension === 'pdf') {
     previewMode.value = 'pdf'
@@ -1390,7 +1393,10 @@ async function openFile(file) {
       let data = {}
       try { data = await response.json() } catch { data = {} }
       if (!response.ok || data.ok !== true) {
-        if (data.error === 'storage_range_probe_failed') {
+        previewErrorCode.value = data.error || ''
+        if (data.error === QUARK_FILE_SIZE_LIMIT) {
+          previewError.value = quarkDownloadLimitMessage(data.limitBytes)
+        } else if (data.error === 'storage_range_probe_failed') {
           previewError.value = '网络连接失败，无法确认视频能否分段播放。请稍后重试或下载原文件。'
         } else {
           previewError.value = '获取网盘播放地址失败。请稍后重试或下载原文件。'
@@ -1445,6 +1451,42 @@ function closePreview() {
   previewMode.value = ''
   previewText.value = ''
   previewError.value = ''
+  previewErrorCode.value = ''
+}
+
+async function handleFileDownload(event, file) {
+  // Preserve ordinary small-file downloads. Larger or unknown Quark files
+  // need an actual upstream check; file size alone never rejects a download.
+  if (!isQuarkMedia(file) || (Number.isFinite(file.sizeBytes) && file.sizeBytes <= 50 * 1024 ** 2)) {
+    closeItemActions()
+    return
+  }
+  event.preventDefault()
+  if (previewFile.value?.path === file.path && previewErrorCode.value === QUARK_FILE_SIZE_LIMIT) return
+  try {
+    const checkUrl = new URL(file.path, window.location.origin)
+    checkUrl.searchParams.set('check', 'range')
+    const response = await fetch(checkUrl.pathname + checkUrl.search, { cache: 'no-store' })
+    const data = await response.json().catch(() => ({}))
+    if (!response.ok || data.ok !== true) {
+      const message = data.error === QUARK_FILE_SIZE_LIMIT
+        ? quarkDownloadLimitMessage(data.limitBytes)
+        : '获取网盘下载地址失败，请稍后重试。'
+      if (viewerImage.value?.path === file.path) viewerError.value = message
+      if (previewFile.value?.path === file.path) {
+        previewError.value = message
+        previewErrorCode.value = data.error || ''
+      }
+      errorMessage.value = message
+      closeItemActions()
+      return
+    }
+    closeItemActions()
+    window.location.assign(file.path)
+  } catch {
+    errorMessage.value = '网络连接失败，无法获取下载地址。请稍后重试。'
+    closeItemActions()
+  }
 }
 
 function handleKeydown(event) {
@@ -1992,7 +2034,7 @@ onBeforeUnmount(() => {
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6" /></svg>
             </button>
             <span class="viewer-counter">{{ photoCounter }}</span>
-            <a class="viewer-icon-button" :href="viewerImage.path" :download="viewerImage.name" :aria-label="'下载原图 ' + viewerImage.name">
+            <a class="viewer-icon-button" :href="viewerImage.path" :download="viewerImage.name" :aria-label="'下载原图 ' + viewerImage.name" @click="handleFileDownload($event, viewerImage)">
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.5v11m0 0 4-4m-4 4-4-4M5 17v3h14v-3" /></svg>
             </a>
           </header>
@@ -2004,11 +2046,11 @@ onBeforeUnmount(() => {
             <div v-if="viewerImage.rawPreview && !viewerImage.viewerSource" class="preview-message">
               <strong>该 RAW 格式暂无可用预览</strong>
               <span>可以下载原文件后查看。</span>
-              <a class="primary-download" :href="viewerImage.path" :download="viewerImage.name">下载原文件</a>
+              <a class="primary-download" :href="viewerImage.path" :download="viewerImage.name" @click="handleFileDownload($event, viewerImage)">下载原文件</a>
             </div>
             <div v-else-if="viewerError" class="preview-message">
               <strong>{{ viewerError }}</strong>
-              <a class="primary-download" :href="viewerImage.path" :download="viewerImage.name">下载原文件</a>
+              <a class="primary-download" :href="viewerImage.path" :download="viewerImage.name" @click="handleFileDownload($event, viewerImage)">下载原文件</a>
             </div>
             <img
               v-else
@@ -2051,14 +2093,14 @@ onBeforeUnmount(() => {
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6" /></svg>
             </button>
             <div class="preview-heading"><strong>{{ previewFile.name }}</strong><span>{{ fileTypeLabel(previewFile) }} · {{ fileSizeLabel(previewFile) }}</span></div>
-            <a class="viewer-icon-button" :href="previewFile.path" :download="previewFile.name" :aria-label="'下载 ' + previewFile.name">
+            <a v-if="previewErrorCode !== QUARK_FILE_SIZE_LIMIT" class="viewer-icon-button" :href="previewFile.path" :download="previewFile.name" :aria-label="'下载 ' + previewFile.name" @click="handleFileDownload($event, previewFile)">
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.5v11m0 0 4-4m-4 4-4-4M5 17v3h14v-3" /></svg>
             </a>
           </header>
           <div v-if="previewLoading" class="preview-message">{{ previewMode === 'video' ? '正在检查视频流…' : '正在打开文件…' }}</div>
           <div v-else-if="previewError" class="preview-message">
             <strong>{{ previewError }}</strong>
-            <a class="primary-download" :href="previewFile.path" :download="previewFile.name">下载原文件</a>
+            <a v-if="previewErrorCode !== QUARK_FILE_SIZE_LIMIT" class="primary-download" :href="previewFile.path" :download="previewFile.name" @click="handleFileDownload($event, previewFile)">下载原文件</a>
           </div>
           <iframe v-else-if="previewMode === 'pdf'" class="pdf-preview" :src="previewFile.inlinePath || previewFile.path" :title="previewFile.name" />
           <video v-else-if="previewMode === 'video'" class="file-video-preview" :src="previewFile.inlinePath || previewFile.path" :crossorigin="isQuarkMedia(previewFile) ? 'use-credentials' : undefined" controls playsinline preload="metadata" @error="handleVideoError" />
@@ -2066,7 +2108,7 @@ onBeforeUnmount(() => {
           <div v-else class="preview-message">
             <strong>这个格式暂不支持站内预览</strong>
             <span>你可以下载原文件后查看。</span>
-            <a class="primary-download" :href="previewFile.path" :download="previewFile.name">下载原文件</a>
+            <a class="primary-download" :href="previewFile.path" :download="previewFile.name" @click="handleFileDownload($event, previewFile)">下载原文件</a>
           </div>
         </div>
       </div>
@@ -2081,7 +2123,7 @@ onBeforeUnmount(() => {
           <button class="sheet-action" type="button" @click="chooseItemAction('open')">
             {{ selectedAction.item.isFolder ? '打开' : (selectedAction.source === 'albums' ? '查看' : '预览') }}
           </button>
-          <a v-if="!selectedAction.item.isFolder" class="sheet-action" :href="selectedAction.item.path" :download="selectedAction.item.name" @click="closeItemActions">下载</a>
+          <a v-if="!selectedAction.item.isFolder" class="sheet-action" :href="selectedAction.item.path" :download="selectedAction.item.name" @click="handleFileDownload($event, selectedAction.item)">下载</a>
           <button v-if="selectedAction.writable && activeCapabilities.rename" class="sheet-action" type="button" @click="chooseItemAction('rename')">重命名</button>
           <button v-if="selectedAction.writable && activeCapabilities.trash" class="sheet-action sheet-action--danger" type="button" @click="chooseItemAction('trash')">删除</button>
           <button class="sheet-cancel" type="button" @click="closeItemActions">取消</button>

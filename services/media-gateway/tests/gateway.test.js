@@ -4,6 +4,7 @@ import { Writable } from 'node:stream'
 import test from 'node:test'
 import { createMediaTicket, verifyMediaSession } from '../../../lib/storage/media-ticket.js'
 import { createMediaGatewayHandler, MEDIA_SESSION_COOKIE, parseSingleRange } from '../src/gateway.js'
+import { StorageError } from '../../../lib/storage/errors.js'
 
 const secret = 'gateway-test-secret-with-at-least-32-bytes-long'
 const allowedOrigin = 'https://cloud.map7e.com'
@@ -126,6 +127,30 @@ await test('HEAD on an empty original returns 200 without an upstream probe', as
   } finally { await closeServer(server) }
 })
 
+await test('Node Gateway exposes safe size-policy headers for GET and bodyless HEAD', async () => {
+  let reads = 0
+  const { server, baseUrl } = await startServer({ provider: {
+    getItem: async () => createItem({ size: 848086961 }),
+    getFileResponse: async () => {
+      reads += 1
+      throw Object.assign(new StorageError('quark_file_size_limit', 422), { limitBytes: 52428800 })
+    },
+  } })
+  try {
+    for (const method of ['GET', 'HEAD']) {
+      const result = await fetch(`${baseUrl}/v1/media?ticket=${encodeURIComponent(ticket())}`, { method, headers: { Range: 'bytes=0-0' } })
+      assert.equal(result.status, 422)
+      assert.equal(result.headers.get('x-media-error'), 'quark_file_size_limit')
+      assert.equal(result.headers.get('x-media-limit-bytes'), '52428800')
+      if (method === 'GET') assert.deepEqual(await result.json(), {
+        ok: false, error: 'quark_file_size_limit', limitBytes: 52428800,
+        message: '当前夸克接口限制单文件下载大小为 50 MiB，此文件暂不支持站内播放或下载。',
+      })
+      else assert.equal(await result.text(), '')
+    }
+    assert.equal(reads, 2, 'one upstream read per user request')
+  } finally { await closeServer(server) }
+})
 await test('Range parser accepts a single range and rejects malformed, multi and out-of-file ranges', () => {
   assert.equal(parseSingleRange('bytes=0-1023', 2048).header, 'bytes=0-1023')
   assert.equal(parseSingleRange('bytes=1024-2047', 4096).start, 1024)

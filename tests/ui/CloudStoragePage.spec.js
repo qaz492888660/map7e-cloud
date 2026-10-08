@@ -231,6 +231,64 @@ describe('CloudStoragePage directory loading', () => {
     expect(wrapper.find('.preview-overlay a[download="large.mp4"]').attributes('href')).toContain('/api/storage-download')
   })
 
+  it('shows the explicit Quark 50 MiB policy without offering a failing playback or download retry', async () => {
+    window.history.replaceState(null, '', '/?storageId=quark-main')
+    const fetch = mediaFetch([{ ...file('limited-video', '07(1).mp4'), extension: 'mp4', type: 'video', size: 848086961 }], {
+      statusCode: 422, body: { ok: false, error: 'quark_file_size_limit', limitBytes: 52428800 },
+    })
+    globalThis.fetch = fetch
+    wrapper = mount(CloudStoragePage, { attachTo: document.body })
+    await waitFor(() => expect(wrapper.find('.ocean-data-note').text()).toContain('覆盖当前有权限读取的目录'))
+    await wrapper.find('.ocean-nav--main .ocean-nav-item').trigger('click')
+    await wrapper.find('button[aria-label="预览 07(1).mp4"]').trigger('click')
+    await waitFor(() => expect(wrapper.find('.preview-overlay').text()).toContain('当前夸克接口限制单文件下载大小为 50 MiB，此文件暂不支持站内播放或下载。'))
+    expect(wrapper.find('.file-video-preview').exists()).toBe(false)
+    expect(wrapper.find('.preview-overlay a[download]').exists()).toBe(false)
+    expect(wrapper.find('.preview-overlay').text()).not.toContain('重试')
+    await flushPromises()
+    expect(fetch.mock.calls.filter(([input]) => new URL(input, location.href).searchParams.get('check') === 'range')).toHaveLength(1)
+  })
+
+  it('checks large Quark downloads and keeps the file list, categories and search available after rejection', async () => {
+    window.history.replaceState(null, '', '/?storageId=quark-main')
+    const fetch = mediaFetch([{ ...file('limited-download', '07(1).mp4'), extension: 'mp4', type: 'video', size: 848086961 }], {
+      statusCode: 422, body: { ok: false, error: 'quark_file_size_limit', limitBytes: 52428800 },
+    })
+    globalThis.fetch = fetch
+    wrapper = mount(CloudStoragePage, { attachTo: document.body })
+    await waitFor(() => expect(wrapper.find('.ocean-data-note').text()).toContain('覆盖当前有权限读取的目录'))
+    await wrapper.find('.ocean-nav--main .ocean-nav-item').trigger('click')
+    await wrapper.find('button[aria-label="文件操作：07(1).mp4"]').trigger('click')
+    await wrapper.find('a.sheet-action[download="07(1).mp4"]').trigger('click')
+    await waitFor(() => expect(wrapper.text()).toContain('当前夸克接口限制单文件下载大小为 50 MiB，此文件暂不支持站内播放或下载。'))
+    expect(wrapper.find('button[aria-label="预览 07(1).mp4"]').exists()).toBe(true)
+    expect(wrapper.find('.ocean-file-category-tabs').exists()).toBe(true)
+    expect(wrapper.find('input[type="search"]').exists()).toBe(true)
+    expect(fetch.mock.calls.filter(([input]) => new URL(input, location.href).searchParams.get('check') === 'range')).toHaveLength(1)
+  })
+
+  it.each([
+    ['quark-main', { ...file('small-original', 'photo.jpg'), extension: 'jpg', size: 2245317 }],
+    ['pikpak-main', { ...file('pikpak-large', 'large.mp4'), extension: 'mp4', type: 'video', size: 848086961 }],
+  ])('preserves ordinary downloads for %s without adding a Quark Range preflight', async (storageId, item) => {
+    window.history.replaceState(null, '', '/?storageId=' + storageId)
+    const fetch = mediaFetch([item])
+    globalThis.fetch = fetch
+    wrapper = mount(CloudStoragePage, { attachTo: document.body })
+    await waitFor(() => expect(wrapper.find('.ocean-data-note').text()).toContain('覆盖当前有权限读取的目录'))
+    await wrapper.find('.ocean-nav--main .ocean-nav-item').trigger('click')
+    await wrapper.find(`button[aria-label="文件操作：${item.name}"]`).trigger('click')
+    const download = wrapper.find(`a.sheet-action[download="${item.name}"]`)
+    let preventedByApplication
+    download.element.addEventListener('click', event => {
+      preventedByApplication = event.defaultPrevented
+      event.preventDefault() // JSDOM does not navigate or download files.
+    })
+    await download.trigger('click')
+    expect(preventedByApplication).toBe(false)
+    expect(fetch.mock.calls.some(([input]) => new URL(input, location.href).searchParams.get('check') === 'range')).toBe(false)
+  })
+
   it('shows a format fallback when the browser cannot decode the video', async () => {
     globalThis.fetch = mediaFetch([{ ...file('unsupported-video', 'movie.mkv'), extension: 'mkv', type: 'video', mimeType: 'video/x-matroska' }])
     wrapper = mount(CloudStoragePage, { attachTo: document.body })
