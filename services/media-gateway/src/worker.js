@@ -1,6 +1,6 @@
 import { OFFICIAL_CLIENT_ID, OFFICIAL_SIGN_KEY } from '../../../lib/storage/providers/quark-client.js'
 
-export const MEDIA_GATEWAY_VERSION = '0.2.10'
+export const MEDIA_GATEWAY_VERSION = '0.2.11'
 export const MEDIA_SESSION_COOKIE = '__Host-map7e-media-'
 const MEDIA_SESSION_COOKIE_MAX_GRANTS = 8
 const MEDIA_SESSION_COOKIE_HEADER_MAX_LENGTH = 65_536
@@ -746,8 +746,12 @@ async function quarkRequest(path, { method = 'GET', query = {}, body, auth, env,
     const message = String(payload && (payload.error_info || payload.agent_msg) || '')
     const authFailure = Boolean(response && response.status === 401) || /token|授权|认证/i.test(message)
     const error = storageError(authFailure ? 'storage_token_expired' : quarkResponseErrorCode(response, payload), authFailure ? 401 : 502)
-    // Use local, fixed API identities and numeric response codes only. Never log
-    // the URL, payload, error_info/agent_msg, or request/response headers.
+    const sizeLimit = path === '/open/v1/file/get_download_url' && payload?.errno === 23018
+      && typeof payload.error_info === 'string'
+      ? /^download file size limit\[(\d{1,15})\]$/i.exec(payload.error_info.trim()) : null
+    const limitBytes = sizeLimit ? Number(sizeLimit[1]) : null
+    // Log fixed identities, numeric codes and an exact, allowlisted policy reason.
+    // Never log URLs, payloads, raw messages, or request/response headers.
     error.quarkFailure = {
       upstreamStage: path === '/open/v1/file/info' ? 'quark_file_info'
         : path === '/open/v1/file/get_download_url' ? 'quark_download_url'
@@ -757,6 +761,9 @@ async function quarkRequest(path, { method = 'GET', query = {}, body, auth, env,
       ...(Number.isSafeInteger(payload && payload.errno) ? { upstreamErrno: payload.errno } : {}),
       ...(Number.isSafeInteger(payload && payload.status) ? { upstreamApiStatus: payload.status } : {}),
       upstreamRequestId: url.searchParams.get('req_id'),
+      ...(Number.isSafeInteger(limitBytes) && limitBytes > 0 ? {
+        upstreamReason: 'download_file_size_limit', upstreamLimitBytes: limitBytes,
+      } : {}),
     }
     throw error
   }
@@ -1294,6 +1301,7 @@ export function createMediaGatewayWorker({
       let contentType = null
       let errorCode = null
       let quarkFailure = null
+      let fileSize = null
       let bytesStreamed = 0
       let logged = false
       const finishLog = async streamError => {
@@ -1310,6 +1318,7 @@ export function createMediaGatewayWorker({
           contentType,
           durationMs: Math.max(0, now() - startedAt),
           bytesStreamed,
+          ...(Number.isSafeInteger(fileSize) ? { fileSize } : {}),
           ...(quarkFailure || {}),
           ...((streamError || errorCode) ? { errorCode: streamError || errorCode } : {}),
         }
@@ -1368,6 +1377,7 @@ export function createMediaGatewayWorker({
         const client = createQuarkClient(claims.storageId, storage.auth, { env, fetchImpl, now, sleep })
         const resolved = await getItemRecord(client, claims.fileId)
         const item = resolved.item
+        fileSize = item.size
         const expectedParent = claims.parentId === '0' ? '' : claims.parentId
         if (item.isFolder || !quarkFidsMatch(item.id, claims.fileId) || !quarkFidsMatch(item.parentId, expectedParent)) {
           throw storageError('file_not_found', 404)
@@ -1398,10 +1408,15 @@ export function createMediaGatewayWorker({
           await upstream.body?.cancel().catch(() => {})
           throw storageError('preview_content_type_unsupported', 415)
         }
-        if (result.headProbe) {
-          validatePartialResponse(upstream, { header: 'bytes=0-0', start: 0, end: 0 }, item.size)
-        } else if (parsedRange.range && !(parsedRange.ifRange && upstream.status === 200)) {
-          validatePartialResponse(upstream, parsedRange.range, item.size)
+        try {
+          if (result.headProbe) {
+            validatePartialResponse(upstream, { header: 'bytes=0-0', start: 0, end: 0 }, item.size)
+          } else if (parsedRange.range && !(parsedRange.ifRange && upstream.status === 200)) {
+            validatePartialResponse(upstream, parsedRange.range, item.size)
+          }
+        } catch (error) {
+          await upstream.body?.cancel().catch(() => {})
+          throw error
         }
         if (![200, 206].includes(upstream.status)) {
           await upstream.body?.cancel().catch(() => {})

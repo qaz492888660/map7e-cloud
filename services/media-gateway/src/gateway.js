@@ -424,7 +424,12 @@ export function createMediaGatewayHandler({
         throw new StorageError('preview_content_type_unsupported', 415)
       }
       const upstreamRange = range || (resolved.headProbe ? parseSingleRange('bytes=0-0', item.size) : null)
-      if (!(range && ifRange && response.status === 200)) validatePartialResponse(response, upstreamRange, item.size)
+      try {
+        if (!(range && ifRange && response.status === 200)) validatePartialResponse(response, upstreamRange, item.size)
+      } catch (error) {
+        await cancelBody(response)
+        throw error
+      }
       if (![200, 206].includes(response.status)) {
         await cancelBody(response)
         throw new StorageError('media_upstream_unavailable', 502)

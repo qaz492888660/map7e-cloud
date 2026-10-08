@@ -291,7 +291,7 @@ test('Worker health is minimal and works without media secrets', async () => {
   const fixture = await createFixture({ envOverrides: { MEDIA_GATEWAY_SIGNING_SECRET: undefined } })
   const response = await fixture.worker.fetch(new Request('https://media.example.test/health'), fixture.env)
   assert.equal(response.status, 200)
-  assert.deepEqual(await response.json(), { ok: true, version: '0.2.10' })
+  assert.deepEqual(await response.json(), { ok: true, version: '0.2.11' })
   assert.equal(fixture.state.redisRequests.length, 0)
 })
 
@@ -510,6 +510,39 @@ test('Worker attributes production HEAD api_23018 to the failing Quark API witho
   }
 })
 
+test('Worker logs only an explicit Quark file-size policy and never infers it from errno alone', async () => {
+  for (const sample of [
+    { message: 'download file size limit[52428800]', errno: 23018, classified: true },
+    { message: 'upstream refused request', errno: 23018, classified: false },
+    { message: 'download file size limit[52428800] private-signature', errno: 23018, classified: false },
+    { message: 'download file size limit[52428800]', errno: 23019, classified: false },
+    { message: 'download file size limit[0]', errno: 23018, classified: false },
+  ]) {
+    const fixture = await createFixture({
+      files: { 'large-video': mediaFile('large-video', { size: 848086961 }) },
+      quarkHandler: async ({ url }) => {
+        if (url.pathname !== '/open/v1/file/get_download_url') return
+        return jsonResponse({ status: -1, errno: sample.errno, error_info: sample.message,
+          agent_msg: defaultAuth.accessToken + ' https://cdn.quark.cn/private?signature=hidden' }, 400)
+      },
+    })
+    const response = await requestMedia(fixture, 'large-video', { method: 'HEAD', range: 'bytes=0-0' })
+    assert.equal(response.status, 502)
+    assert.equal((await response.json()).error, 'quark_http_400_api_' + sample.errno)
+    const log = fixture.state.logs.at(-1)
+    assert.equal(log.upstreamStage, 'quark_download_url')
+    assert.equal(log.fileSize, 848086961)
+    assert.equal(log.bytesStreamed, 0)
+    assert.equal(fixture.state.cdnRequests.length, 0)
+    assert.equal(log.upstreamReason, sample.classified ? 'download_file_size_limit' : undefined)
+    assert.equal(log.upstreamLimitBytes, sample.classified ? 52428800 : undefined)
+    const serialized = JSON.stringify(log)
+    for (const hidden of [sample.message, defaultAuth.accessToken, 'https://', 'signature=hidden', 'large-video']) {
+      assert.ok(!serialized.includes(hidden))
+    }
+  }
+})
+
 test('Worker follows HTTPS Quark API redirects within the Quark China domain only', async () => {
   const calls = []
   const fixture = await createFixture({
@@ -655,6 +688,34 @@ test('Worker validates its synthetic HEAD Range probe before claiming range supp
   assert.equal(rejected.status, 502)
   assert.deepEqual(await rejected.json(), { ok: false, error: 'range_not_supported' })
   assert.equal(ignored.state.logs[0].status, 502)
+})
+
+test('Worker cancels upstream bodies after GET or HEAD Range validation fails', async () => {
+  const cases = [
+    { status: 200, headers: {}, error: 'range_not_supported' },
+    { status: 206, headers: { 'Content-Range': 'bytes 1-1/32212254720', 'Content-Length': '1' }, error: 'range_response_invalid' },
+    { status: 206, headers: { 'Content-Range': 'bytes 0-0/32212254720', 'Content-Length': '2' }, error: 'range_response_invalid', cancelRejects: true },
+  ]
+  for (const method of ['GET', 'HEAD']) for (const sample of cases) {
+    let cancellations = 0
+    const fixture = await createFixture({
+      cdnHandler: async () => new Response(new ReadableStream({
+        start(controller) { controller.enqueue(new Uint8Array([1])) },
+        cancel() {
+          cancellations += 1
+          if (sample.cancelRejects) throw new Error('cancel failed')
+        },
+      }), { status: sample.status, headers: { 'Content-Type': 'video/mp4', ...sample.headers } }),
+    })
+    const response = await requestMedia(fixture, 'range-validation-video', {
+      method, ...(method === 'GET' ? { range: 'bytes=0-0' } : {}),
+    })
+    assert.equal(response.status, 502)
+    assert.equal((await response.json()).error, sample.error)
+    assert.equal(fixture.state.logs[0].errorCode, sample.error)
+    assert.equal(fixture.state.logs[0].bytesStreamed, 0)
+    assert.equal(cancellations, 1)
+  }
 })
 
 test('Worker answers HEAD for a zero-byte original without probing Quark', async () => {

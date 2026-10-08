@@ -224,6 +224,41 @@ await test('invalid upstream Content-Range and Content-Length are rejected', asy
   } finally { await closeServer(server) }
 })
 
+await test('failed GET and HEAD Range validation cancels the upstream body without hiding the original error', async () => {
+  const cases = [
+    { status: 200, headers: {}, error: 'range_not_supported' },
+    { status: 206, headers: { 'Content-Range': 'bytes 1-1/32212254720', 'Content-Length': '1' }, error: 'range_response_invalid' },
+    { status: 206, headers: { 'Content-Range': 'bytes 0-0/32212254720', 'Content-Length': '2' }, error: 'range_response_invalid', cancelRejects: true },
+  ]
+  for (const method of ['GET', 'HEAD']) for (const sample of cases) {
+    let cancellations = 0
+    const upstreamBody = new ReadableStream({
+      start(controller) { controller.enqueue(new Uint8Array([1])) },
+      cancel() {
+        cancellations += 1
+        if (sample.cancelRejects) throw new Error('cancel failed')
+      },
+    })
+    const provider = {
+      getItem: async id => createItem({ id }),
+      getFileResponse: async () => new Response(upstreamBody, {
+        status: sample.status, headers: { 'Content-Type': 'video/mp4', ...sample.headers },
+      }),
+    }
+    const { server, baseUrl, logs } = await startServer({ provider })
+    try {
+      const response = await fetch(`${baseUrl}/v1/media?ticket=${encodeURIComponent(ticket())}`, {
+        method, ...(method === 'GET' ? { headers: { Range: 'bytes=0-0' } } : {}),
+      })
+      assert.equal(response.status, 502)
+      if (method === 'GET') assert.equal((await response.json()).error, sample.error)
+      assert.equal(logs[0].errorCode, sample.error)
+      assert.equal(logs[0].bytesStreamed, 0)
+      assert.equal(cancellations, 1)
+    } finally { await closeServer(server) }
+  }
+})
+
 await test('short ticket establishes a scoped session so later Range requests survive ticket expiry', async () => {
   let now = 1_800_000_000_000
   const ranges = []

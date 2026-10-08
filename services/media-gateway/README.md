@@ -87,3 +87,20 @@ npm run build:media-gateway
 ```
 
 Gateway unit tests use simulated Quark responses, including first and middle byte ranges and a 30 GB `Content-Length` without creating a large file. They do not replace Production acceptance against a real Quark account.
+
+### Verified Quark upstream policy (2026-10-08)
+
+An owner-authenticated, read-only probe on the existing Worker used its unchanged Production bindings and the same `quark-main` auth for both real files:
+
+| Sample | Actual bytes | `file/info` | `get_download_url` |
+| --- | ---: | --- | --- |
+| `壁纸_8.jpg` | 2,245,317 | HTTP 200, errno 0 | HTTP 200, errno 0; URL obtained but not logged |
+| `07(1).mp4` | 848,086,961 | HTTP 200, errno 0 | HTTP 400, errno 23018, API status -1 |
+
+The MP4 response explicitly matched `download file size limit[52428800]` (50 MiB). The diagnostic returned only the fixed reason `download_file_size_limit` and numeric limit, never the raw response, credentials or media URL. Adding Bearer auth and separately removing `device_id` both returned the same rejection. The stored optional client token was absent; this comparison does not claim every possible authorization difference has been excluded.
+
+The observed failing request ID was `099a69a0-0655-4a7c-90fd-27a92cc42ed0`. Failure precedes CDN byte transfer and was reproduced by a plain POST with only the file ID in its JSON body, independent of browser HEAD/Range semantics. This proves a limit on the currently authorized Quark API download channel, not a universal Quark account or membership limit. Do not infer this policy from errno 23018 alone, fake an agent identity, or bypass the upstream restriction.
+
+GitHub Actions run `37705552040`, latest job `113156013161`, also completed successfully using normal curl and its short-lived, verified GitHub OIDC identity. It independently reproduced both file results and the same explicit MP4 limit; the failing MP4 request ID was `b192d63e-4614-49d5-aa64-a4f5728be21c`. The one-time diagnostic workflow is removed after verification.
+
+Worker 0.2.11 cancels rejected upstream Range bodies and adds exact-match, sanitized size-policy diagnostics. It does **not** remove the upstream limit. Real MP4 206/playback/seek acceptance remains blocked, and PR #25 must not be merged until the complete Production acceptance succeeds. Obtaining a JPG download URL alone is not proof of a successful Production image download or render.
