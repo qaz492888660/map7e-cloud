@@ -1,0 +1,103 @@
+name: Temporary Production JPG original probe
+on:
+  push:
+    branches: [tmp/jpg-original-acceptance-20261008-1012]
+    paths: ['.github/workflows/jpg-original-probe.yml']
+permissions: {}
+jobs:
+  original:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Verify public Production JPG original with bounded curl
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import collections, hashlib, json, pathlib, re, subprocess, tempfile, time, urllib.parse
+          BASE = "https://cloud.map7e.com"
+          EXPECTED_SIZE = 2245317
+          EXPECTED_SHA = "bbf0c4c1eff8471688c91cf60ef26a02879ab2ecb3c97607a2e9296a9f998c5e"
+          deadline = time.monotonic() + 100
+          def emit(data):
+              print(json.dumps(data, ensure_ascii=False), flush=True)
+          def fetch(url, label, max_size):
+              remaining = int(deadline - time.monotonic())
+              if remaining <= 1:
+                  raise RuntimeError("probe_deadline")
+              timeout = min(30, remaining)
+              with tempfile.TemporaryDirectory(prefix="jpg-probe-") as directory:
+                  target = pathlib.Path(directory) / "body"
+                  result = subprocess.run(["curl", "-sS", "--location", "--max-redirs", "3",
+                      "--connect-timeout", "8", "--max-time", str(timeout), "--max-filesize", str(max_size),
+                      "--proto", "=https", "--proto-redir", "=https", "--dump-header", "-",
+                      "--output", str(target), url], capture_output=True, timeout=timeout+2)
+                  blocks = [b for b in re.split(r"\r?\n\r?\n", result.stdout.decode("latin1", errors="replace"))
+                      if re.match(r"^HTTP/\S+ \d{3}", b)]
+                  statuses = [int(re.match(r"^HTTP/\S+ (\d{3})", b)[1]) for b in blocks]
+                  headers = {}
+                  for line in (blocks[-1] if blocks else "").splitlines()[1:]:
+                      if ":" in line:
+                          key, value = line.split(":", 1)
+                          if key.lower() in {"content-type", "content-length", "accept-ranges", "content-range", "x-media-error"}:
+                              headers[key.lower()] = value.strip()[:150]
+                  body = target.read_bytes() if target.exists() else b""
+                  safe = {"stage":label, "curlExit":result.returncode, "httpChain":statuses, "headers":headers, "actualBytes":len(body)}
+                  if statuses and statuses[-1] not in {200,206}:
+                      try:
+                          parsed = json.loads(body)
+                          if isinstance(parsed, dict):
+                              safe["businessError"] = {k:parsed[k] for k in ("ok","error","limitBytes") if k in parsed}
+                      except (ValueError, UnicodeError):
+                          if b"1010" in body and b"cloudflare" in body.lower():
+                              safe["securityError"] = "cloudflare_1010"
+                  emit(safe)
+                  if result.returncode:
+                      raise RuntimeError("curl_transport_failure")
+                  return statuses[-1] if statuses else None, headers, body
+          try:
+              queue = collections.deque([""])
+              seen = set()
+              jpg = None
+              for index in range(8):
+                  if not queue: break
+                  parent = queue.popleft()
+                  if parent in seen: continue
+                  seen.add(parent)
+                  query = urllib.parse.urlencode({"storageId":"quark-main", **({"parentId":parent} if parent else {})})
+                  status, _, raw = fetch(BASE + "/api/storage-files?" + query, "public_file_list_" + str(index), 4000000)
+                  if status == 401: continue
+                  if status != 200: raise RuntimeError("file_list_http_failure")
+                  data = json.loads(raw)
+                  if not isinstance(data, dict) or data.get("ok") is not True:
+                      raise RuntimeError("file_list_business_failure")
+                  for item in data.get("items", []):
+                      if not isinstance(item, dict): continue
+                      if item.get("name") == "壁纸_8.jpg" and not item.get("isFolder"):
+                          jpg = item
+                          break
+                      if item.get("isFolder") and isinstance(item.get("id"), str):
+                          queue.append(item["id"])
+                  if jpg: break
+              if jpg is None:
+                  emit({"sampleFound":False, "result":"not_verified", "reason":"sample_not_in_anonymous_accessible_listing"})
+                  raise SystemExit(1)
+              emit({"sampleFound":True, "sample":"壁纸_8.jpg", "listedSize":jpg.get("size"), "listingAccess":jpg.get("effectiveAccess")})
+              query = urllib.parse.urlencode({"storageId":"quark-main", "id":jpg["id"], "parentId":jpg.get("parentId") or ""})
+              status, headers, content = fetch(BASE + "/api/storage-download?" + query, "original_download", 5000000)
+              digest = hashlib.sha256(content).hexdigest()
+              mime = headers.get("content-type", "").split(";",1)[0].strip().lower()
+              length = headers.get("content-length")
+              evidence = {"stage":"original_integrity", "http":status, "contentType":mime,
+                  "contentLength":length, "actualBytes":len(content), "sha256":digest,
+                  "matchesPreviouslyFullyDecodedBrowserFile":digest == EXPECTED_SHA,
+                  "jpegStart":content.startswith(b"\xff\xd8\xff"), "jpegEnd":content.endswith(b"\xff\xd9"),
+                  "contentLengthMatches":None if length is None else length == str(len(content))}
+              passed = status == 200 and mime in {"image/jpeg","image/jpg"} and len(content) == EXPECTED_SIZE and digest == EXPECTED_SHA and (length is None or length == str(len(content)))
+              evidence["result"] = "passed" if passed else "failed"
+              emit(evidence)
+              raise SystemExit(0 if passed else 1)
+          except Exception as error:
+              emit({"result":"failed", "failureType":type(error).__name__, "error":str(error) if isinstance(error, RuntimeError) else "probe_error"})
+              raise SystemExit(1)
+          
+          PY
