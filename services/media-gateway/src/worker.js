@@ -1100,17 +1100,20 @@ async function requestDownload(client, storageId, fileId, {
   refresh = false,
   cdnHeaderTimeoutMs = MEDIA_CDN_HEADER_TIMEOUT_MS,
 } = {}) {
-  const headers = new Headers({ Accept: '*/*', 'Accept-Encoding': 'identity', Cookie: mediaCookie(client.auth, env) })
+  const headers = new Headers({ Accept: '*/*', 'Accept-Encoding': 'identity' })
   if (range) headers.set('Range', range)
   if (ifRange) headers.set('If-Range', ifRange)
   let source = await getDownloadSource(client, storageId, fileId, env, now, refresh)
+  headers.set('Cookie', mediaCookie(client.auth, env))
   let response = await fetchQuarkCdn(source.url, { headers, signal, fetchImpl, headerTimeoutMs: cdnHeaderTimeoutMs })
   if (response.status === 401 || response.status === 403) {
     await response.body?.cancel().catch(() => {})
     for (const [key, value] of downloadUrlCache) if (value.url === source.url) downloadUrlCache.delete(key)
     source = await getDownloadSource(client, storageId, fileId, env, now, true)
+    const retryHeaders = new Headers(headers)
+    retryHeaders.set('Cookie', mediaCookie(client.auth, env))
     response = await fetchQuarkCdn(source.url, {
-      headers: new Headers({ ...Object.fromEntries(headers), Cookie: mediaCookie(client.auth, env) }),
+      headers: retryHeaders,
       signal,
       fetchImpl,
       headerTimeoutMs: cdnHeaderTimeoutMs,

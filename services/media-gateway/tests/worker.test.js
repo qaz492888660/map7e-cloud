@@ -998,6 +998,57 @@ test('Quark CDN 403 refreshes the download URL and retries exactly once', async 
   assert.equal(fixture.state.cdnRequests.length, 2)
 })
 
+test('Worker replaces the Quark cookie after token rotation during a CDN 401 or 403 retry', async () => {
+  for (const deniedStatus of [401, 403]) {
+    let canceled = 0
+    const fixture = await createFixture({
+      cdnHandler(_url, headers, state) {
+        state.cdnRequests.push({ headers: new Headers(headers) })
+        if (state.cdnRequests.length === 1) {
+          state.authExpired = true
+          return new Response(new ReadableStream({ cancel() { canceled += 1 } }), { status: deniedStatus })
+        }
+        return new Response(new Uint8Array([7, 7]), {
+          status: 206,
+          headers: { 'Content-Type': 'video/mp4', 'Content-Range': 'bytes 10-11/32212254720', 'Content-Length': '2' },
+        })
+      },
+    })
+    const response = await requestMedia(fixture, 'retry-cookie-' + deniedStatus, { range: 'bytes=10-11', ifRange: '"etag-v1"' })
+    assert.equal(response.status, 206)
+    await response.arrayBuffer()
+    assert.equal(canceled, 1)
+    assert.equal(fixture.state.cdnRequests.length, 2)
+    assert.equal(fixture.state.mediaUrlCount, 2)
+    assert.equal(fixture.state.storedRefreshes, 1)
+    const [first, retry] = fixture.state.cdnRequests.map(value => value.headers)
+    assert.equal(retry.get('cookie'), first.get('cookie').replace(defaultAuth.accessToken, 'quark-access-token-refreshed'))
+    assert.equal(retry.get('range'), 'bytes=10-11')
+    assert.equal(retry.get('if-range'), '"etag-v1"')
+    assert.equal(retry.get('accept-encoding'), 'identity')
+  }
+})
+
+test('Worker uses the current Quark cookie when obtaining the initial download URL rotates the token', async () => {
+  const fixture = await createFixture({
+    quarkHandler({ url, state }) {
+      if (url.pathname === '/open/v1/file/get_download_url' && url.searchParams.get('access_token') === defaultAuth.accessToken) {
+        state.authExpired = true
+        return jsonResponse({ status: 1, error_info: 'access token expired' }, 401)
+      }
+    },
+  })
+  const response = await requestMedia(fixture, 'initial-url-cookie', { range: 'bytes=0-0' })
+  assert.equal(response.status, 206)
+  await response.arrayBuffer()
+  assert.equal(fixture.state.storedRefreshes, 1)
+  assert.equal(fixture.state.cdnRequests.length, 1)
+  const cookie = fixture.state.cdnRequests[0].headers.get('cookie')
+  assert.ok(cookie.includes('x_pan_access_token=quark-access-token-refreshed'))
+  assert.equal(cookie.includes(defaultAuth.accessToken), false)
+  assert.equal(cookie.match(/x_pan_access_token=/g).length, 1)
+})
+
 test('expired Quark access token is refreshed once and encrypted auth is written back to the shared Redis key', async () => {
   const expiredAuth = { ...defaultAuth, accessExpiresAt: fixedNow - 1 }
   const fixture = await createFixture({ auth: expiredAuth, authorizeRefresh: true })
