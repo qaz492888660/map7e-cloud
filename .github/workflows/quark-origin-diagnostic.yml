@@ -14,52 +14,33 @@ jobs:
       - name: Read owner-authorized Quark diagnostic
         run: |
           python3 - <<'PY'
-          import json,os,time,subprocess,urllib.error,urllib.parse,urllib.request
+          import json,os,re,subprocess,urllib.parse,urllib.request
           audience='map7e-quark-readonly-diag-20261008'
           issuer_url=os.environ['ACTIONS_ID_TOKEN_REQUEST_URL']+'&audience='+urllib.parse.quote(audience)
-          request=urllib.request.Request(issuer_url,headers={'Authorization':'Bearer '+os.environ['ACTIONS_ID_TOKEN_REQUEST_TOKEN']})
-          with urllib.request.urlopen(request,timeout=20) as response:
+          issuer_request=urllib.request.Request(issuer_url,headers={'Authorization':'Bearer '+os.environ['ACTIONS_ID_TOKEN_REQUEST_TOKEN']})
+          with urllib.request.urlopen(issuer_request,timeout=20) as response:
               token=json.load(response)['value']
+          if not re.fullmatch(r'[A-Za-z0-9_.-]{40,12000}',token): raise SystemExit(1)
           url='https://quarkdiag-oct8-map7e-quark-media-gateway.map7e-cloud.workers.dev/'
-          anonymous_request=urllib.request.Request(url,headers={'Accept':'application/json'})
+          config='url="'+url+'"\nheader="Authorization: Bearer '+token+'"\nheader="Accept: application/json"\n'
           try:
-              anonymous_response=urllib.request.urlopen(anonymous_request,timeout=20)
-          except urllib.error.HTTPError as error:
-              anonymous_response=error
-          try:
-              anonymous_body=json.loads(anonymous_response.read(65536))
-              print(json.dumps({'anonymousHttp':anonymous_response.status,'anonymousKeys':sorted(anonymous_body.keys()),'anonymousError':anonymous_body.get('error') if isinstance(anonymous_body.get('error'),str) and all(c in 'abcdefghijklmnopqrstuvwxyz0123456789_-' for c in anonymous_body['error']) else None}))
-          except (ValueError,UnicodeError):
-              print(json.dumps({'anonymousHttp':anonymous_response.status,'anonymousJson':False}))
-          request=urllib.request.Request(url,headers={'Authorization':'Bearer '+token,'Accept':'application/json'})
-          try:
-              try:
-                  response=urllib.request.urlopen(request,timeout=120)
-              except urllib.error.HTTPError as error:
-                  response=error
-              status=response.status
+              result=subprocess.run(['curl','-sS','--max-time','120','--config','-','-w','\n%{http_code}'],input=config.encode(),capture_output=True)
+              print(json.dumps({'curlExit':result.returncode}))
+              if result.returncode: raise SystemExit(1)
+              raw,status=result.stdout.rsplit(b'\n',1)
+              status=int(status)
               print(json.dumps({'diagnosticHttp':status}))
-              raw=response.read(65536)
               try:
                   body=json.loads(raw)
               except (ValueError,UnicodeError):
                   print(json.dumps({'responseReadable':False}))
                   raise SystemExit(1)
-              print(json.dumps({'responseKeys':sorted(body.keys())}))
-              allowed_cf={'error_code','error_name','error_category','owner_action_required','retryable','status'}
-              cf_values={key:value for key,value in body.items() if key in allowed_cf and (isinstance(value,(bool,int)) or isinstance(value,str) and len(value)<100 and all(c in 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-. ' for c in value))}
-              if cf_values: print(json.dumps({'cloudflareResponse':cf_values}))
-              curl_result=subprocess.run(['curl','-sS','--max-time','20',url],capture_output=True)
-              try:
-                  curl_body=json.loads(curl_result.stdout)
-                  curl_safe={key:value for key,value in curl_body.items() if key in allowed_cf and (isinstance(value,(bool,int)) or isinstance(value,str) and len(value)<100 and all(c in 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-. ' for c in value))}
-                  print(json.dumps({'anonymousCurlExit':curl_result.returncode,'anonymousCurlKeys':sorted(curl_body.keys()),'anonymousCurlCf':curl_safe,'anonymousCurlError':curl_body.get('error') if isinstance(curl_body.get('error'),str) and all(c in 'abcdefghijklmnopqrstuvwxyz0123456789_-' for c in curl_body['error']) else None}))
-              except (ValueError,UnicodeError):
-                  print(json.dumps({'anonymousCurlExit':curl_result.returncode,'anonymousCurlJson':False}))
               if body.get('diagnostic')!='quark-readonly-v1':
                   error=body.get('error')
-                  if isinstance(error,str) and len(error)<100 and all(character in 'abcdefghijklmnopqrstuvwxyz0123456789_-' for character in error):
-                      print(json.dumps({'diagnosticError':error}))
+                  if isinstance(error,str) and re.fullmatch(r'[a-z0-9_-]{1,100}',error): print(json.dumps({'diagnosticError':error}))
+                  for key in ['error_code','error_name','error_category','owner_action_required']:
+                      value=body.get(key)
+                      if isinstance(value,(int,bool)) or isinstance(value,str) and re.fullmatch(r'[a-z0-9_-]{1,100}',value): print(json.dumps({key:value}))
                   raise SystemExit(1)
               allowed={'sample','stage','variant','upstreamStatus','upstreamErrno','upstreamApiStatus','hasDownloadUrl','upstreamReason','upstreamLimitBytes','upstreamRequestId','clientTokenPresent','fileSize','errorCode','found'}
               for observation in body.get('observations',[]):
@@ -69,5 +50,6 @@ jobs:
               if status!=200: raise SystemExit(1)
           finally:
               token=None
-              request=None
+              config=None
+              issuer_request=None
           PY
