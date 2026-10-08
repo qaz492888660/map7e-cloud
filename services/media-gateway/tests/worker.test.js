@@ -3,6 +3,7 @@ import crypto from 'node:crypto'
 import test from 'node:test'
 import { createMediaTicket, mediaSessionPath } from '../../../lib/storage/media-ticket.js'
 import { CookieJar, legacyCookie } from './session-cookie-fixture.js'
+import { createMediaDiagnostics, MEDIA_DIAGNOSTIC_MAX_EVENTS } from '../src/diagnostics.js'
 import {
   createMediaGatewayWorker,
   isAllowedQuarkUrl,
@@ -101,6 +102,7 @@ async function createFixture({
   cdnHeaderTimeoutMs,
   sleep,
   externalRefreshAfterLockAttempts,
+  logger,
 } = {}) {
   const externalRefreshRecord = externalRefreshAfterLockAttempts === undefined ? null : await sealAuth('quark-main', {
     ...auth,
@@ -250,7 +252,7 @@ async function createFixture({
   const worker = createMediaGatewayWorker({
     fetchImpl,
     now: () => nowValue,
-    logger: entry => state.logs.push(entry),
+    logger: logger || (entry => state.logs.push(entry)),
     ...(cdnHeaderTimeoutMs === undefined ? {} : { cdnHeaderTimeoutMs }),
     ...(sleep === undefined ? {} : { sleep }),
   })
@@ -268,6 +270,7 @@ async function requestMedia(fixture, fileId, {
   cookie,
   origin = allowedOrigin,
   now = fixedNow,
+  signal,
 } = {}) {
   const token = ticketFor(fileId, { purpose, variant, disposition, parentId }, now)
   const headers = new Headers()
@@ -276,7 +279,7 @@ async function requestMedia(fixture, fileId, {
   if (cookie) headers.set('Cookie', cookie)
   if (origin) headers.set('Origin', origin)
   const url = 'https://media.example.test/v1/media?ticket=' + encodeURIComponent(token)
-  return fixture.worker.fetch(new Request(scopedUrl(url), { method, headers }), fixture.env)
+  return fixture.worker.fetch(new Request(scopedUrl(url), { method, headers, signal }), fixture.env)
 }
 
 test('Worker verifies Node-issued HMAC tickets and rejects expired or modified grants', async () => {
@@ -292,7 +295,7 @@ test('Worker health is minimal and works without media secrets', async () => {
   const fixture = await createFixture({ envOverrides: { MEDIA_GATEWAY_SIGNING_SECRET: undefined } })
   const response = await fixture.worker.fetch(new Request(scopedUrl('https://media.example.test/health')), fixture.env)
   assert.equal(response.status, 200)
-  assert.deepEqual(await response.json(), { ok: true, version: '0.2.13' })
+  assert.deepEqual(await response.json(), { ok: true, version: '0.2.14' })
   assert.equal(fixture.state.redisRequests.length, 0)
 })
 
@@ -1365,4 +1368,218 @@ test('Worker legacy HEAD stays compatible with manual Cloud probes and invalid d
   const resumed = await fixture.worker.fetch(new Request(url, { headers: { Range: 'bytes=100-100', Cookie: spoofed, Origin: allowedOrigin } }), fixture.env)
   assert.equal(resumed.status, 206)
   await resumed.arrayBuffer()
+})
+
+function diagnosticEnv(fileId, until = fixedNow + 30 * 60_000) {
+  return {
+    MEDIA_GATEWAY_DIAGNOSTIC_FILE_HASH: crypto.createHmac('sha256', ticketSecret)
+      .update('quark-main\u0000' + fileId).digest().subarray(0, 12).toString('base64url'),
+    MEDIA_GATEWAY_DIAGNOSTIC_UNTIL: String(until),
+  }
+}
+const diagnosticLogs = fixture => fixture.state.logs.filter(entry => entry.event === 'media_diagnostic')
+const diagnosticJpg = id => mediaFile(id, { file_name: 'diagnostic.jpg', file_ext: 'jpg', mime_type: 'image/jpeg', size: 3 })
+
+test('Worker diagnostics remain off without a matching bounded file window', async () => {
+  for (const [index, envOverrides] of [
+    {}, diagnosticEnv('other-file'), diagnosticEnv('diag-gating', fixedNow),
+    diagnosticEnv('diag-gating', fixedNow + 60 * 60_000 + 1),
+  ].entries()) {
+    const fixture = await createFixture({ envOverrides })
+    const response = await requestMedia(fixture, 'diag-gating', { purpose: 'original' })
+    assert.equal(response.status, 200, String(index))
+    await response.arrayBuffer()
+    assert.equal(diagnosticLogs(fixture).length, 0)
+    assert.equal(fixture.state.logs.length, 1)
+  }
+})
+
+test('Worker diagnostics identify each allowed redirect hop without logging signed URLs or credentials', async () => {
+  const id = 'diag-redirect-jpg'
+  const secretMarker = 'signature-that-must-never-appear-in-logs'
+  const fixture = await createFixture({
+    files: { [id]: diagnosticJpg(id) }, envOverrides: diagnosticEnv(id),
+    cdnHandler(url, headers, state, init) {
+      state.cdnRequests.push({ url, headers, init })
+      if (url.hostname === 'cdn.quark.cn') return new Response(null, { status: 302,
+        headers: { Location: 'https://edge.quark.cn/private-path/' + secretMarker + '?auth_key=' + secretMarker } })
+      return new Response(new Uint8Array([255, 216, 255]), { status: 200,
+        headers: { 'Content-Type': 'image/jpeg', 'Content-Length': '3', 'Accept-Ranges': 'bytes',
+          'Set-Cookie': secretMarker, 'X-Private': secretMarker } })
+    },
+  })
+  const response = await requestMedia(fixture, id, { purpose: 'original', disposition: 'inline', ifRange: secretMarker })
+  assert.equal(response.status, 200)
+  await response.arrayBuffer()
+  const logs = diagnosticLogs(fixture)
+  assert.deepEqual(logs.filter(log => log.stage === 'cdn_headers_start').map(log =>
+    [log.attempt, log.hop, log.redirects, log.host, log.timeoutMs, log.accept, log.acceptEncoding]), [
+    [1, 0, 0, 'cdn.quark.cn', 15000, '*/*', 'identity'],
+    [1, 1, 1, 'edge.quark.cn', 15000, '*/*', 'identity'],
+  ])
+  const results = logs.filter(log => log.stage === 'cdn_headers_result')
+  assert.deepEqual(results.map(log => log.status), [302, 200])
+  assert.ok(results.every(log => log.elapsedMs >= 0 && !log.deadlineFired && !log.parentAborted))
+  assert.equal(results[1].upstreamContentType, 'image/jpeg')
+  assert.equal(results[1].contentLength, '3')
+  const ready = logs.find(log => log.stage === 'media_response_ready')
+  assert.equal(ready.contentType, 'image/jpeg')
+  assert.equal(ready.acceptRanges, 'bytes')
+  assert.ok(logs.every(log => log.disposition === 'inline' && log.version === '0.2.14' && !log.authRefreshOccurred))
+  assert.equal(new Set(logs.map(log => log.requestId)).size, 1)
+  assert.deepEqual(logs.map(log => log.sequence), logs.map((_, i) => i + 1))
+  const serialized = JSON.stringify(fixture.state.logs)
+  for (const secret of [secretMarker, id, 'auth_key', '?', ticketSecret, encryptionSecret, redisToken,
+    defaultAuth.accessToken, defaultAuth.refreshToken, defaultAuth.clientToken, 'Authorization', 'Cookie']) {
+    assert.equal(serialized.includes(secret), false, secret)
+  }
+  assert.ok(fixture.state.cdnRequests.every(call => call.init.redirect === 'manual'))
+})
+
+test('Worker diagnostics preserve the CDN allowlist and do not expose rejected redirect targets', async () => {
+  const id = 'diag-rejected-hop'
+  const fixture = await createFixture({ envOverrides: diagnosticEnv(id), cdnHandler(url, headers, state) {
+    state.cdnRequests.push({ url })
+    return new Response(null, { status: 302, headers: { Location: 'https://untrusted.test/secret-query?token=hidden' } })
+  } })
+  const response = await requestMedia(fixture, id, { purpose: 'original' })
+  assert.equal(response.status, 502)
+  assert.equal((await response.json()).error, 'quark_media_redirect_rejected')
+  assert.equal(fixture.state.cdnRequests.length, 1)
+  assert.equal(diagnosticLogs(fixture).filter(log => log.stage === 'cdn_redirect').length, 0)
+  assert.equal(JSON.stringify(fixture.state.logs).includes('untrusted.test'), false)
+  assert.equal(JSON.stringify(fixture.state.logs).includes('hidden'), false)
+})
+
+test('Worker diagnostics distinguish a CDN deadline before headers from an upstream response', async () => {
+  const id = 'diag-header-deadline'
+  const fixture = await createFixture({ envOverrides: diagnosticEnv(id), cdnHeaderTimeoutMs: 20,
+    cdnHandler: (url, headers, state, init) => new Promise((resolve, reject) => {
+      init.signal.addEventListener('abort', () => reject(new DOMException('private fetch details', 'AbortError')), { once: true })
+    }),
+  })
+  const response = await requestMedia(fixture, id, { purpose: 'original' })
+  assert.equal(response.status, 504)
+  assert.equal((await response.json()).error, 'quark_media_headers_timeout')
+  const result = diagnosticLogs(fixture).find(log => log.stage === 'cdn_headers_result')
+  assert.equal(result.result, 'deadline')
+  assert.equal(result.deadlineFired, true)
+  assert.equal(result.parentAborted, false)
+  assert.equal(result.status, undefined)
+  assert.equal(result.host, 'cdn.quark.cn')
+  assert.equal(result.attempt, 1)
+  assert.equal(result.hop, 0)
+  assert.equal(fixture.state.logs.at(-1).bytesStreamed, 0)
+  assert.equal(JSON.stringify(fixture.state.logs).includes('private fetch details'), false)
+})
+
+test('Worker diagnostics identify parent cancellation separately from the CDN deadline', async () => {
+  const id = 'diag-parent-cancel'
+  const controller = new AbortController()
+  let reachedCdn
+  const started = new Promise(resolve => { reachedCdn = resolve })
+  const fixture = await createFixture({ envOverrides: diagnosticEnv(id), cdnHandler: (url, headers, state, init) =>
+    new Promise((resolve, reject) => {
+      init.signal.addEventListener('abort', () => reject(new DOMException('private cancellation reason', 'AbortError')), { once: true })
+      reachedCdn()
+    }),
+  })
+  const pending = requestMedia(fixture, id, { purpose: 'original', signal: controller.signal })
+  await started
+  controller.abort('secret-client-reason')
+  const response = await pending
+  assert.equal(response.status, 502)
+  const result = diagnosticLogs(fixture).find(log => log.stage === 'cdn_headers_result')
+  assert.equal(result.result, 'client_cancel')
+  assert.equal(result.parentAborted, true)
+  assert.equal(result.deadlineFired, false)
+  assert.equal(result.status, undefined)
+  assert.equal(JSON.stringify(fixture.state.logs).includes('secret-client-reason'), false)
+})
+
+test('Worker diagnostics classify fetch errors without recording exception messages', async () => {
+  const id = 'diag-fetch-error'
+  const fixture = await createFixture({ envOverrides: diagnosticEnv(id), cdnHandler() {
+    throw new TypeError('DNS address and signed URL must not be logged')
+  } })
+  assert.equal((await requestMedia(fixture, id, { purpose: 'original' })).status, 502)
+  const result = diagnosticLogs(fixture).find(log => log.stage === 'cdn_headers_result')
+  assert.equal(result.result, 'fetch_error')
+  assert.equal(result.errorKind, 'type_error')
+  assert.equal(result.deadlineFired, false)
+  assert.equal(result.parentAborted, false)
+  assert.equal(JSON.stringify(fixture.state.logs).includes('signed URL'), false)
+})
+
+test('Worker diagnostics correlate the existing one-time CDN retry with URL and credential rotation', async () => {
+  const id = 'diag-retry-rotate'
+  const fixture = await createFixture({ envOverrides: diagnosticEnv(id), cdnHandler(url, headers, state) {
+    state.cdnRequests.push({ url, headers })
+    if (state.cdnRequests.length === 1) {
+      state.authExpired = true
+      return new Response('denied', { status: 403 })
+    }
+    return new Response(new Uint8Array([1, 2, 3]), { status: 200, headers: { 'Content-Length': '3' } })
+  } })
+  const response = await requestMedia(fixture, id, { purpose: 'original' })
+  assert.equal(response.status, 200)
+  await response.arrayBuffer()
+  const logs = diagnosticLogs(fixture)
+  assert.deepEqual(logs.filter(log => log.stage === 'cdn_headers_result').map(log => [log.attempt, log.status]), [[1, 403], [2, 200]])
+  assert.ok(logs.some(log => log.stage === 'auth_refresh_start' && log.reason === 'api_expired'))
+  assert.ok(logs.some(log => log.stage === 'auth_refresh_result' && log.result === 'rotated' && log.authChanged))
+  assert.ok(logs.some(log => log.stage === 'cdn_retry' && log.urlChanged && log.authChanged))
+  assert.equal(logs.at(-1).authRefreshOccurred, true)
+  assert.equal(fixture.state.storedRefreshes, 1)
+  assert.ok(fixture.state.cdnRequests[1].headers.get('cookie').includes('quark-access-token-refreshed'))
+  const serialized = JSON.stringify(fixture.state.logs)
+  for (const secret of [defaultAuth.accessToken, defaultAuth.refreshToken, 'quark-access-token-refreshed',
+    'quark-refresh-token-refreshed', defaultAuth.clientToken, 'auth_key']) assert.equal(serialized.includes(secret), false)
+})
+
+test('Worker diagnostics distinguish a proactive refresh adopted from another isolate', async () => {
+  const id = 'diag-refresh-adopted'
+  const fixture = await createFixture({ envOverrides: diagnosticEnv(id),
+    auth: { ...defaultAuth, accessExpiresAt: fixedNow + 1000 }, externalRefreshAfterLockAttempts: 1, sleep: async () => {},
+  })
+  const response = await requestMedia(fixture, id, { purpose: 'original' })
+  assert.equal(response.status, 200)
+  await response.arrayBuffer()
+  const logs = diagnosticLogs(fixture)
+  assert.ok(logs.some(log => log.stage === 'auth_refresh_start' && log.reason === 'proactive'))
+  assert.ok(logs.some(log => log.stage === 'auth_refresh_result' && log.result === 'adopted'))
+  assert.equal(fixture.state.storedRefreshes, 0)
+  assert.equal(logs.at(-1).authRefreshOccurred, true)
+})
+
+test('Worker diagnostics sanitize unknown fields, cap events, expire and tolerate logging failures', () => {
+  const entries = []
+  let now = fixedNow
+  const create = logger => createMediaDiagnostics({ env: diagnosticEnv('diag-limits'), requestId: 'fixed-request-id',
+    fileHash: diagnosticEnv('diag-limits').MEDIA_GATEWAY_DIAGNOSTIC_FILE_HASH,
+    claims: { purpose: 'original', disposition: 'attachment' }, method: 'GET', version: '0.2.14',
+    logger, now: () => now, monotonicNow: () => 1 })
+  const diagnostics = create(entry => entries.push(entry))
+  diagnostics.emit('not-a-stage', { token: 'hidden' })
+  diagnostics.emit('cdn_headers_start', { constructor: 'hidden', cookie: 'hidden', url: 'https://secret.quark.cn/?token=hidden',
+    reason: 'hidden', host: 'https://secret.quark.cn/?token=hidden', contentLength: 'hidden', status: NaN })
+  assert.equal(entries.length, 1)
+  assert.equal(JSON.stringify(entries).includes('hidden'), false)
+  for (let i = 0; i < MEDIA_DIAGNOSTIC_MAX_EVENTS + 5; i++) diagnostics.emit('cdn_headers_start', {})
+  assert.equal(entries.length, MEDIA_DIAGNOSTIC_MAX_EVENTS)
+  const expiredEntries = []
+  const expiring = create(entry => expiredEntries.push(entry))
+  now += 30 * 60_000
+  expiring.emit('request_start')
+  assert.equal(expiredEntries.length, 0)
+  now = fixedNow
+  assert.doesNotThrow(() => create(() => { throw new Error('logger failed') }).emit('request_start'))
+})
+
+test('Worker diagnostics logging failures do not change a successful media response', async () => {
+  const id = 'diag-logger-failure'
+  const fixture = await createFixture({ envOverrides: diagnosticEnv(id), logger() { throw new Error('unavailable logger') } })
+  const response = await requestMedia(fixture, id, { purpose: 'original' })
+  assert.equal(response.status, 200)
+  assert.deepEqual(new Uint8Array(await response.arrayBuffer()), new Uint8Array([1, 2, 3]))
 })

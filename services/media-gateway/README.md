@@ -84,6 +84,10 @@ The default Worker URL on `workers.dev` is for health checks and short-lived dia
 
 For the scoped-path update, deploy and verify Worker 0.2.13 first, then deploy Cloud from the same commit. Worker 0.2.12 does not understand Cloud's new scoped paths. The new Worker remains compatible with Cloud's old URLs and HEAD preflight during this order of rollout. Verify JPG and a real supported video's ranges/playback after each actual deployment; a dry-run or Ready deployment is not media acceptance.
 
+Worker 0.2.14 adds optional CDN phase diagnostics without changing the 15-second response-header deadline, authorization, or host allowlist. Diagnostics remain off unless both `MEDIA_GATEWAY_DIAGNOSTIC_FILE_HASH` (the existing 16-character HMAC file identity from application logs) and `MEDIA_GATEWAY_DIAGNOSTIC_UNTIL` (Unix time in milliseconds, at most one hour ahead) are set. They apply only to that authorized file, expire automatically, and produce at most 48 entries per request. Keep the target and expiry out of committed configuration.
+
+`media_diagnostic` entries correlate request ID, attempt, redirect hop, allowed CDN host, status, elapsed header-wait time, safe media response headers, URL-cache decisions, and refresh outcomes. Deadline, parent cancellation, and fetch failure are distinct classifications. No signed URL, path, query string, credential, raw exception message, or sensitive request/response header is logged. Header-wait time includes the platform's connection setup and upstream wait; these application logs cannot separate DNS, TCP, and TLS timings. Retain query-string redaction and disabled automatic invocation logs during diagnostics.
+
 ## Local verification
 
 ```sh

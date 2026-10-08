@@ -1,7 +1,8 @@
 import { OFFICIAL_CLIENT_ID, OFFICIAL_SIGN_KEY } from '../../../lib/storage/providers/quark-client.js'
 import { QUARK_FILE_SIZE_LIMIT, quarkDownloadLimit, quarkDownloadLimitBody } from '../../../lib/storage/quark-download-limit.js'
+import { createMediaDiagnostics, diagnosticResponseHeaders } from './diagnostics.js'
 
-export const MEDIA_GATEWAY_VERSION = '0.2.13'
+export const MEDIA_GATEWAY_VERSION = '0.2.14'
 export const MEDIA_SESSION_COOKIE = '__Secure-map7e-media-'
 const LEGACY_MEDIA_SESSION_COOKIE = '__Host-map7e-media-'
 const MEDIA_SESSION_COOKIE_HEADER_MAX_LENGTH = 65_536
@@ -788,7 +789,7 @@ async function quarkRequest(path, { method = 'GET', query = {}, body, auth, env,
   return payload
 }
 
-async function rotateQuarkAuth(storageId, before, env, fetchImpl, now, sleep) {
+async function rotateQuarkAuth(storageId, before, env, fetchImpl, now, sleep, diagnostics) {
   if (!before.refreshToken || (before.refreshExpiresAt && before.refreshExpiresAt <= now())) {
     throw storageError('storage_authorization_required', 401)
   }
@@ -799,7 +800,10 @@ async function rotateQuarkAuth(storageId, before, env, fetchImpl, now, sleep) {
     if (acquired === 'OK') {
       try {
         const stored = await getStoredAuth(storageId, env, fetchImpl, now, { bypassCache: true })
-        if (authChanged(before, stored)) return stored
+        if (authChanged(before, stored)) {
+          diagnostics?.emit('auth_refresh_result', { result: 'adopted', authChanged: true })
+          return stored
+        }
         if (!stored.refreshToken || (stored.refreshExpiresAt && stored.refreshExpiresAt <= now())) {
           throw storageError('storage_authorization_required', 401)
         }
@@ -821,6 +825,7 @@ async function rotateQuarkAuth(storageId, before, env, fetchImpl, now, sleep) {
           accessExpiresAt: Number.isFinite(duration) && duration > 0 ? now() + duration * 1000 : null,
         }
         await writeStoredAuth(storageId, refreshed, env, fetchImpl, now)
+        diagnostics?.emit('auth_refresh_result', { result: 'rotated', authChanged: authChanged(before, refreshed) })
         return refreshed
       } finally {
         await redisPipeline([['EVAL', UNLOCK_LOCK_SCRIPT, '1', lockKey, owner]], env, fetchImpl).catch(() => {})
@@ -828,23 +833,33 @@ async function rotateQuarkAuth(storageId, before, env, fetchImpl, now, sleep) {
     }
     await sleep(250)
     const stored = await getStoredAuth(storageId, env, fetchImpl, now, { bypassCache: true })
-    if (authChanged(before, stored)) return stored
+    if (authChanged(before, stored)) {
+      diagnostics?.emit('auth_refresh_result', { result: 'adopted', authChanged: true })
+      return stored
+    }
   }
   throw storageError('storage_operation_busy', 409)
 }
 
-function createQuarkClient(storageId, initialAuth, { env, fetchImpl, now, sleep }) {
+function createQuarkClient(storageId, initialAuth, { env, fetchImpl, now, sleep, diagnostics }) {
   let auth = initialAuth
+  const refreshAuth = async reason => {
+    diagnostics?.emit('auth_refresh_start', { reason })
+    try { auth = await rotateQuarkAuth(storageId, auth, env, fetchImpl, now, sleep, diagnostics) } catch (error) {
+      diagnostics?.emit('auth_refresh_result', { result: 'failed' })
+      throw error
+    }
+  }
   async function call(path, options = {}) {
     if (!auth || !auth.accessToken) throw storageError('storage_authorization_required', 409)
     if (auth.accessExpiresAt && auth.accessExpiresAt <= now() + 60_000) {
-      auth = await rotateQuarkAuth(storageId, auth, env, fetchImpl, now, sleep)
+      await refreshAuth('proactive')
     }
     try {
       return await quarkRequest(path, { ...options, auth, env, fetchImpl, now })
     } catch (error) {
       if (error.code !== 'storage_token_expired' || !auth.refreshToken) throw error
-      auth = await rotateQuarkAuth(storageId, auth, env, fetchImpl, now, sleep)
+      await refreshAuth('api_expired')
       return quarkRequest(path, { ...options, auth, env, fetchImpl, now })
     }
   }
@@ -975,17 +990,33 @@ function combinedAbortSignal(signal, timeoutSignal) {
   return controller.signal
 }
 
-async function fetchQuarkCdnHeaders(value, init, fetchImpl, timeoutMs) {
+async function fetchQuarkCdnHeaders(value, init, fetchImpl, timeoutMs, diagnostics, fields) {
   const timeoutController = new AbortController()
   const signal = combinedAbortSignal(init.signal, timeoutController.signal)
   let timedOut = false
+  const startedAt = diagnostics?.clock()
+  if (diagnostics) {
+    const headers = new Headers(init.headers)
+    diagnostics.emit('cdn_headers_start', { ...fields, timeoutMs,
+      accept: headers.get('accept') === '*/*' ? '*/*' : headers.get('accept')?.startsWith('image/') ? 'image' : undefined,
+      acceptEncoding: headers.get('accept-encoding'),
+      range: safeRangeForLog(headers.get('range')), ifRangePresent: headers.has('if-range') })
+  }
   const timer = setTimeout(() => {
     timedOut = true
     timeoutController.abort()
   }, timeoutMs)
   try {
-    return await fetchImpl(value, { ...init, signal })
+    const response = await fetchImpl(value, { ...init, signal })
+    diagnostics?.emit('cdn_headers_result', { ...fields, result: 'headers', status: response.status,
+      elapsedMs: diagnostics.clock() - startedAt, deadlineFired: timedOut, parentAborted: Boolean(init.signal?.aborted),
+      ...diagnosticResponseHeaders(response.headers, true) })
+    return response
   } catch (error) {
+    diagnostics?.emit('cdn_headers_result', { ...fields,
+      result: timedOut ? 'deadline' : init.signal?.aborted ? 'client_cancel' : 'fetch_error',
+      elapsedMs: diagnostics.clock() - startedAt, deadlineFired: timedOut, parentAborted: Boolean(init.signal?.aborted),
+      errorKind: error?.name === 'AbortError' ? 'abort' : error?.name === 'TypeError' ? 'type_error' : 'other' })
     if (timedOut) throw storageError('quark_media_headers_timeout', 504)
     throw error
   } finally {
@@ -999,8 +1030,11 @@ async function fetchQuarkCdn(value, {
   fetchImpl,
   maxRedirects = 3,
   headerTimeoutMs = MEDIA_CDN_HEADER_TIMEOUT_MS,
+  diagnostics,
+  flow = 'download',
 }) {
   let current = value
+  const attempt = diagnostics?.nextAttempt()
   for (let redirects = 0; ; redirects += 1) {
     if (!isAllowedQuarkUrl(current)) throw storageError('quark_media_host_rejected', 502)
     let response
@@ -1011,7 +1045,8 @@ async function fetchQuarkCdn(value, {
         cache: 'no-store',
         redirect: 'manual',
         signal,
-      }, fetchImpl, headerTimeoutMs)
+      }, fetchImpl, headerTimeoutMs, diagnostics, { attempt, hop: redirects, redirects, flow,
+        host: diagnostics ? new URL(current).hostname.toLowerCase().replace(/\.$/, '') : undefined })
     } catch (error) {
       if (error?.code === 'quark_media_headers_timeout') throw error
       throw storageError('quark_media_unavailable', 502)
@@ -1025,6 +1060,8 @@ async function fetchQuarkCdn(value, {
       throw storageError('quark_media_redirect_rejected', 502)
     }
     if (!isAllowedQuarkUrl(next)) throw storageError('quark_media_redirect_rejected', 502)
+    diagnostics?.emit('cdn_redirect', { attempt, hop: redirects, redirects: redirects + 1, status: response.status,
+      nextHost: new URL(next).hostname.toLowerCase().replace(/\.$/, '') })
     current = next
   }
 }
@@ -1056,7 +1093,7 @@ function urlExpiryMs(value) {
   }
 }
 
-async function getDownloadSource(client, storageId, fileId, env, now, refresh = false) {
+async function getDownloadSource(client, storageId, fileId, env, now, refresh = false, diagnostics) {
   const auth = client.auth
   const fingerprint = bytesToBase64Url(new Uint8Array(await crypto.subtle.digest(
     'SHA-256',
@@ -1064,7 +1101,11 @@ async function getDownloadSource(client, storageId, fileId, env, now, refresh = 
   )))
   const cacheKey = storageId + '\u0000' + fileId + '\u0000' + fingerprint
   const cached = downloadUrlCache.get(cacheKey)
-  if (!refresh && cached && cached.expiresAt > now()) return cached
+  if (!refresh && cached && cached.expiresAt > now()) {
+    diagnostics?.emit('url_cache', { cacheHit: true, reason: 'cache' })
+    return cached
+  }
+  diagnostics?.emit('url_cache', { cacheHit: false, reason: refresh ? 'forced' : 'new' })
   const readUrl = async () => {
     const payload = await client.call('/open/v1/file/get_download_url', { method: 'POST', body: { fid: fileId } })
     const value = payload.data && payload.data.download_url
@@ -1075,7 +1116,13 @@ async function getDownloadSource(client, storageId, fileId, env, now, refresh = 
     return { payload, url: value, expiry: urlExpiryMs(value) }
   }
   let result = await readUrl()
-  if (result.expiry !== null && result.expiry <= now() + MEDIA_URL_MARGIN_MS) result = await readUrl()
+  if (result.expiry !== null && result.expiry <= now() + MEDIA_URL_MARGIN_MS) {
+    diagnostics?.emit('url_cache', { cacheHit: false, reason: 'near_expiry' })
+    result = await readUrl()
+  }
+  diagnostics?.emit('url_ready', { urlChanged: Boolean(cached && cached.url !== result.url),
+    authChanged: authChanged(auth, client.auth), expiry: result.expiry === null ? 'unknown'
+      : result.expiry <= now() ? 'expired' : result.expiry <= now() + MEDIA_URL_MARGIN_MS ? 'within_margin' : 'fresh' })
   const current = now()
   const entry = {
     url: result.url,
@@ -1099,17 +1146,23 @@ async function requestDownload(client, storageId, fileId, {
   now,
   refresh = false,
   cdnHeaderTimeoutMs = MEDIA_CDN_HEADER_TIMEOUT_MS,
+  diagnostics,
 } = {}) {
   const headers = new Headers({ Accept: '*/*', 'Accept-Encoding': 'identity' })
   if (range) headers.set('Range', range)
   if (ifRange) headers.set('If-Range', ifRange)
-  let source = await getDownloadSource(client, storageId, fileId, env, now, refresh)
+  let source = await getDownloadSource(client, storageId, fileId, env, now, refresh, diagnostics)
   headers.set('Cookie', mediaCookie(client.auth, env))
-  let response = await fetchQuarkCdn(source.url, { headers, signal, fetchImpl, headerTimeoutMs: cdnHeaderTimeoutMs })
+  let response = await fetchQuarkCdn(source.url, { headers, signal, fetchImpl, headerTimeoutMs: cdnHeaderTimeoutMs, diagnostics })
   if (response.status === 401 || response.status === 403) {
     await response.body?.cancel().catch(() => {})
     for (const [key, value] of downloadUrlCache) if (value.url === source.url) downloadUrlCache.delete(key)
-    source = await getDownloadSource(client, storageId, fileId, env, now, true)
+    diagnostics?.emit('cdn_retry', { reason: 'cdn_unauthorized', status: response.status })
+    const beforeUrl = source.url
+    const beforeAuth = client.auth
+    source = await getDownloadSource(client, storageId, fileId, env, now, true, diagnostics)
+    diagnostics?.emit('cdn_retry', { reason: 'cdn_unauthorized', urlChanged: beforeUrl !== source.url,
+      authChanged: authChanged(beforeAuth, client.auth) })
     const retryHeaders = new Headers(headers)
     retryHeaders.set('Cookie', mediaCookie(client.auth, env))
     response = await fetchQuarkCdn(source.url, {
@@ -1117,6 +1170,7 @@ async function requestDownload(client, storageId, fileId, {
       signal,
       fetchImpl,
       headerTimeoutMs: cdnHeaderTimeoutMs,
+      diagnostics,
     })
     if (response.status === 401 || response.status === 403) {
       await response.body?.cancel().catch(() => {})
@@ -1132,6 +1186,7 @@ async function previewResponse(client, fileId, item, record, claims, {
   signal,
   now,
   cdnHeaderTimeoutMs = MEDIA_CDN_HEADER_TIMEOUT_MS,
+  diagnostics,
 }) {
   const sourceFor = (value, auth) => fetchQuarkCdn(value, {
     headers: {
@@ -1144,6 +1199,8 @@ async function previewResponse(client, fileId, item, record, claims, {
     signal,
     fetchImpl,
     headerTimeoutMs: cdnHeaderTimeoutMs,
+    diagnostics,
+    flow: 'preview',
   })
   let source = previewSourceUrl(record, claims.variant)
   if (!source) throw storageError('preview_unavailable', 404)
@@ -1169,6 +1226,7 @@ async function previewResponse(client, fileId, item, record, claims, {
       fetchImpl,
       now,
       cdnHeaderTimeoutMs,
+      diagnostics,
     })
     return { response: downloaded.response }
   }
@@ -1311,6 +1369,7 @@ export function createMediaGatewayWorker({
   logger = entry => console.log(JSON.stringify(entry)),
   cdnHeaderTimeoutMs = MEDIA_CDN_HEADER_TIMEOUT_MS,
   sleep = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds)),
+  diagnosticClock = () => performance.now(),
 } = {}) {
   return {
     async fetch(request, env = {}) {
@@ -1326,6 +1385,7 @@ export function createMediaGatewayWorker({
       let bytesStreamed = 0
       let legacySessionToken = null
       let logged = false
+      let diagnostics = null
       const finishLog = async streamError => {
         if (logged) return
         logged = true
@@ -1409,7 +1469,14 @@ export function createMediaGatewayWorker({
         }
         if (!MEDIA_PURPOSES.has(claims.purpose)) throw new GatewayError('media_ticket_invalid', 401)
         const storage = await resolveStorageForTicket(claims, env, fetchImpl, now)
-        const client = createQuarkClient(claims.storageId, storage.auth, { env, fetchImpl, now, sleep })
+        if (env.MEDIA_GATEWAY_DIAGNOSTIC_FILE_HASH) {
+          const fileHash = await logFileHash(secret, claims.storageId, claims.fileId)
+          diagnostics = createMediaDiagnostics({ env, requestId, fileHash, claims, method: request.method,
+            version: MEDIA_GATEWAY_VERSION, logger, now, monotonicNow: diagnosticClock })
+          diagnostics?.emit('request_start', { ...(requestRange ? { range: requestRange } : {}),
+            ifRangePresent: request.headers.has('if-range') })
+        }
+        const client = createQuarkClient(claims.storageId, storage.auth, { env, fetchImpl, now, sleep, diagnostics })
         const resolved = await getItemRecord(client, claims.fileId)
         const item = resolved.item
         fileSize = item.size
@@ -1426,7 +1493,7 @@ export function createMediaGatewayWorker({
           parsedRange.range,
           parsedRange.ifRange,
           request,
-          { env, fetchImpl, now, cdnHeaderTimeoutMs },
+          { env, fetchImpl, now, cdnHeaderTimeoutMs, diagnostics },
         )
         let upstream = result.response
         if (upstream.status === 416) {
@@ -1474,6 +1541,7 @@ export function createMediaGatewayWorker({
           for (const sessionCookie of sessionCookies || []) headers.append('Set-Cookie', sessionCookie)
         }
         status = upstream.status
+        diagnostics?.emit('media_response_ready', { status, ...diagnosticResponseHeaders(headers) })
         if (request.method === 'HEAD' || !upstream.body) {
           await upstream.body?.cancel().catch(() => {})
           await finishLog()
@@ -1488,8 +1556,10 @@ export function createMediaGatewayWorker({
         const headers = new Headers(cors)
         for (const [name, value] of Object.entries(error && error.headers || {})) headers.set(name, value)
         if (status === 405 && !headers.has('Allow')) headers.set('Allow', 'GET, HEAD')
+        const response = jsonResponse(status, errorCode, headers, error?.limitBytes)
+        diagnostics?.emit('media_response_ready', { status, ...diagnosticResponseHeaders(response.headers) })
         await finishLog()
-        return jsonResponse(status, errorCode, headers, error?.limitBytes)
+        return response
       }
     },
   }
