@@ -92,6 +92,8 @@ Shared KV reads retain their existing bounded lifetime so cancelling one caller 
 
 Cloud emits failure-only `quark_list_transport_failure` records for the directory API: attempt, headers/body stage, numeric received status and elapsed time, deadline classification, generated request UUID, and retry decision. It logs no URL, query, raw exception, credentials, headers or payload. Existing 15-second attempt limits, two read attempts and 250ms retry delay are preserved. This instrumentation cannot retrospectively determine old 502 failures or separate platform DNS/TCP/TLS delays.
 
+Worker 0.2.16 also uses the existing original-file fallback when a raster full preview's CDN request fails to connect or times out before headers. It does not fall back for thumbnails, RAW, client cancellation, or rejected hosts/redirects. This handles a preview routing gap; it does not establish a cause for historical original-file GET timeouts. Cloud associates asynchronous preview work with each opening, aborts an old video probe when closed or replaced, and ignores its late results, errors and loading updates.
+
 `media_diagnostic` entries correlate request ID, attempt, redirect hop, allowed CDN host, status, elapsed header-wait time, safe media response headers, URL-cache decisions, and refresh outcomes. Deadline, parent cancellation, and fetch failure are distinct classifications. No signed URL, path, query string, credential, raw exception message, or sensitive request/response header is logged. Header-wait time includes the platform's connection setup and upstream wait; these application logs cannot separate DNS, TCP, and TLS timings. Retain query-string redaction and disabled automatic invocation logs during diagnostics.
 
 ## Local verification

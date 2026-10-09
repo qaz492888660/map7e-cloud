@@ -502,6 +502,33 @@ await test('storage-preview permission checks and storageId-scoped same-id previ
   assert.equal(JSON.stringify(target.headers).includes(secondAuth.accessToken), false)
   assert.equal(JSON.stringify(target.headers).includes(firstAuth.accessToken), false)
 })
+await test('Range contract stops before the gateway if the response closed during permission checks', async () => {
+  await writeConfig({ version: 1, defaultStorageId: 'quark-main', instances: [
+    { storageId: 'quark-main', provider: 'quark', displayName: '夸克网盘', enabled: true },
+  ] })
+  await writeAuth('quark-main', { accessToken: 'cancel-probe-access', refreshToken: 'cancel-probe-refresh', deviceId: 'cancel-probe-device' })
+  await setGlobalAccess('public')
+  const request = Object.assign(new EventEmitter(), { method: 'GET', headers: {},
+    query: { storageId: 'quark-main', id: 'cancelled-video', parentId: '', check: 'range' } })
+  const target = Object.assign(new EventEmitter(), res())
+  let gatewayRequests = 0
+  upstream = async url => {
+    if (url.hostname === 'media.map7e.com') { gatewayRequests += 1; throw new Error('should not reach Worker') }
+    if (url.pathname.endsWith('/file/info')) {
+      target.destroyed = true
+      target.emit('close')
+      return { status: 0, data: { file_info: { fid: 'cancelled-video', pdir_fid: '0', file_type: 2, file_name: 'sample.mp4' } } }
+    }
+    return { status: 0, data: {} }
+  }
+  await storageDownload(request, target)
+  assert.equal(target.statusCode, 499, JSON.stringify(target.body))
+  assert.equal(target.body.error, 'storage_range_probe_cancelled')
+  assert.equal(gatewayRequests, 0)
+  assert.equal(target.listenerCount('close'), 0)
+  assert.equal(request.listenerCount('aborted'), 0)
+})
+
 await test('video Range check reports actual upstream headers without moving file bytes through Vercel', async () => {
   const auth = { accessToken: 'range-check-access', refreshToken: 'range-check-refresh', deviceId: 'range-device' }
   const directUrl = 'https://video.quark.cn/large.mp4?temporary_signature=range-secret'

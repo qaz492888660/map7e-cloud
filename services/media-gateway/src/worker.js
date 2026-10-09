@@ -3,7 +3,7 @@ import { QUARK_FILE_SIZE_LIMIT, quarkDownloadLimit, quarkDownloadLimitBody } fro
 import { createMediaDiagnostics, diagnosticResponseHeaders } from './diagnostics.js'
 import { createMediaProbeScope, MEDIA_PROBE_TIMEOUT_MS, MEDIA_PROBE_RESPONSE_MARGIN_MS, MEDIA_PROBE_DEADLINE_HEADER, MEDIA_PROBE_DEADLINE_ERROR } from '../../../lib/storage/media-probe.js'
 
-export const MEDIA_GATEWAY_VERSION = '0.2.15'
+export const MEDIA_GATEWAY_VERSION = '0.2.16'
 export const MEDIA_SESSION_COOKIE = '__Secure-map7e-media-'
 const LEGACY_MEDIA_SESSION_COOKIE = '__Host-map7e-media-'
 const MEDIA_SESSION_COOKIE_HEADER_MAX_LENGTH = 65_536
@@ -1219,20 +1219,28 @@ async function previewResponse(client, fileId, item, record, claims, {
   })
   let source = previewSourceUrl(record, claims.variant)
   if (!source) throw storageError('preview_unavailable', 404)
-  let response = await sourceFor(source, client.auth)
-  let mime = safeMime(response.headers.get('content-type'))
-  if ((response.status === 401 || response.status === 403)) {
-    await response.body?.cancel().catch(() => {})
-    const refreshed = await getItemRecord(client, fileId)
-    source = previewSourceUrl(refreshed.record, claims.variant)
-    if (!source) throw storageError('preview_unavailable', 404)
+  const canFallback = claims.variant === 'preview' && RASTER_EXTENSIONS.has(itemExtension(item))
+  let response, mime
+  try {
     response = await sourceFor(source, client.auth)
     mime = safeMime(response.headers.get('content-type'))
+    if ((response.status === 401 || response.status === 403)) {
+      await response.body?.cancel().catch(() => {})
+      const refreshed = await getItemRecord(client, fileId)
+      source = previewSourceUrl(refreshed.record, claims.variant)
+      if (!source) throw storageError('preview_unavailable', 404)
+      response = await sourceFor(source, client.auth)
+      mime = safeMime(response.headers.get('content-type'))
+    }
+  } catch (error) {
+    // Only a raster full preview may use the existing original-file fallback.
+    // Cancellation, rejected hosts/redirects, thumbnails and RAW still stop.
+    if (!canFallback || signal?.aborted
+      || !['quark_media_headers_timeout', 'quark_media_unavailable'].includes(error?.code)) throw error
   }
-  if (response.status === 200 && mime && IMAGE_TYPES.has(mime)) return { response, contentTypeOverride: mime }
-  await response.body?.cancel().catch(() => {})
-  const extension = itemExtension(item)
-  if (claims.variant === 'preview' && RASTER_EXTENSIONS.has(extension)) {
+  if (response?.status === 200 && mime && IMAGE_TYPES.has(mime)) return { response, contentTypeOverride: mime }
+  await response?.body?.cancel().catch(() => {})
+  if (canFallback) {
     const downloaded = await requestDownload(client, claims.storageId, fileId, {
       range: claims.requestRange,
       ifRange: claims.requestIfRange,

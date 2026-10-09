@@ -300,7 +300,7 @@ test('Worker health is minimal and works without media secrets', async () => {
   const fixture = await createFixture({ envOverrides: { MEDIA_GATEWAY_SIGNING_SECRET: undefined } })
   const response = await fixture.worker.fetch(new Request(scopedUrl('https://media.example.test/health')), fixture.env)
   assert.equal(response.status, 200)
-  assert.deepEqual(await response.json(), { ok: true, version: '0.2.15' })
+  assert.deepEqual(await response.json(), { ok: true, version: '0.2.16' })
   assert.equal(fixture.state.redisRequests.length, 0)
 })
 
@@ -1430,7 +1430,7 @@ test('Worker diagnostics identify each allowed redirect hop without logging sign
   const ready = logs.find(log => log.stage === 'media_response_ready')
   assert.equal(ready.contentType, 'image/jpeg')
   assert.equal(ready.acceptRanges, 'bytes')
-  assert.ok(logs.every(log => log.disposition === 'inline' && log.version === '0.2.15' && !log.authRefreshOccurred))
+  assert.ok(logs.every(log => log.disposition === 'inline' && log.version === '0.2.16' && !log.authRefreshOccurred))
   assert.equal(new Set(logs.map(log => log.requestId)).size, 1)
   assert.deepEqual(logs.map(log => log.sequence), logs.map((_, i) => i + 1))
   const serialized = JSON.stringify(fixture.state.logs)
@@ -1732,4 +1732,76 @@ test('Worker probe contract: begun credential rotation persists after deadline a
   assert.equal(auth.refreshToken, 'quark-refresh-token-refreshed')
   assert.equal(fixture.state.mediaUrlCount, 0)
   assert.equal(fixture.state.cdnRequests.length, 0)
+})
+
+test('preview transport fallback: raster network error or header timeout tries original once', async () => {
+  for (const kind of ['network', 'deadline']) {
+    let previewRequests = 0, originals = 0
+    const id = 'transport-preview-' + kind
+    const fixture = await createFixture({ cdnHeaderTimeoutMs: 25,
+      files: { [id]: mediaFile(id, { file_name: 'sample.jpg', file_ext: 'jpg', mime_type: '',
+        preview_url: 'https://cdn.quark.cn/thumb/transport-failure' }) },
+      cdnHandler: async (url, headers, state, init) => {
+        if (url.pathname.startsWith('/thumb/')) {
+          previewRequests += 1
+          if (kind === 'network') throw new TypeError('private CDN error text')
+          await abortableDelay(init.signal, 1000)
+        }
+        originals += 1
+        return new Response(new Uint8Array([255, 216, 255]), { status: 200,
+          headers: { 'Content-Type': 'application/octet-stream', 'Content-Length': '3' } })
+      },
+    })
+    const response = await requestMedia(fixture, id, { purpose: 'preview', variant: 'preview' })
+    assert.equal(response.status, 200)
+    assert.equal(response.headers.get('content-type'), 'image/jpeg')
+    assert.equal((await response.arrayBuffer()).byteLength, 3)
+    assert.equal(previewRequests, 1)
+    assert.equal(originals, 1)
+    assert.equal(fixture.state.mediaUrlCount, 1)
+    assert.equal(JSON.stringify(fixture.state.logs).includes('private CDN error text'), false)
+  }
+})
+
+test('preview transport fallback: thumbnails and RAW never download originals after transport errors', async () => {
+  for (const sample of [{ ext: 'jpg', variant: 'thumbnail' }, { ext: 'dng', variant: 'preview' }]) {
+    const id = 'transport-no-fallback-' + sample.ext
+    const fixture = await createFixture({ files: { [id]: mediaFile(id, {
+      file_name: 'sample.' + sample.ext, file_ext: sample.ext, mime_type: '',
+      preview_url: 'https://cdn.quark.cn/thumb/broken', thumbnail_url: 'https://cdn.quark.cn/thumb/broken',
+    }) }, cdnHandler: async () => { throw new TypeError('transport rejected') } })
+    const response = await requestMedia(fixture, id, { purpose: 'preview', variant: sample.variant })
+    assert.equal(response.status, 502)
+    assert.equal(fixture.state.mediaUrlCount, 0)
+  }
+})
+
+test('preview transport fallback: client cancellation and rejected redirects never use original', async () => {
+  for (const kind of ['cancel', 'redirect']) {
+    const parent = new AbortController()
+    const id = 'transport-safety-' + kind
+    const fixture = await createFixture({ files: { [id]: mediaFile(id, {
+      file_name: 'sample.jpg', file_ext: 'jpg', mime_type: '', preview_url: 'https://cdn.quark.cn/thumb/broken',
+    }) }, cdnHandler: async (url, headers, state, init) => {
+      if (kind === 'redirect') return new Response(null, { status: 302, headers: { Location: 'https://attacker.invalid/image' } })
+      const pending = abortableDelay(init.signal, 1000)
+      parent.abort()
+      await pending
+    } })
+    const response = await requestMedia(fixture, id, { purpose: 'preview', variant: 'preview', signal: parent.signal })
+    assert.equal(response.status, 502)
+    assert.equal(fixture.state.mediaUrlCount, 0)
+  }
+})
+
+test('preview transport fallback: original error is propagated without looping', async () => {
+  let cdnRequests = 0
+  const id = 'transport-fallback-denied'
+  const fixture = await createFixture({ files: { [id]: mediaFile(id, {
+    file_name: 'sample.jpg', file_ext: 'jpg', mime_type: '', preview_url: 'https://cdn.quark.cn/thumb/broken',
+  }) }, cdnHandler: async () => { cdnRequests += 1; throw new TypeError('transport rejected') } })
+  const response = await requestMedia(fixture, id, { purpose: 'preview', variant: 'preview' })
+  assert.equal(response.status, 502)
+  assert.equal(fixture.state.mediaUrlCount, 1)
+  assert.equal(cdnRequests, 2)
 })

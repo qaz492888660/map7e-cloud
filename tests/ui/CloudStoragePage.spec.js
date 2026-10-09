@@ -218,6 +218,84 @@ describe('CloudStoragePage directory loading', () => {
     expect(wrapper.find('.file-video-preview').attributes('crossorigin')).toBe('use-credentials')
   })
 
+  async function openDeferredVideos() {
+    const items = ['a', 'b'].map(id => ({ ...file(id, id + '.mp4'), extension: 'mp4', type: 'video', size: 1024 }))
+    const ordinaryFetch = mediaFetch(items)
+    const pending = []
+    globalThis.fetch = vi.fn((input, options = {}) => {
+      if (new URL(input, location.href).searchParams.get('check') === 'range') {
+        return new Promise((resolve, reject) => pending.push({ resolve, reject, signal: options.signal }))
+      }
+      return ordinaryFetch(input, options)
+    })
+    wrapper = mount(CloudStoragePage, { attachTo: document.body })
+    await waitFor(() => expect(wrapper.find('.ocean-data-note').text()).toContain('覆盖当前有权限读取的目录'))
+    await wrapper.find('.ocean-nav--main .ocean-nav-item').trigger('click')
+    await wrapper.find('button[aria-label="预览 a.mp4"]').trigger('click')
+    return pending
+  }
+
+  it.each(['late 422', 'late rejection', 'late success'])('video probe generation: ignores %s from a closed video after opening another', async kind => {
+    const pending = await openDeferredVideos()
+    await wrapper.find('button[aria-label="关闭文件预览"]').trigger('click')
+    expect(pending[0].signal.aborted).toBe(true)
+    await wrapper.find('button[aria-label="预览 b.mp4"]').trigger('click')
+    pending[1].resolve(jsonResponse({ ok: true, rangeSupported: true }))
+    await flushPromises()
+    if (kind === 'late rejection') pending[0].reject(new TypeError('network failed'))
+    else pending[0].resolve(kind === 'late 422'
+      ? jsonResponse({ ok: false, error: 'quark_file_size_limit', limitBytes: 52428800 }, 422)
+      : jsonResponse({ ok: true, rangeSupported: false }))
+    await flushPromises()
+    expect(wrapper.find('.preview-heading').text()).toContain('b.mp4')
+    expect(wrapper.find('.file-video-preview').exists()).toBe(true)
+    expect(wrapper.find('.preview-message').exists()).toBe(false)
+    expect(wrapper.find('.preview-overlay a[download="b.mp4"]').exists()).toBe(true)
+  })
+
+  it('video probe generation: stale finally cannot clear the new probe loading state', async () => {
+    const pending = await openDeferredVideos()
+    await wrapper.find('button[aria-label="关闭文件预览"]').trigger('click')
+    await wrapper.find('button[aria-label="预览 b.mp4"]').trigger('click')
+    pending[0].reject(new TypeError('late abort'))
+    await flushPromises()
+    expect(wrapper.find('.preview-message').text()).toContain('正在检查视频流')
+    expect(wrapper.find('.file-video-preview').exists()).toBe(false)
+    pending[1].resolve(jsonResponse({ ok: false, error: 'quark_file_size_limit', limitBytes: 52428800 }, 422))
+    await flushPromises()
+    expect(wrapper.find('.preview-message').text()).toContain('50 MiB')
+  })
+
+  it('video probe generation: reopening the same file does not accept its old response', async () => {
+    const pending = await openDeferredVideos()
+    await wrapper.find('button[aria-label="关闭文件预览"]').trigger('click')
+    await wrapper.find('button[aria-label="预览 a.mp4"]').trigger('click')
+    pending[1].resolve(jsonResponse({ ok: true, rangeSupported: true }))
+    await flushPromises()
+    pending[0].resolve(jsonResponse({ ok: false, error: 'quark_file_size_limit', limitBytes: 52428800 }, 422))
+    await flushPromises()
+    expect(wrapper.find('.file-video-preview').exists()).toBe(true)
+    expect(wrapper.find('.preview-overlay a[download="a.mp4"]').exists()).toBe(true)
+  })
+
+  it('video probe generation: closing aborts the probe and late results do not reopen preview', async () => {
+    const pending = await openDeferredVideos()
+    await wrapper.find('button[aria-label="关闭文件预览"]').trigger('click')
+    pending[0].resolve(jsonResponse({ ok: false, error: 'quark_file_size_limit', limitBytes: 52428800 }, 422))
+    await flushPromises()
+    expect(pending[0].signal.aborted).toBe(true)
+    expect(wrapper.find('.preview-overlay').exists()).toBe(false)
+  })
+
+  it('video probe generation: displays an explicit shared-deadline timeout message', async () => {
+    const pending = await openDeferredVideos()
+    pending[0].resolve(jsonResponse({ ok: false, error: 'storage_range_probe_timeout' }, 504))
+    await flushPromises()
+    expect(wrapper.find('.preview-message').text()).toContain('视频分段读取检查超时')
+    expect(wrapper.find('.file-video-preview').exists()).toBe(false)
+    expect(wrapper.find('.preview-overlay a[download="a.mp4"]').exists()).toBe(true)
+  })
+
   it('shows the Provider Range limitation and keeps the original download available', async () => {
     globalThis.fetch = mediaFetch([{ ...file('no-range', 'large.mp4'), extension: 'mp4', type: 'video', size: 30 * 1024 ** 3 }], {
       ok: true, rangeSupported: false, status: 200, acceptRanges: null, contentRange: null,

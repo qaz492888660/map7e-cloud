@@ -90,6 +90,8 @@ const previewText = ref('')
 const previewLoading = ref(false)
 const previewError = ref('')
 const previewErrorCode = ref('')
+let previewGeneration = 0
+let previewProbeController = null
 const selectedAction = ref(null)
 const managementDialog = ref('')
 const managementItem = ref(null)
@@ -1375,6 +1377,10 @@ function handleViewerTouchEnd(event) {
 }
 
 async function openFile(file) {
+  const generation = ++previewGeneration
+  previewProbeController?.abort()
+  previewProbeController = null
+  const isCurrentPreview = () => generation === previewGeneration && previewFile.value?.path === file.path
   if (isImageFile(file)) {
     openPhotoViewer(file, [file])
     return
@@ -1392,18 +1398,23 @@ async function openFile(file) {
   if (file.type === 'video' || VIDEO_EXTENSIONS.includes(file.extension)) {
     previewMode.value = 'video'
     previewLoading.value = true
+    const controller = new AbortController()
+    previewProbeController = controller
     try {
       const checkUrl = new URL(file.path, window.location.origin)
       checkUrl.searchParams.set('check', 'range')
-      const response = await fetch(checkUrl.pathname + checkUrl.search, { cache: 'no-store' })
+      const response = await fetch(checkUrl.pathname + checkUrl.search, { cache: 'no-store', signal: controller.signal })
       let data = {}
       try { data = await response.json() } catch { data = {} }
+      if (!isCurrentPreview()) return
       if (!response.ok || data.ok !== true) {
         previewErrorCode.value = data.error || ''
         if (data.error === QUARK_FILE_SIZE_LIMIT) {
           previewError.value = quarkDownloadLimitMessage(data.limitBytes)
         } else if (data.error === 'storage_range_probe_failed') {
           previewError.value = '网络连接失败，无法确认视频能否分段播放。请稍后重试或下载原文件。'
+        } else if (data.error === 'storage_range_probe_timeout') {
+          previewError.value = '视频分段读取检查超时。请稍后重试。'
         } else {
           previewError.value = '获取网盘播放地址失败。请稍后重试或下载原文件。'
         }
@@ -1411,9 +1422,13 @@ async function openFile(file) {
         previewError.value = '当前网盘未提供有效的 Range 分段读取，无法可靠播放大视频。你可以下载原文件。'
       }
     } catch {
+      if (!isCurrentPreview()) return
       previewError.value = '网络连接失败，无法确认视频播放地址。请稍后重试或下载原文件。'
     } finally {
-      previewLoading.value = false
+      if (isCurrentPreview()) {
+        previewLoading.value = false
+        if (previewProbeController === controller) previewProbeController = null
+      }
     }
     return
   }
@@ -1424,6 +1439,7 @@ async function openFile(file) {
       const response = await fetch(file.path)
       if (!response.ok) throw new Error('文件暂时无法预览。')
       const text = await response.text()
+      if (!isCurrentPreview()) return
       if (text.length > 600000) throw new Error('文件内容较大，请下载后查看。')
       if (file.extension === 'json') {
         try {
@@ -1435,9 +1451,10 @@ async function openFile(file) {
         previewText.value = text
       }
     } catch (error) {
+      if (!isCurrentPreview()) return
       previewError.value = error instanceof Error ? error.message : '文件暂时无法预览。'
     } finally {
-      previewLoading.value = false
+      if (isCurrentPreview()) previewLoading.value = false
     }
     return
   }
@@ -1453,6 +1470,10 @@ function handleVideoError(event) {
 }
 
 function closePreview() {
+  previewGeneration += 1
+  previewProbeController?.abort()
+  previewProbeController = null
+  previewLoading.value = false
   previewFile.value = null
   previewMode.value = ''
   previewText.value = ''
