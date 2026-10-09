@@ -3,6 +3,7 @@
   "name": "map7e-quark-media-gateway",
   "main": "src/worker.js",
   "compatibility_date": "2026-10-02",
+  "compatibility_flags": ["enable_request_signal"],
   "workers_dev": true,
   "observability": {
     "enabled": true,

@@ -103,6 +103,7 @@ async function createFixture({
   sleep,
   externalRefreshAfterLockAttempts,
   logger,
+  probeBudgetMs,
 } = {}) {
   const externalRefreshRecord = externalRefreshAfterLockAttempts === undefined ? null : await sealAuth('quark-main', {
     ...auth,
@@ -255,6 +256,7 @@ async function createFixture({
     logger: logger || (entry => state.logs.push(entry)),
     ...(cdnHeaderTimeoutMs === undefined ? {} : { cdnHeaderTimeoutMs }),
     ...(sleep === undefined ? {} : { sleep }),
+    ...(probeBudgetMs === undefined ? {} : { probeBudgetMs }),
   })
   return { worker, env, state, setNow(value) { nowValue = value } }
 }
@@ -271,6 +273,8 @@ async function requestMedia(fixture, fileId, {
   origin = allowedOrigin,
   now = fixedNow,
   signal,
+  probeDeadline,
+  executionContext,
 } = {}) {
   const token = ticketFor(fileId, { purpose, variant, disposition, parentId }, now)
   const headers = new Headers()
@@ -278,8 +282,9 @@ async function requestMedia(fixture, fileId, {
   if (ifRange !== undefined) headers.set('If-Range', ifRange)
   if (cookie) headers.set('Cookie', cookie)
   if (origin) headers.set('Origin', origin)
+  if (probeDeadline !== undefined) headers.set('X-Media-Probe-Deadline', String(probeDeadline))
   const url = 'https://media.example.test/v1/media?ticket=' + encodeURIComponent(token)
-  return fixture.worker.fetch(new Request(scopedUrl(url), { method, headers, signal }), fixture.env)
+  return fixture.worker.fetch(new Request(scopedUrl(url), { method, headers, signal }), fixture.env, executionContext)
 }
 
 test('Worker verifies Node-issued HMAC tickets and rejects expired or modified grants', async () => {
@@ -295,7 +300,7 @@ test('Worker health is minimal and works without media secrets', async () => {
   const fixture = await createFixture({ envOverrides: { MEDIA_GATEWAY_SIGNING_SECRET: undefined } })
   const response = await fixture.worker.fetch(new Request(scopedUrl('https://media.example.test/health')), fixture.env)
   assert.equal(response.status, 200)
-  assert.deepEqual(await response.json(), { ok: true, version: '0.2.14' })
+  assert.deepEqual(await response.json(), { ok: true, version: '0.2.15' })
   assert.equal(fixture.state.redisRequests.length, 0)
 })
 
@@ -1425,7 +1430,7 @@ test('Worker diagnostics identify each allowed redirect hop without logging sign
   const ready = logs.find(log => log.stage === 'media_response_ready')
   assert.equal(ready.contentType, 'image/jpeg')
   assert.equal(ready.acceptRanges, 'bytes')
-  assert.ok(logs.every(log => log.disposition === 'inline' && log.version === '0.2.14' && !log.authRefreshOccurred))
+  assert.ok(logs.every(log => log.disposition === 'inline' && log.version === '0.2.15' && !log.authRefreshOccurred))
   assert.equal(new Set(logs.map(log => log.requestId)).size, 1)
   assert.deepEqual(logs.map(log => log.sequence), logs.map((_, i) => i + 1))
   const serialized = JSON.stringify(fixture.state.logs)
@@ -1582,4 +1587,149 @@ test('Worker diagnostics logging failures do not change a successful media respo
   const response = await requestMedia(fixture, id, { purpose: 'original' })
   assert.equal(response.status, 200)
   assert.deepEqual(new Uint8Array(await response.arrayBuffer()), new Uint8Array([1, 2, 3]))
+})
+
+function abortableDelay(signal, ms) {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) { reject(signal.reason); return }
+    const onAbort = () => { clearTimeout(timer); reject(signal.reason) }
+    const timer = setTimeout(() => { signal?.removeEventListener('abort', onAbort); resolve() }, ms)
+    signal?.addEventListener('abort', onAbort, { once: true })
+  })
+}
+const rangeProbe = { method: 'HEAD', range: 'bytes=0-0', probeDeadline: fixedNow + 20_000 }
+
+test('Worker probe contract: multiple individually valid stages share one deadline', async () => {
+  let cdnSignal, attempts = 0
+  const id = 'probe-combined'
+  const fixture = await createFixture({ probeBudgetMs: 150, envOverrides: diagnosticEnv(id),
+    quarkHandler: async ({ url, init }) => {
+      if (url.pathname === '/open/v1/file/get_download_url') await abortableDelay(init.signal, 90)
+    },
+    cdnHandler: async (url, headers, state, init) => {
+      attempts += 1; cdnSignal = init.signal
+      await abortableDelay(init.signal, 90)
+      throw new Error('deadline should abort before this point')
+    },
+  })
+  const response = await requestMedia(fixture, id, rangeProbe)
+  assert.equal(response.status, 504)
+  assert.equal(response.headers.get('x-media-error'), 'media_probe_deadline_exceeded')
+  assert.equal(cdnSignal.aborted, true)
+  assert.equal(attempts, 1)
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(fixture.state.logs.filter(log => log.event !== 'media_diagnostic').length, 1)
+  assert.ok(fixture.state.logs.some(log => log.stage === 'cdn_headers_result' && log.result === 'probe_deadline'))
+})
+
+test('Worker probe contract: expired deadline stops before storage or Quark; malformed and unauthenticated are rejected', async () => {
+  const fixture = await createFixture()
+  const expired = await requestMedia(fixture, 'probe-expired', { ...rangeProbe, probeDeadline: fixedNow })
+  assert.equal(expired.status, 504)
+  assert.equal(fixture.state.redisRequests.length, 0)
+  assert.equal(fixture.state.apiRequests.length, 0)
+  const invalid = await requestMedia(fixture, 'probe-invalid', { ...rangeProbe, probeDeadline: 'not-a-deadline' })
+  assert.equal(invalid.status, 400)
+  const unauthorized = await fixture.worker.fetch(new Request('https://media.example.test/v1/media',
+    { method: 'HEAD', headers: { Range: 'bytes=0-0', 'X-Media-Probe-Deadline': 'not-a-deadline' } }), fixture.env)
+  assert.equal(unauthorized.status, 401)
+})
+
+test('Worker probe contract: an excessive deadline cannot extend cap; no CDN after cancelled file info', async () => {
+  let signal, infoCalls = 0
+  const fixture = await createFixture({ probeBudgetMs: 40,
+    quarkHandler: async ({ url, init }) => {
+      if (url.pathname === '/open/v1/file/info') {
+        infoCalls += 1; signal = init.signal
+        await abortableDelay(signal, 1000)
+      }
+    },
+  })
+  const response = await requestMedia(fixture, 'probe-clamp', { ...rangeProbe, probeDeadline: fixedNow + 1000_000 })
+  assert.equal(response.status, 504)
+  assert.equal(signal.aborted, true)
+  assert.equal(infoCalls, 1)
+  assert.equal(fixture.state.mediaUrlCount, 0)
+  assert.equal(fixture.state.cdnRequests.length, 0)
+})
+
+test('Worker probe contract: client cancellation reaches CDN redirect hop without retry', async () => {
+  const parent = new AbortController()
+  let calls = 0, cancelledSignal
+  const fixture = await createFixture({
+    cdnHandler: async (url, headers, state, init) => {
+      calls += 1
+      if (calls === 1) return new Response(null, { status: 302, headers: { Location: 'https://cdn.quark.cn/next' } })
+      cancelledSignal = init.signal
+      const wait = abortableDelay(init.signal, 1000)
+      parent.abort()
+      await wait
+    },
+  })
+  const response = await requestMedia(fixture, 'probe-redirect-cancel', { ...rangeProbe, signal: parent.signal })
+  assert.equal(response.status, 499)
+  assert.equal(response.headers.get('x-media-error'), 'media_probe_cancelled')
+  assert.equal(cancelledSignal.aborted, true)
+  assert.equal(calls, 2)
+  assert.equal(fixture.state.mediaUrlCount, 1)
+})
+
+test('Worker probe contract: completed 206 and original GET remain unaffected', async () => {
+  const fixture = await createFixture({ probeBudgetMs: 30 })
+  const head = await requestMedia(fixture, 'probe-success', rangeProbe)
+  assert.equal(head.status, 206)
+  assert.equal(head.headers.get('content-length'), '1')
+  assert.equal(head.headers.get('accept-ranges'), 'bytes')
+  const get = await requestMedia(fixture, 'probe-get', { purpose: 'original', probeDeadline: 'invalid-ignored-on-get' })
+  assert.equal(get.status, 200)
+  assert.deepEqual(new Uint8Array(await get.arrayBuffer()), new Uint8Array([1, 2, 3]))
+})
+
+test('Worker probe contract: cancelling one caller does not poison shared KV reads', async () => {
+  const parent = new AbortController()
+  let release
+  const gate = new Promise(resolve => { release = resolve })
+  let storageSignal
+  const fixture = await createFixture({ redisHandler: async ({ init }) => {
+    if (JSON.parse(init.body).some(command => command[1] === 'map7e-cloud:storage:config:v1:')) {
+      storageSignal = init.signal
+      await gate
+    }
+  } })
+  const first = requestMedia(fixture, 'probe-shared-kv', { ...rangeProbe, signal: parent.signal })
+  await new Promise(resolve => setTimeout(resolve, 15))
+  const second = requestMedia(fixture, 'probe-shared-kv', rangeProbe)
+  parent.abort()
+  assert.equal((await first).status, 499)
+  assert.equal(storageSignal.aborted, false)
+  release()
+  assert.equal((await second).status, 206)
+  assert.equal(fixture.state.apiRequests.filter(call => new URL(call.url).pathname === '/open/v1/file/info').length, 1)
+})
+
+test('Worker probe contract: begun credential rotation persists after deadline and does not start media', async () => {
+  let rotationSignal
+  const background = []
+  const fixture = await createFixture({ probeBudgetMs: 40, auth: { ...defaultAuth, accessExpiresAt: fixedNow + 10_000 },
+    quarkHandler: async ({ url, init }) => {
+      if (url.pathname === '/agent/v1/oauth/access_token/rotate') {
+        rotationSignal = init.signal
+        await abortableDelay(init.signal, 80)
+      }
+    },
+  })
+  const response = await requestMedia(fixture, 'probe-refresh', { ...rangeProbe,
+    executionContext: { waitUntil(promise) { background.push(promise) } } })
+  assert.equal(response.status, 504)
+  assert.equal(rotationSignal.aborted, false)
+  await Promise.all(background)
+  assert.equal(fixture.state.storedRefreshes, 1)
+  const encrypted = JSON.parse(fixture.state.authRecord)
+  const key = crypto.createHash('sha256').update('map7e-storage-v1\u0000' + encryptionSecret).digest()
+  const decipher = crypto.createDecipheriv('aes-256-gcm', key, Buffer.from(encrypted.iv, 'base64url'))
+  decipher.setAAD(Buffer.from('quark-main')); decipher.setAuthTag(Buffer.from(encrypted.tag, 'base64url'))
+  const auth = JSON.parse(Buffer.concat([decipher.update(Buffer.from(encrypted.data, 'base64url')), decipher.final()]))
+  assert.equal(auth.refreshToken, 'quark-refresh-token-refreshed')
+  assert.equal(fixture.state.mediaUrlCount, 0)
+  assert.equal(fixture.state.cdnRequests.length, 0)
 })

@@ -13,7 +13,7 @@ const BOOL_FIELDS = new Set([
 const ENUMS = {
   flow: new Set(['download', 'preview']),
   reason: new Set(['new', 'cache', 'forced', 'near_expiry', 'proactive', 'api_expired', 'cdn_unauthorized']),
-  result: new Set(['headers', 'deadline', 'client_cancel', 'fetch_error', 'rotated', 'adopted', 'failed']),
+  result: new Set(['headers', 'deadline', 'probe_deadline', 'client_cancel', 'fetch_error', 'rotated', 'adopted', 'failed', 'caller_stopped']),
   expiry: new Set(['unknown', 'expired', 'within_margin', 'fresh']),
   errorKind: new Set(['abort', 'type_error', 'other']),
 }
