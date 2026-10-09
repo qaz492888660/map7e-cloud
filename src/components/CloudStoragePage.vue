@@ -83,6 +83,7 @@ const viewerIndex = ref(-1)
 const viewerScale = ref(1)
 const viewerDimensions = ref('')
 const viewerError = ref('')
+const viewerErrorCode = ref('')
 const previewFile = ref(null)
 const previewMode = ref('')
 const previewText = ref('')
@@ -1290,6 +1291,7 @@ function openPhotoViewer(file, items) {
   viewerScale.value = 1
   viewerDimensions.value = ''
   viewerError.value = ''
+  viewerErrorCode.value = ''
 }
 
 function closePhotoViewer() {
@@ -1298,6 +1300,7 @@ function closePhotoViewer() {
   viewerScale.value = 1
   viewerDimensions.value = ''
   viewerError.value = ''
+  viewerErrorCode.value = ''
 }
 
 function movePhoto(direction) {
@@ -1307,15 +1310,18 @@ function movePhoto(direction) {
   viewerScale.value = 1
   viewerDimensions.value = ''
   viewerError.value = ''
+  viewerErrorCode.value = ''
 }
 
 function handleViewerImageLoad(event) {
+  if (viewerErrorCode.value === QUARK_FILE_SIZE_LIMIT) return
   const image = event.target
   viewerDimensions.value = image.naturalWidth + ' × ' + image.naturalHeight
   viewerError.value = ''
 }
 
 function handleViewerImageError() {
+  if (viewerErrorCode.value === QUARK_FILE_SIZE_LIMIT) return
   viewerError.value = viewerImage.value?.rawPreview
     ? 'RAW 预览图暂时无法加载，请稍后重试或下载原文件。'
     : '图片暂时无法加载。'
@@ -1455,6 +1461,12 @@ function closePreview() {
 }
 
 async function handleFileDownload(event, file) {
+  if ((viewerImage.value?.path === file.path && viewerErrorCode.value === QUARK_FILE_SIZE_LIMIT)
+    || (previewFile.value?.path === file.path && previewErrorCode.value === QUARK_FILE_SIZE_LIMIT)) {
+    event.preventDefault()
+    closeItemActions()
+    return
+  }
   // Preserve ordinary small-file downloads. Larger or unknown Quark files
   // need an actual upstream check; file size alone never rejects a download.
   if (!isQuarkMedia(file) || (Number.isFinite(file.sizeBytes) && file.sizeBytes <= 50 * 1024 ** 2)) {
@@ -1462,7 +1474,6 @@ async function handleFileDownload(event, file) {
     return
   }
   event.preventDefault()
-  if (previewFile.value?.path === file.path && previewErrorCode.value === QUARK_FILE_SIZE_LIMIT) return
   try {
     const checkUrl = new URL(file.path, window.location.origin)
     checkUrl.searchParams.set('check', 'range')
@@ -1472,7 +1483,10 @@ async function handleFileDownload(event, file) {
       const message = data.error === QUARK_FILE_SIZE_LIMIT
         ? quarkDownloadLimitMessage(data.limitBytes)
         : '获取网盘下载地址失败，请稍后重试。'
-      if (viewerImage.value?.path === file.path) viewerError.value = message
+      if (viewerImage.value?.path === file.path) {
+        viewerError.value = message
+        viewerErrorCode.value = data.error || ''
+      }
       if (previewFile.value?.path === file.path) {
         previewError.value = message
         previewErrorCode.value = data.error || ''
@@ -2034,7 +2048,7 @@ onBeforeUnmount(() => {
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6" /></svg>
             </button>
             <span class="viewer-counter">{{ photoCounter }}</span>
-            <a class="viewer-icon-button" :href="viewerImage.path" :download="viewerImage.name" :aria-label="'下载原图 ' + viewerImage.name" @click="handleFileDownload($event, viewerImage)">
+            <a v-if="viewerErrorCode !== QUARK_FILE_SIZE_LIMIT" class="viewer-icon-button" :href="viewerImage.path" :download="viewerImage.name" :aria-label="'下载原图 ' + viewerImage.name" @click="handleFileDownload($event, viewerImage)">
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.5v11m0 0 4-4m-4 4-4-4M5 17v3h14v-3" /></svg>
             </a>
           </header>
@@ -2043,13 +2057,13 @@ onBeforeUnmount(() => {
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6" /></svg>
           </button>
           <div class="viewer-stage" @touchstart="handleViewerTouchStart" @touchmove="handleViewerTouchMove" @touchend="handleViewerTouchEnd">
-            <div v-if="viewerImage.rawPreview && !viewerImage.viewerSource" class="preview-message">
+            <div v-if="viewerError" class="preview-message">
+              <strong>{{ viewerError }}</strong>
+              <a v-if="viewerErrorCode !== QUARK_FILE_SIZE_LIMIT" class="primary-download" :href="viewerImage.path" :download="viewerImage.name" @click="handleFileDownload($event, viewerImage)">下载原文件</a>
+            </div>
+            <div v-else-if="viewerImage.rawPreview && !viewerImage.viewerSource" class="preview-message">
               <strong>该 RAW 格式暂无可用预览</strong>
               <span>可以下载原文件后查看。</span>
-              <a class="primary-download" :href="viewerImage.path" :download="viewerImage.name" @click="handleFileDownload($event, viewerImage)">下载原文件</a>
-            </div>
-            <div v-else-if="viewerError" class="preview-message">
-              <strong>{{ viewerError }}</strong>
               <a class="primary-download" :href="viewerImage.path" :download="viewerImage.name" @click="handleFileDownload($event, viewerImage)">下载原文件</a>
             </div>
             <img

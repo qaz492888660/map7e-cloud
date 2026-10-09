@@ -268,6 +268,85 @@ describe('CloudStoragePage directory loading', () => {
   })
 
   it.each([
+    ['large JPG', 'jpg', 60 * 1024 ** 2, false],
+    ['unknown-size JPG', 'jpg', null, false],
+    ['RAW without preview', 'dng', null, false],
+    ['RAW with preview', 'dng', 60 * 1024 ** 2, true],
+  ])('suppresses limited Quark photo retries for %s', async (_label, extension, size, previewAvailable) => {
+    window.history.replaceState(null, '', '/?storageId=quark-main')
+    const name = `limited.${extension}`
+    const fetch = mediaFetch([{ ...file('limited-photo', name), extension, size, previewAvailable }], {
+      statusCode: 422, body: { ok: false, error: 'quark_file_size_limit', limitBytes: 52428800 },
+    })
+    globalThis.fetch = fetch
+    wrapper = mount(CloudStoragePage, { attachTo: document.body })
+    await waitFor(() => expect(wrapper.find('.ocean-data-note').text()).toContain('覆盖当前有权限读取的目录'))
+    await wrapper.find('.ocean-nav--main .ocean-nav-item').trigger('click')
+    await wrapper.find(`button[aria-label="预览 ${name}"]`).trigger('click')
+    const image = wrapper.find('.photo-viewer img.viewer-image')
+    if (image.exists()) await image.trigger('error')
+    const toolbarDownload = wrapper.find('.photo-viewer a[aria-label^="下载原图"]')
+    const fallbackDownload = wrapper.find('.photo-viewer a.primary-download')
+    await toolbarDownload.trigger('click')
+    await waitFor(() => expect(wrapper.find('.photo-viewer').text()).toContain('当前夸克接口限制单文件下载大小为 50 MiB'))
+    expect(wrapper.find('.photo-viewer a[download]').exists()).toBe(false)
+    await toolbarDownload.trigger('click')
+    await fallbackDownload.trigger('click')
+    if (image.exists()) {
+      await image.trigger('load')
+      await image.trigger('error')
+    }
+    expect(wrapper.find('.photo-viewer').text()).toContain('当前夸克接口限制单文件下载大小为 50 MiB')
+    expect(wrapper.find('.photo-viewer a[download]').exists()).toBe(false)
+    expect(fetch.mock.calls.filter(([input]) => new URL(input, location.href).searchParams.get('check') === 'range')).toHaveLength(1)
+  })
+
+  it('clears a Quark photo refusal when navigating to a different photo', async () => {
+    window.history.replaceState(null, '', '/?storageId=quark-main')
+    const fetch = mediaFetch([
+      { ...file('limited-photo', 'limited.jpg'), extension: 'jpg', size: 60 * 1024 ** 2 },
+      { ...file('other-photo', 'other.jpg'), extension: 'jpg', size: 2245317 },
+    ], { statusCode: 422, body: { ok: false, error: 'quark_file_size_limit', limitBytes: 52428800 } })
+    globalThis.fetch = fetch
+    wrapper = mount(CloudStoragePage, { attachTo: document.body })
+    await waitFor(() => expect(wrapper.find('.ocean-data-note').text()).toContain('覆盖当前有权限读取的目录'))
+    await wrapper.findAll('.ocean-nav--main .ocean-nav-item').find(button => button.text() === '相册').trigger('click')
+    await wrapper.find('button[aria-label="查看图片 limited.jpg"]').trigger('click')
+    await wrapper.find('.photo-viewer a[download]').trigger('click')
+    await waitFor(() => expect(wrapper.find('.photo-viewer a[download]').exists()).toBe(false))
+    await wrapper.find('button[aria-label="下一张"]').trigger('click')
+    const download = wrapper.find('.photo-viewer a[download="other.jpg"]')
+    expect(download.exists()).toBe(true)
+    let preventedByApplication
+    download.element.addEventListener('click', event => {
+      preventedByApplication = event.defaultPrevented
+      event.preventDefault()
+    })
+    await download.trigger('click')
+    expect(preventedByApplication).toBe(false)
+    expect(wrapper.find('.photo-viewer').text()).not.toContain('当前夸克接口限制单文件下载大小为 50 MiB')
+    expect(fetch.mock.calls.filter(([input]) => new URL(input, location.href).searchParams.get('check') === 'range')).toHaveLength(1)
+  })
+
+  it('allows Quark photo download retries after a transient upstream error', async () => {
+    window.history.replaceState(null, '', '/?storageId=quark-main')
+    const fetch = mediaFetch([{ ...file('retry-photo', 'retry.jpg'), extension: 'jpg', size: null }], {
+      statusCode: 504, body: { ok: false, error: 'quark_media_headers_timeout' },
+    })
+    globalThis.fetch = fetch
+    wrapper = mount(CloudStoragePage, { attachTo: document.body })
+    await waitFor(() => expect(wrapper.find('.ocean-data-note').text()).toContain('覆盖当前有权限读取的目录'))
+    await wrapper.find('.ocean-nav--main .ocean-nav-item').trigger('click')
+    await wrapper.find('button[aria-label="预览 retry.jpg"]').trigger('click')
+    await wrapper.find('.photo-viewer a[download]').trigger('click')
+    await waitFor(() => expect(wrapper.find('.photo-viewer').text()).toContain('获取网盘下载地址失败，请稍后重试'))
+    expect(wrapper.find('.photo-viewer a[aria-label^="下载原图"]').exists()).toBe(true)
+    await wrapper.find('.photo-viewer a.primary-download').trigger('click')
+    await flushPromises()
+    expect(fetch.mock.calls.filter(([input]) => new URL(input, location.href).searchParams.get('check') === 'range')).toHaveLength(2)
+  })
+
+  it.each([
     ['quark-main', { ...file('small-original', 'photo.jpg'), extension: 'jpg', size: 2245317 }],
     ['pikpak-main', { ...file('pikpak-large', 'large.mp4'), extension: 'mp4', type: 'video', size: 848086961 }],
   ])('preserves ordinary downloads for %s without adding a Quark Range preflight', async (storageId, item) => {
