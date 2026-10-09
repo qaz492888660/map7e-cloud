@@ -34,7 +34,7 @@ function mediaFetch(items, rangeResult = { ok: true, rangeSupported: true, statu
     if (url.pathname === '/api/storage-providers') return jsonResponse(providers)
     if (url.pathname === '/api/storage-about') return jsonResponse({ ok: true, storageId: url.searchParams.get('storageId'), status: 'connected', quota: null })
     if (url.pathname === '/api/storage-files') return jsonResponse({ ok: true, storageId: url.searchParams.get('storageId') || 'pikpak-main', items })
-    if (url.pathname === '/api/storage-download' && url.searchParams.get('check') === 'range') {
+    if (url.pathname === '/api/storage-download' && ['range', 'download'].includes(url.searchParams.get('check'))) {
       if (rangeResult instanceof Error) throw rangeResult
       return jsonResponse(rangeResult.body || rangeResult, rangeResult.statusCode || 200)
     }
@@ -342,7 +342,7 @@ describe('CloudStoragePage directory loading', () => {
     expect(wrapper.find('button[aria-label="预览 07(1).mp4"]').exists()).toBe(true)
     expect(wrapper.find('.ocean-file-category-tabs').exists()).toBe(true)
     expect(wrapper.find('input[type="search"]').exists()).toBe(true)
-    expect(fetch.mock.calls.filter(([input]) => new URL(input, location.href).searchParams.get('check') === 'range')).toHaveLength(1)
+    expect(fetch.mock.calls.filter(([input]) => new URL(input, location.href).searchParams.get('check') === 'download')).toHaveLength(1)
   })
 
   it.each([
@@ -376,7 +376,7 @@ describe('CloudStoragePage directory loading', () => {
     }
     expect(wrapper.find('.photo-viewer').text()).toContain('当前夸克接口限制单文件下载大小为 50 MiB')
     expect(wrapper.find('.photo-viewer a[download]').exists()).toBe(false)
-    expect(fetch.mock.calls.filter(([input]) => new URL(input, location.href).searchParams.get('check') === 'range')).toHaveLength(1)
+    expect(fetch.mock.calls.filter(([input]) => new URL(input, location.href).searchParams.get('check') === 'download')).toHaveLength(1)
   })
 
   it('clears a Quark photo refusal when navigating to a different photo', async () => {
@@ -403,7 +403,7 @@ describe('CloudStoragePage directory loading', () => {
     await download.trigger('click')
     expect(preventedByApplication).toBe(false)
     expect(wrapper.find('.photo-viewer').text()).not.toContain('当前夸克接口限制单文件下载大小为 50 MiB')
-    expect(fetch.mock.calls.filter(([input]) => new URL(input, location.href).searchParams.get('check') === 'range')).toHaveLength(1)
+    expect(fetch.mock.calls.filter(([input]) => new URL(input, location.href).searchParams.get('check') === 'download')).toHaveLength(1)
   })
 
   it('allows Quark photo download retries after a transient upstream error', async () => {
@@ -421,7 +421,7 @@ describe('CloudStoragePage directory loading', () => {
     expect(wrapper.find('.photo-viewer a[aria-label^="下载原图"]').exists()).toBe(true)
     await wrapper.find('.photo-viewer a.primary-download').trigger('click')
     await flushPromises()
-    expect(fetch.mock.calls.filter(([input]) => new URL(input, location.href).searchParams.get('check') === 'range')).toHaveLength(2)
+    expect(fetch.mock.calls.filter(([input]) => new URL(input, location.href).searchParams.get('check') === 'download')).toHaveLength(2)
   })
 
   it.each([

@@ -1497,7 +1497,7 @@ async function handleFileDownload(event, file) {
   event.preventDefault()
   try {
     const checkUrl = new URL(file.path, window.location.origin)
-    checkUrl.searchParams.set('check', 'range')
+    checkUrl.searchParams.set('check', 'download')
     const response = await fetch(checkUrl.pathname + checkUrl.search, { cache: 'no-store' })
     const data = await response.json().catch(() => ({}))
     if (!response.ok || data.ok !== true) {

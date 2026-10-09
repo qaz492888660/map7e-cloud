@@ -502,6 +502,134 @@ await test('storage-preview permission checks and storageId-scoped same-id previ
   assert.equal(JSON.stringify(target.headers).includes(secondAuth.accessToken), false)
   assert.equal(JSON.stringify(target.headers).includes(firstAuth.accessToken), false)
 })
+
+await test('download source preflight: allows a normal attachment without querying CDN Range and returns no source URL', async () => {
+  await writeConfig({ version: 1, defaultStorageId: 'quark-main', instances: [
+    { storageId: 'quark-main', provider: 'quark', displayName: 'Quark', enabled: true },
+  ] })
+  await writeAuth('quark-main', { accessToken: 'source-check-access', refreshToken: 'source-check-refresh', deviceId: 'source-check-device' })
+  await setGlobalAccess('public')
+  calls.length = 0
+  upstream = async url => {
+    if (url.pathname.endsWith('/file/info')) return { status: 0, data: { file_info: {
+      fid: 'source-check-allowed', pdir_fid: '0', file_type: 1, file_name: 'unknown-size.jpg',
+    } } }
+    if (url.pathname.endsWith('/get_download_url')) return { status: 0, data: {
+      download_url: 'https://dl-sz.open-drive.quark.cn/ordinary.jpg?temporary_signature=source-check-private-signature',
+    } }
+    throw new Error('A source preflight must not request CDN bytes or gateway Range')
+  }
+  const checked = res()
+  await storageDownload({ method: 'GET', headers: {}, query: {
+    storageId: 'quark-main', id: 'source-check-allowed', parentId: '', check: 'download',
+  } }, checked)
+  assert.equal(checked.statusCode, 200, JSON.stringify(checked.body))
+  assert.deepEqual(checked.body, { ok: true })
+  assert.equal(checked.headers['Cache-Control'], 'private, no-store')
+  assert.equal(checked.headers.Vary, 'Cookie')
+  assert.equal(checked.headers.Location, undefined)
+  assert.equal(calls.filter(c => c.url.pathname.endsWith('/get_download_url')).length, 1)
+  assert.ok(calls.every(c => c.url.hostname === 'open-api-drive.quark.cn' && !c.headers.Range))
+  assert.doesNotMatch(JSON.stringify(checked), /source-check-private-signature|source-check-access|source-check-refresh|download_url|media.map7e.com/)
+  const attachment = res()
+  await storageDownload({ method: 'GET', headers: {}, query: {
+    storageId: 'quark-main', id: 'source-check-allowed', parentId: '',
+  } }, attachment)
+  assert.equal(attachment.statusCode, 302)
+  assert.equal(mediaClaimsFromResponse(attachment).disposition, 'attachment')
+  assert.equal(calls.filter(c => c.url.pathname.endsWith('/get_download_url')).length, 1)
+})
+
+await test('download source preflight: preserves actual Quark size rejection without retry, refresh or media redirect', async () => {
+  await writeConfig({ version: 1, defaultStorageId: 'quark-main', instances: [
+    { storageId: 'quark-main', provider: 'quark', displayName: 'Quark', enabled: true },
+  ] })
+  await writeAuth('quark-main', { accessToken: 'source-check-policy-access', refreshToken: 'source-check-policy-refresh', deviceId: 'source-check-device' })
+  await setGlobalAccess('public')
+  calls.length = 0
+  upstream = async url => {
+    if (url.pathname.endsWith('/file/info')) return { status: 0, data: { file_info: {
+      fid: 'source-check-policy', pdir_fid: '0', file_type: 1, file_name: 'large.mp4', size: 848086961,
+    } } }
+    if (url.pathname.endsWith('/get_download_url')) return response({
+      status: -1, errno: 23018, error_info: 'download file size limit[52428800]',
+    }, 400)
+    throw new Error('A policy refusal must not request media or rotate credentials')
+  }
+  const checked = res()
+  await storageDownload({ method: 'GET', headers: {}, query: {
+    storageId: 'quark-main', id: 'source-check-policy', parentId: '', check: 'download',
+  } }, checked)
+  assert.equal(checked.statusCode, 422)
+  assert.equal(checked.body.error, 'quark_file_size_limit')
+  assert.equal(checked.body.limitBytes, 52428800)
+  assert.equal(calls.filter(c => c.url.pathname.endsWith('/get_download_url')).length, 1)
+  assert.equal(checked.headers.Location, undefined)
+  assert.doesNotMatch(JSON.stringify(checked), /source-check-policy-access|source-check-policy-refresh|ticket=/)
+})
+
+await test('download source preflight: retains file authorization and parent isolation before reading any source', async t => {
+  await writeConfig({ version: 1, defaultStorageId: 'quark-main', instances: [
+    { storageId: 'quark-main', provider: 'quark', displayName: 'Quark', enabled: true },
+  ] })
+  await writeAuth('quark-main', { accessToken: 'source-check-locked-access', refreshToken: 'source-check-locked-refresh', deviceId: 'source-check-device' })
+  await setGlobalAccess('public')
+  const previousPassword = process.env.CLOUD_PASSWORD
+  process.env.CLOUD_PASSWORD = 'source-check-cloud-password'
+  t.after(async () => {
+    if (previousPassword === undefined) delete process.env.CLOUD_PASSWORD
+    else process.env.CLOUD_PASSWORD = previousPassword
+    await setFileMetadata(metadataId('quark-main', 'source-check-locked'), { access: 'inherit' })
+  })
+  await setFileMetadata(metadataId('quark-main', 'source-check-locked'), { access: 'locked' })
+  calls.length = 0
+  upstream = async url => {
+    if (url.pathname.endsWith('/file/info')) return { status: 0, data: { file_info: {
+      fid: 'source-check-locked', pdir_fid: '0', file_type: 1, file_name: 'locked.jpg',
+    } } }
+    throw new Error('An unauthorized file must not request a source')
+  }
+  const denied = res()
+  await storageDownload({ method: 'GET', headers: {}, query: {
+    storageId: 'quark-main', id: 'source-check-locked', parentId: '', check: 'download',
+  } }, denied)
+  assert.equal(denied.statusCode, 401)
+  assert.equal(denied.body.error, 'authentication_required')
+  const mismatchedParent = res()
+  await storageDownload({ method: 'GET', headers: {}, query: {
+    storageId: 'quark-main', id: 'source-check-locked', parentId: 'different-parent', check: 'download',
+  } }, mismatchedParent)
+  assert.equal(mismatchedParent.statusCode, 404)
+  assert.equal(calls.some(c => c.url.pathname.endsWith('/get_download_url')), false)
+  assert.equal(denied.headers.Location, undefined)
+})
+
+await test('download source preflight: rejects an unapproved source host without connecting to it', async () => {
+  await writeConfig({ version: 1, defaultStorageId: 'quark-main', instances: [
+    { storageId: 'quark-main', provider: 'quark', displayName: 'Quark', enabled: true },
+  ] })
+  await writeAuth('quark-main', { accessToken: 'source-check-host-access', refreshToken: 'source-check-host-refresh', deviceId: 'source-check-device' })
+  await setGlobalAccess('public')
+  calls.length = 0
+  upstream = async url => {
+    if (url.pathname.endsWith('/file/info')) return { status: 0, data: { file_info: {
+      fid: 'source-check-host', pdir_fid: '0', file_type: 1, file_name: 'host.jpg',
+    } } }
+    if (url.pathname.endsWith('/get_download_url')) return { status: 0, data: {
+      download_url: 'https://unapproved.example/ordinary.jpg?private=source-check-host-signature',
+    } }
+    throw new Error('An unapproved host must not be contacted')
+  }
+  const checked = res()
+  await storageDownload({ method: 'GET', headers: {}, query: {
+    storageId: 'quark-main', id: 'source-check-host', parentId: '', check: 'download',
+  } }, checked)
+  assert.equal(checked.statusCode, 502)
+  assert.equal(checked.body.error, 'download_link_unavailable')
+  assert.ok(calls.every(c => c.url.hostname === 'open-api-drive.quark.cn'))
+  assert.doesNotMatch(JSON.stringify(checked), /unapproved.example|source-check-host-signature/)
+})
+
 await test('Range contract stops before the gateway if the response closed during permission checks', async () => {
   await writeConfig({ version: 1, defaultStorageId: 'quark-main', instances: [
     { storageId: 'quark-main', provider: 'quark', displayName: '夸克网盘', enabled: true },
