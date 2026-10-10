@@ -1,0 +1,13 @@
+.git
+.git/**
+node_modules
+**/node_modules
+dist
+coverage
+.vercel
+.env
+.env.*
+**/.env
+**/.env.*
+media-gateway.env
+**/media-gateway.env
