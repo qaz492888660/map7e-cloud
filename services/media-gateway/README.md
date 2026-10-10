@@ -100,6 +100,8 @@ Ordinary downloads of large or unknown-size Quark files use `check=download`, wh
 
 `media_diagnostic` entries correlate request ID, attempt, redirect hop, allowed CDN host, status, elapsed header-wait time, safe media response headers, URL-cache decisions, and refresh outcomes. Deadline, parent cancellation, and fetch failure are distinct classifications. No signed URL, path, query string, credential, raw exception message, or sensitive request/response header is logged. Header-wait time includes the platform's connection setup and upstream wait; these application logs cannot separate DNS, TCP, and TLS timings. Retain query-string redaction and disabled automatic invocation logs during diagnostics.
 
+The standalone Node gateway also stops waiting for CDN DNS validation when its caller cancels. DNS answers that arrive after cancellation cannot start a connection; listeners and timers are released. Node's already-started operating-system DNS lookup may still finish in the background. This does not change the DNS address checks, pinned HTTPS lookup, host allowlist, or existing header deadline, and does not diagnose the unrelated Cloud API file/list transport failures.
+
 ## Local verification
 
 ```sh
