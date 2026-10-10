@@ -268,7 +268,7 @@ function setSessionCookie(res, claims, secret, now, method, cookieHeader, legacy
 
 function requestAbortSignal(req, res) {
   const controller = new AbortController()
-  if (req.aborted) controller.abort()
+  if (req.aborted || res.destroyed) controller.abort()
   req.once('aborted', () => controller.abort())
   res.once('close', () => { if (!res.writableEnded) controller.abort() })
   return controller.signal
@@ -284,6 +284,8 @@ function isRasterImage(item) {
 }
 
 async function resolveMediaResponse(provider, claims, item, { range, ifRange, signal, head = false }) {
+  const checkCancellation = () => { if (signal?.aborted) throw new StorageError('media_request_cancelled', 499) }
+  checkCancellation()
   if (claims.purpose !== 'preview') {
     if (typeof provider.getFileResponse !== 'function') throw new StorageError('media_provider_unsupported', 501)
     if (head && !range && item.size === 0) {
@@ -297,6 +299,7 @@ async function resolveMediaResponse(provider, claims, item, { range, ifRange, si
   let previewError
   try {
     const response = await getPreview?.call(provider, claims.fileId, { item, signal })
+    if (signal?.aborted) { await cancelBody(response); checkCancellation() }
     const type = response && contentTypeFor(response, item, 'preview')
     if (response?.status === 200 && type) return { response, contentTypeOverride: type }
     await cancelBody(response)
@@ -304,6 +307,7 @@ async function resolveMediaResponse(provider, claims, item, { range, ifRange, si
   } catch (error) {
     previewError = error
   }
+  checkCancellation()
   if (claims.variant === 'preview' && isRasterImage(item) && typeof provider.getFileResponse === 'function') {
     const headProbe = head && !range
     const response = await provider.getFileResponse(claims.fileId, { range: range?.header || (headProbe ? 'bytes=0-0' : undefined), ifRange, signal })

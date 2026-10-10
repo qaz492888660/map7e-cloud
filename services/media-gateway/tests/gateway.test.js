@@ -77,7 +77,11 @@ async function startServer({ provider, resolveStorage, now = Date.now, logs = []
       end(chunk, encoding, callback) { this.headersSent = true; return super.end(chunk, encoding, callback) }
     }
     const response = new MemoryResponse()
-    await handler(request, response)
+    const onAbort = () => { request.aborted = true; request.emit('aborted') }
+    if (init.signal?.aborted) onAbort()
+    else init.signal?.addEventListener('abort', onAbort, { once: true })
+    try { await handler(request, response) }
+    finally { init.signal?.removeEventListener('abort', onAbort) }
     const body = request.method === 'HEAD' || chunks.length === 0 ? null : Buffer.concat(chunks)
     const headers = new Headers()
     for (const [name, value] of Object.entries(response.headers)) {
@@ -546,6 +550,46 @@ await test('JPG preview falls back to original streaming while DNG preview remai
     assert.equal(rawResponse.status, 404)
     assert.equal((await rawResponse.json()).error, 'preview_unavailable')
     assert.equal(originalCalls, 1)
+  } finally { await closeServer(server) }
+})
+
+await test('cancelled Node raster preview does not start an original fallback', async () => {
+  const controller = new AbortController(), started = Promise.withResolvers()
+  let originals = 0, previews = 0
+  const provider = {
+    getItem: async id => createItem({ id, name: 'photo.jpg', extension: 'jpg' }),
+    getPreview: async (id, { signal }) => { previews += 1; started.resolve(); return new Promise((resolve, reject) => signal.addEventListener('abort', () => reject(new Error('private cancellation')), { once: true })) },
+    getFileResponse: async () => { originals += 1; throw new Error('original must not start') },
+  }
+  const { server, baseUrl, logs } = await startServer({ provider })
+  try {
+    const response = fetch(scopedUrl(`${baseUrl}/v1/media?ticket=${encodeURIComponent(ticket({ purpose: 'preview', variant: 'preview' }))}`), { signal: controller.signal })
+    await started.promise
+    controller.abort()
+    const result = await response
+    assert.equal(result.status, 499)
+    assert.equal((await result.json()).error, 'media_request_cancelled')
+    assert.equal(previews, 1)
+    assert.equal(originals, 0)
+    assert.equal(logs.at(-1).bytesStreamed, 0)
+    assert.equal(JSON.stringify(logs).includes('private'), false)
+  } finally { await closeServer(server) }
+})
+
+await test('already cancelled Node request never starts a preview or original', async () => {
+  const controller = new AbortController()
+  controller.abort()
+  let mediaCalls = 0
+  const provider = {
+    getItem: async id => createItem({ id, name: 'photo.jpg', extension: 'jpg' }),
+    getPreview: async () => { mediaCalls += 1; throw new Error('preview must not start') },
+    getFileResponse: async () => { mediaCalls += 1; throw new Error('original must not start') },
+  }
+  const { server, baseUrl } = await startServer({ provider })
+  try {
+    const result = await fetch(scopedUrl(`${baseUrl}/v1/media?ticket=${encodeURIComponent(ticket({ purpose: 'preview', variant: 'preview' }))}`), { signal: controller.signal })
+    assert.equal(result.status, 499)
+    assert.equal(mediaCalls, 0)
   } finally { await closeServer(server) }
 })
 
