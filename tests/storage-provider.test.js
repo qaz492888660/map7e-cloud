@@ -630,6 +630,130 @@ await test('download source preflight: rejects an unapproved source host without
   assert.doesNotMatch(JSON.stringify(checked), /unapproved.example|source-check-host-signature/)
 })
 
+async function cancelledDownloadFixture(id) {
+  await writeConfig({ version: 1, defaultStorageId: 'quark-main', instances: [
+    { storageId: 'quark-main', provider: 'quark', displayName: 'Quark', enabled: true },
+  ] })
+  await writeAuth('quark-main', { accessToken: 'cancel-check-access', refreshToken: 'cancel-check-refresh', deviceId: 'cancel-check-device' })
+  await setGlobalAccess('public')
+  calls.length = 0
+  const request = Object.assign(new EventEmitter(), { method: 'GET', headers: {}, query: {
+    storageId: 'quark-main', id, parentId: '', check: 'download',
+  } })
+  const target = Object.assign(new EventEmitter(), res())
+  const info = { status: 0, data: { file_info: { fid: id, pdir_fid: '0', file_type: 1, file_name: 'cancel.jpg' } } }
+  return { request, target, info }
+}
+function assertCancelledDownload(request, target) {
+  assert.equal(target.statusCode, 499)
+  assert.deepEqual(target.body, { ok: false, error: 'storage_download_check_cancelled' })
+  assert.equal(target.headers.Location, undefined)
+  assert.equal(request.listenerCount('aborted'), 0)
+  assert.equal(target.listenerCount('close'), 0)
+  assert.doesNotMatch(JSON.stringify(target), /cancel-check-access|cancel-check-refresh|private/)
+}
+
+await test('download cancellation: already closed checks start no Provider work', async () => {
+  for (const closed of ['request', 'response']) {
+    const { request, target } = await cancelledDownloadFixture(`cancel-before-${closed}`)
+    if (closed === 'request') request.aborted = true
+    else target.destroyed = true
+    upstream = async () => { throw new Error('must not read upstream') }
+    await storageDownload(request, target)
+    assertCancelledDownload(request, target)
+    assert.equal(calls.length, 0)
+  }
+})
+
+await test('download cancellation: pending source reads abort without retry or credential rotation', async () => {
+  for (const event of ['aborted', 'close']) {
+    const { request, target, info } = await cancelledDownloadFixture(`cancel-source-${event}`)
+    const started = Promise.withResolvers()
+    let sourceSignal
+    upstream = async (url, options) => {
+      if (url.pathname.endsWith('/file/info')) return info
+      assert.equal(url.pathname, '/open/v1/file/get_download_url')
+      sourceSignal = options.signal
+      started.resolve()
+      return new Promise((resolve, reject) => options.signal.addEventListener('abort', () => reject(new Error('private source failure')), { once: true }))
+    }
+    const pending = storageDownload(request, target)
+    await started.promise
+    if (event === 'aborted') request.emit(event)
+    else target.emit(event)
+    await pending
+    assertCancelledDownload(request, target)
+    assert.equal(sourceSignal.aborted, true)
+    assert.equal(calls.filter(c => c.url.pathname.endsWith('/get_download_url')).length, 1)
+    assert.ok(calls.every(c => c.url.hostname === 'open-api-drive.quark.cn' && !c.headers.Range))
+    assert.equal(calls.some(c => c.url.pathname.endsWith('/rotate')), false)
+  }
+})
+
+await test('download cancellation: retry backoff does not start a second source attempt', async () => {
+  const { request, target, info } = await cancelledDownloadFixture('cancel-backoff')
+  let cancelTimer
+  upstream = async url => {
+    if (url.pathname.endsWith('/file/info')) return info
+    assert.equal(url.pathname, '/open/v1/file/get_download_url')
+    cancelTimer = setTimeout(() => request.emit('aborted'), 10)
+    throw new TypeError('private fetch failure')
+  }
+  await storageDownload(request, target)
+  clearTimeout(cancelTimer)
+  assertCancelledDownload(request, target)
+  assert.equal(calls.filter(c => c.url.pathname.endsWith('/get_download_url')).length, 1)
+})
+
+await test('download cancellation: late successful and denied source headers are released', async () => {
+  for (const status of [200, 401]) {
+    const { request, target, info } = await cancelledDownloadFixture(`cancel-late-${status}`)
+    const started = Promise.withResolvers(), reply = Promise.withResolvers()
+    let released = 0
+    upstream = async url => {
+      if (url.pathname.endsWith('/file/info')) return info
+      assert.equal(url.pathname, '/open/v1/file/get_download_url')
+      started.resolve()
+      return reply.promise
+    }
+    const pending = storageDownload(request, target)
+    await started.promise
+    target.emit('close')
+    reply.resolve(new Response(new ReadableStream({ cancel() { released += 1 } }), { status }))
+    await pending
+    assertCancelledDownload(request, target)
+    assert.equal(released, 1)
+    assert.equal(calls.filter(c => c.url.pathname.endsWith('/get_download_url')).length, 1)
+    assert.equal(calls.some(c => c.url.pathname.endsWith('/rotate')), false)
+  }
+})
+
+await test('download cancellation: an already started rotation persists before stopping the cancelled source flow', async () => {
+  const { request, target, info } = await cancelledDownloadFixture('cancel-rotation')
+  const started = Promise.withResolvers(), reply = Promise.withResolvers()
+  let rotationSignal
+  upstream = async (url, options) => {
+    if (url.pathname.endsWith('/file/info')) return info
+    if (url.pathname.endsWith('/get_download_url')) return response({ status: -1 }, 401)
+    assert.equal(url.pathname, '/agent/v1/oauth/access_token/rotate')
+    rotationSignal = options.signal
+    started.resolve()
+    return reply.promise
+  }
+  const pending = storageDownload(request, target)
+  await started.promise
+  request.emit('aborted')
+  assert.equal(rotationSignal.aborted, false, 'rotation keeps its independent transport lifetime')
+  reply.resolve({ status: 0, data: { access_token: 'cancel-check-next-access', refresh_token: 'cancel-check-next-refresh', expires_in: 3600 } })
+  await pending
+  assertCancelledDownload(request, target)
+  const stored = await readAuth('quark-main', { fresh: true })
+  assert.equal(stored.accessToken, 'cancel-check-next-access')
+  assert.equal(stored.refreshToken, 'cancel-check-next-refresh')
+  assert.equal(calls.filter(c => c.url.pathname.endsWith('/get_download_url')).length, 1)
+  assert.equal(calls.filter(c => c.url.pathname.endsWith('/rotate')).length, 1)
+})
+
 await test('Range contract stops before the gateway if the response closed during permission checks', async () => {
   await writeConfig({ version: 1, defaultStorageId: 'quark-main', instances: [
     { storageId: 'quark-main', provider: 'quark', displayName: '夸克网盘', enabled: true },
