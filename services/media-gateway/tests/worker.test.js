@@ -300,7 +300,7 @@ test('Worker health is minimal and works without media secrets', async () => {
   const fixture = await createFixture({ envOverrides: { MEDIA_GATEWAY_SIGNING_SECRET: undefined } })
   const response = await fixture.worker.fetch(new Request(scopedUrl('https://media.example.test/health')), fixture.env)
   assert.equal(response.status, 200)
-  assert.deepEqual(await response.json(), { ok: true, version: '0.2.16' })
+  assert.deepEqual(await response.json(), { ok: true, version: '0.2.17' })
   assert.equal(fixture.state.redisRequests.length, 0)
 })
 
@@ -1430,7 +1430,7 @@ test('Worker diagnostics identify each allowed redirect hop without logging sign
   const ready = logs.find(log => log.stage === 'media_response_ready')
   assert.equal(ready.contentType, 'image/jpeg')
   assert.equal(ready.acceptRanges, 'bytes')
-  assert.ok(logs.every(log => log.disposition === 'inline' && log.version === '0.2.16' && !log.authRefreshOccurred))
+  assert.ok(logs.every(log => log.disposition === 'inline' && log.version === '0.2.17' && !log.authRefreshOccurred))
   assert.equal(new Set(logs.map(log => log.requestId)).size, 1)
   assert.deepEqual(logs.map(log => log.sequence), logs.map((_, i) => i + 1))
   const serialized = JSON.stringify(fixture.state.logs)
@@ -1493,7 +1493,8 @@ test('Worker diagnostics identify parent cancellation separately from the CDN de
   await started
   controller.abort('secret-client-reason')
   const response = await pending
-  assert.equal(response.status, 502)
+  assert.equal(response.status, 499)
+  await new Promise(resolve => setImmediate(resolve))
   const result = diagnosticLogs(fixture).find(log => log.stage === 'cdn_headers_result')
   assert.equal(result.result, 'client_cancel')
   assert.equal(result.parentAborted, true)
@@ -1598,6 +1599,178 @@ function abortableDelay(signal, ms) {
   })
 }
 const rangeProbe = { method: 'HEAD', range: 'bytes=0-0', probeDeadline: fixedNow + 20_000 }
+
+async function ordinaryCancelledResponse(pending) {
+  let guard
+  try {
+    const response = await Promise.race([pending, new Promise((_, reject) => {
+      guard = setTimeout(() => reject(new Error('ordinary caller did not stop promptly')), 500)
+    })])
+    assert.equal(response.status, 499)
+    assert.equal(response.headers.get('x-media-error'), 'media_request_cancelled')
+    assert.equal((await response.json()).error, 'media_request_cancelled')
+    return response
+  } finally { clearTimeout(guard) }
+}
+
+test('Worker ordinary cancellation: already canceled media starts no KV, refresh, source or CDN reads', async () => {
+  const parent = new AbortController()
+  parent.abort(new Error('private cancellation reason'))
+  const fixture = await createFixture({ auth: { ...defaultAuth, accessExpiresAt: fixedNow + 10_000 } })
+  await ordinaryCancelledResponse(requestMedia(fixture, 'ordinary-pre-cancel', { purpose: 'original', signal: parent.signal }))
+  assert.equal(fixture.state.redisRequests.length, 0)
+  assert.equal(fixture.state.apiRequests.length, 0)
+  assert.equal(fixture.state.cdnRequests.length, 0)
+  assert.equal(JSON.stringify(fixture.state.logs).includes('private'), false)
+})
+
+test('Worker ordinary cancellation: metadata and source API reads receive caller abort without retry or refresh', async () => {
+  for (const stage of ['file/info', 'file/get_download_url']) {
+    const parent = new AbortController(), started = Promise.withResolvers()
+    let calls = 0, apiSignal
+    const fixture = await createFixture({ quarkHandler: async ({ url, init }) => {
+      if (url.pathname.endsWith(stage)) {
+        calls += 1; apiSignal = init.signal; started.resolve()
+        await abortableDelay(init.signal, 1000)
+      }
+    } })
+    const pending = requestMedia(fixture, 'ordinary-read-' + stage, { purpose: 'original', signal: parent.signal })
+    await started.promise
+    parent.abort(new Error('private cancellation reason'))
+    await ordinaryCancelledResponse(pending)
+    assert.equal(apiSignal.aborted, true)
+    assert.equal(calls, 1)
+    assert.equal(fixture.state.mediaUrlCount, 0)
+    assert.equal(fixture.state.cdnRequests.length, 0)
+    assert.equal(fixture.state.apiRequests.filter(call => new URL(call.url).pathname.includes('rotate')).length, 0)
+  }
+})
+
+test('Worker ordinary cancellation: cancellation during retry backoff stops the second source lookup', async () => {
+  const parent = new AbortController(), started = Promise.withResolvers()
+  let calls = 0
+  const fixture = await createFixture({ quarkHandler: async ({ url }) => {
+    if (url.pathname.endsWith('/get_download_url')) {
+      calls += 1; started.resolve()
+      throw new TypeError('private upstream rejection')
+    }
+  } })
+  const pending = requestMedia(fixture, 'ordinary-retry-cancel', { purpose: 'original', signal: parent.signal })
+  await started.promise
+  await new Promise(resolve => setImmediate(resolve))
+  parent.abort()
+  await ordinaryCancelledResponse(pending)
+  await new Promise(resolve => setTimeout(resolve, 280))
+  assert.equal(calls, 1)
+  assert.equal(fixture.state.cdnRequests.length, 0)
+  assert.equal(fixture.state.storedRefreshes, 0)
+})
+
+test('Worker ordinary cancellation: abandoned shared KV wait does not cancel another media caller', async () => {
+  const parent = new AbortController(), started = Promise.withResolvers(), gate = Promise.withResolvers()
+  let configReads = 0, sharedSignal
+  const fixture = await createFixture({ redisHandler: async ({ init }) => {
+    if (JSON.parse(init.body).some(command => command[1] === 'map7e-cloud:storage:config:v1:')) {
+      configReads += 1; sharedSignal = init.signal; started.resolve(); await gate.promise
+    }
+  } })
+  const first = requestMedia(fixture, 'ordinary-shared-kv', { purpose: 'original', signal: parent.signal })
+  await started.promise
+  const second = requestMedia(fixture, 'ordinary-shared-kv', { purpose: 'original' })
+  parent.abort()
+  try {
+    await ordinaryCancelledResponse(first)
+    assert.equal(sharedSignal.aborted, false)
+  } finally { gate.resolve() }
+  const response = await second
+  assert.equal(response.status, 200)
+  await response.body.cancel()
+  assert.equal(configReads, 1)
+  assert.equal(fixture.state.apiRequests.filter(call => new URL(call.url).pathname.endsWith('/info')).length, 1)
+})
+
+test('Worker ordinary cancellation: begun shared credential rotation persists and the remaining caller adopts it', async () => {
+  const parent = new AbortController(), begun = Promise.withResolvers(), gate = Promise.withResolvers(), waiting = Promise.withResolvers()
+  const background = []
+  let rotationSignal, rotations = 0, lockOwner
+  const fixture = await createFixture({ auth: { ...defaultAuth, accessExpiresAt: fixedNow + 10_000 },
+    redisHandler: async ({ init }) => {
+      const [command] = JSON.parse(init.body)
+      if (command[0] === 'SET' && command[1] === 'map7e-cloud:storage:lock:v1:refresh-quark-main') {
+        if (lockOwner) { waiting.resolve(); return jsonResponse([{ result: null }]) }
+        lockOwner = command[2]
+        return jsonResponse([{ result: 'OK' }])
+      }
+      if (command[0] === 'EVAL') { if (lockOwner === command[4]) lockOwner = undefined; return jsonResponse([{ result: 1 }]) }
+    },
+    quarkHandler: async ({ url, init }) => {
+      if (url.pathname.endsWith('/rotate')) {
+        rotations += 1; rotationSignal = init.signal; begun.resolve(); await gate.promise
+      }
+    },
+  })
+  const context = { waitUntil(promise) { background.push(promise) } }
+  const first = requestMedia(fixture, 'ordinary-shared-rotation', { purpose: 'original', signal: parent.signal, executionContext: context })
+  await begun.promise
+  parent.abort()
+  await ordinaryCancelledResponse(first)
+  assert.equal(rotationSignal.aborted, false)
+  assert.equal(fixture.state.mediaUrlCount, 0)
+  assert.equal(fixture.state.cdnRequests.length, 0)
+  const second = requestMedia(fixture, 'ordinary-shared-rotation', { purpose: 'original', executionContext: context })
+  try { await waiting.promise } finally { gate.resolve() }
+  await Promise.all(background)
+  const response = await second
+  assert.equal(response.status, 200)
+  await response.body.cancel()
+  assert.equal(rotations, 1)
+  assert.equal(fixture.state.storedRefreshes, 1)
+  assert.equal(fixture.state.mediaUrlCount, 1)
+  const encrypted = JSON.parse(fixture.state.authRecord)
+  const key = crypto.createHash('sha256').update('map7e-storage-v1\u0000' + encryptionSecret).digest()
+  const decipher = crypto.createDecipheriv('aes-256-gcm', key, Buffer.from(encrypted.iv, 'base64url'))
+  decipher.setAAD(Buffer.from('quark-main')); decipher.setAuthTag(Buffer.from(encrypted.tag, 'base64url'))
+  const auth = JSON.parse(Buffer.concat([decipher.update(Buffer.from(encrypted.data, 'base64url')), decipher.final()]))
+  assert.equal(auth.refreshToken, 'quark-refresh-token-refreshed')
+})
+
+test('Worker ordinary cancellation: late source headers are released without refresh or CDN work', async () => {
+  for (const denied of [false, true]) {
+    const parent = new AbortController(), started = Promise.withResolvers(), gate = Promise.withResolvers()
+    let canceled = 0, calls = 0
+    const fixture = await createFixture({ quarkHandler: async ({ url }) => {
+      if (url.pathname.endsWith('/get_download_url')) {
+        calls += 1; started.resolve(); await gate.promise
+        return new Response(new ReadableStream({ cancel() { canceled += 1 } }), {
+          status: denied ? 401 : 200, headers: { 'Content-Type': 'application/json' },
+        })
+      }
+    } })
+    const pending = requestMedia(fixture, 'ordinary-late-headers-' + denied, { purpose: 'original', signal: parent.signal })
+    await started.promise
+    parent.abort()
+    try { await ordinaryCancelledResponse(pending) } finally { gate.resolve() }
+    await new Promise(resolve => setImmediate(resolve))
+    assert.equal(canceled, 1)
+    assert.equal(calls, 1)
+    assert.equal(fixture.state.storedRefreshes, 0)
+    assert.equal(fixture.state.cdnRequests.length, 0)
+  }
+})
+
+test('Worker ordinary cancellation: a late CDN denial cannot restart source lookup or API rotation', async () => {
+  const parent = new AbortController()
+  let canceled = 0, cdnCalls = 0
+  const fixture = await createFixture({ cdnHandler: async () => {
+    cdnCalls += 1; parent.abort()
+    return new Response(new ReadableStream({ cancel() { canceled += 1 } }), { status: 403 })
+  } })
+  await ordinaryCancelledResponse(requestMedia(fixture, 'ordinary-late-cdn', { purpose: 'original', signal: parent.signal }))
+  assert.equal(canceled, 1)
+  assert.equal(cdnCalls, 1)
+  assert.equal(fixture.state.mediaUrlCount, 1)
+  assert.equal(fixture.state.storedRefreshes, 0)
+})
 
 test('Worker probe contract: multiple individually valid stages share one deadline', async () => {
   let cdnSignal, attempts = 0
@@ -1789,7 +1962,8 @@ test('preview transport fallback: client cancellation and rejected redirects nev
       await pending
     } })
     const response = await requestMedia(fixture, id, { purpose: 'preview', variant: 'preview', signal: parent.signal })
-    assert.equal(response.status, 502)
+    assert.equal(response.status, kind === 'cancel' ? 499 : 502)
+    if (kind === 'cancel') assert.equal((await response.json()).error, 'media_request_cancelled')
     assert.equal(fixture.state.mediaUrlCount, 0)
   }
 })

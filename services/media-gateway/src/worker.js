@@ -3,7 +3,7 @@ import { QUARK_FILE_SIZE_LIMIT, quarkDownloadLimit, quarkDownloadLimitBody } fro
 import { createMediaDiagnostics, diagnosticResponseHeaders } from './diagnostics.js'
 import { createMediaProbeScope, MEDIA_PROBE_TIMEOUT_MS, MEDIA_PROBE_RESPONSE_MARGIN_MS, MEDIA_PROBE_DEADLINE_HEADER, MEDIA_PROBE_DEADLINE_ERROR } from '../../../lib/storage/media-probe.js'
 
-export const MEDIA_GATEWAY_VERSION = '0.2.16'
+export const MEDIA_GATEWAY_VERSION = '0.2.17'
 export const MEDIA_SESSION_COOKIE = '__Secure-map7e-media-'
 const LEGACY_MEDIA_SESSION_COOKIE = '__Host-map7e-media-'
 const MEDIA_SESSION_COOKIE_HEADER_MAX_LENGTH = 65_536
@@ -666,6 +666,55 @@ function timeoutSignal(signal, timeoutMs) {
   return controller.signal
 }
 
+function mediaCancellationError(signal) {
+  if (signal?.reason instanceof GatewayError
+    && [MEDIA_PROBE_DEADLINE_ERROR, 'media_probe_cancelled'].includes(signal.reason.code)) return signal.reason
+  return new GatewayError('media_request_cancelled', 499, { 'X-Media-Error': 'media_request_cancelled' })
+}
+
+function checkMediaCancellation(signal) {
+  if (signal?.aborted) throw mediaCancellationError(signal)
+}
+
+// Ordinary media has caller cancellation, without the HEAD probe deadline.
+function createMediaRequestScope(signal) {
+  const check = () => checkMediaCancellation(signal)
+  const wait = operation => new Promise((resolve, reject) => {
+    const cleanup = () => signal.removeEventListener('abort', onAbort)
+    const onAbort = () => { cleanup(); reject(mediaCancellationError(signal)) }
+    if (signal.aborted) onAbort()
+    else signal.addEventListener('abort', onAbort, { once: true })
+    Promise.resolve(operation).then(value => {
+      cleanup()
+      if (signal.aborted) {
+        Promise.resolve(value?.body?.cancel()).catch(() => {})
+        reject(mediaCancellationError(signal))
+      } else resolve(value)
+    }, error => {
+      cleanup()
+      reject(signal.aborted ? mediaCancellationError(signal) : error)
+    })
+  })
+  return {
+    signal, check, wait,
+    fetch: fetchImpl => async (input, init = {}) => {
+      check()
+      return wait(fetchImpl(input, { ...init, signal: combinedAbortSignal(init.signal, signal) }))
+    },
+  }
+}
+
+function quarkReadRetryDelay(signal) {
+  checkMediaCancellation(signal)
+  return new Promise((resolve, reject) => {
+    const cleanup = () => { clearTimeout(timer); signal?.removeEventListener('abort', onAbort) }
+    const onAbort = () => { cleanup(); reject(mediaCancellationError(signal)) }
+    const timer = setTimeout(() => { cleanup(); resolve() }, 250)
+    signal?.addEventListener('abort', onAbort, { once: true })
+    if (signal?.aborted) onAbort()
+  })
+}
+
 async function quarkHeaders(method, path, env, now) {
   const timestamp = String(now)
   const clientId = env.QUARK_CLIENT_ID || OFFICIAL_CLIENT_ID
@@ -695,14 +744,18 @@ async function fetchQuarkApi(url, { method, body, env, fetchImpl, now, signal })
   let currentMethod = method
   let currentBody = body
   for (let redirects = 0; ; redirects += 1) {
+    checkMediaCancellation(signal)
+    const headers = await quarkHeaders(currentMethod, currentUrl.pathname, env, now())
+    checkMediaCancellation(signal)
     const response = await fetchImpl(currentUrl.toString(), {
       method: currentMethod,
-      headers: await quarkHeaders(currentMethod, currentUrl.pathname, env, now()),
+      headers,
       ...(currentBody === undefined ? {} : { body: JSON.stringify(currentBody) }),
       cache: 'no-store',
       redirect: 'manual',
       signal: timeoutSignal(signal, 15_000),
     })
+    if (signal?.aborted) { await response.body?.cancel().catch(() => {}); checkMediaCancellation(signal) }
     if (!QUARK_REDIRECT_STATUSES.has(response.status)) return response
 
     const location = response.headers.get('location')
@@ -724,6 +777,7 @@ async function fetchQuarkApi(url, { method, body, env, fetchImpl, now, signal })
 }
 
 async function quarkRequest(path, { method = 'GET', query = {}, body, auth, env, fetchImpl, now, signal } = {}) {
+  checkMediaCancellation(signal)
   const url = new URL(path, QUARK_API)
   for (const [name, value] of Object.entries(query)) {
     if (value !== undefined && value !== null) url.searchParams.set(name, String(value))
@@ -737,6 +791,7 @@ async function quarkRequest(path, { method = 'GET', query = {}, body, auth, env,
   let response
   let payload
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    checkMediaCancellation(signal)
     url.searchParams.set('req_id', crypto.randomUUID())
     try {
       response = await fetchQuarkApi(url, {
@@ -748,17 +803,20 @@ async function quarkRequest(path, { method = 'GET', query = {}, body, auth, env,
         signal,
       })
     } catch (error) {
+      checkMediaCancellation(signal)
       if (error instanceof GatewayError) throw error
       if (attempt + 1 >= maxAttempts) throw storageError(quarkRequestErrorCode(error), 502)
-      await new Promise(resolve => setTimeout(resolve, 250))
+      await quarkReadRetryDelay(signal)
       continue
     }
     try {
       payload = await response.json()
+      checkMediaCancellation(signal)
       break
     } catch {
+      checkMediaCancellation(signal)
       if (attempt + 1 >= maxAttempts) throw storageError('quark_response_invalid', 502)
-      await new Promise(resolve => setTimeout(resolve, 250))
+      await quarkReadRetryDelay(signal)
     }
   }
   if (!response || !payload || !response.ok || payload.status !== 0 || (payload.errno && payload.errno !== 0)) {
@@ -847,34 +905,40 @@ async function rotateQuarkAuth(storageId, before, env, fetchImpl, now, sleep, di
   throw storageError('storage_operation_busy', 409)
 }
 
-function createQuarkClient(storageId, initialAuth, { env, fetchImpl, storageFetchImpl = fetchImpl, now, sleep, diagnostics, probe, waitUntil }) {
+function createQuarkClient(storageId, initialAuth, { env, fetchImpl, storageFetchImpl = fetchImpl, now, sleep, diagnostics, scope, waitUntil }) {
   let auth = initialAuth
   const refreshAuth = async reason => {
     diagnostics?.emit('auth_refresh_start', { reason })
     try {
-      probe?.check()
-      const rotation = rotateQuarkAuth(storageId, auth, env, storageFetchImpl, now, sleep, diagnostics, probe)
-      if (probe) waitUntil?.(rotation.catch(() => {}))
-      auth = await (probe ? probe.wait(rotation) : rotation)
+      scope?.check()
+      const rotation = rotateQuarkAuth(storageId, auth, env, storageFetchImpl, now, sleep, diagnostics, scope)
+      if (scope) waitUntil?.(rotation.catch(() => {}))
+      auth = await (scope ? scope.wait(rotation) : rotation)
     } catch (error) {
-      diagnostics?.emit('auth_refresh_result', { result: probe?.signal.aborted ? 'caller_stopped' : 'failed' })
+      diagnostics?.emit('auth_refresh_result', { result: scope?.signal.aborted ? 'caller_stopped' : 'failed' })
       throw error
     }
   }
   async function call(path, options = {}) {
-    probe?.check()
+    scope?.check()
+    const signal = options.signal || scope?.signal
+    checkMediaCancellation(signal)
     if (!auth || !auth.accessToken) throw storageError('storage_authorization_required', 409)
     if (auth.accessExpiresAt && auth.accessExpiresAt <= now() + 60_000) {
       await refreshAuth('proactive')
     }
-    probe?.check()
+    scope?.check()
+    checkMediaCancellation(signal)
     try {
-      return await quarkRequest(path, { ...options, auth, env, fetchImpl, now })
+      return await quarkRequest(path, { ...options, signal, auth, env, fetchImpl, now })
     } catch (error) {
+      scope?.check()
+      checkMediaCancellation(signal)
       if (error.code !== 'storage_token_expired' || !auth.refreshToken) throw error
       await refreshAuth('api_expired')
-      probe?.check()
-      return quarkRequest(path, { ...options, auth, env, fetchImpl, now })
+      scope?.check()
+      checkMediaCancellation(signal)
+      return quarkRequest(path, { ...options, signal, auth, env, fetchImpl, now })
     }
   }
   return {
@@ -1108,12 +1172,14 @@ function urlExpiryMs(value) {
   }
 }
 
-async function getDownloadSource(client, storageId, fileId, env, now, refresh = false, diagnostics) {
+async function getDownloadSource(client, storageId, fileId, env, now, refresh = false, diagnostics, signal) {
+  checkMediaCancellation(signal)
   const auth = client.auth
   const fingerprint = bytesToBase64Url(new Uint8Array(await crypto.subtle.digest(
     'SHA-256',
     encoder.encode(String(auth.userId || '') + '\u0000' + auth.accessToken + '\u0000' + String(auth.clientToken || '')),
   )))
+  checkMediaCancellation(signal)
   const cacheKey = storageId + '\u0000' + fileId + '\u0000' + fingerprint
   const cached = downloadUrlCache.get(cacheKey)
   if (!refresh && cached && cached.expiresAt > now()) {
@@ -1122,7 +1188,9 @@ async function getDownloadSource(client, storageId, fileId, env, now, refresh = 
   }
   diagnostics?.emit('url_cache', { cacheHit: false, reason: refresh ? 'forced' : 'new' })
   const readUrl = async () => {
-    const payload = await client.call('/open/v1/file/get_download_url', { method: 'POST', body: { fid: fileId } })
+    checkMediaCancellation(signal)
+    const payload = await client.call('/open/v1/file/get_download_url', { method: 'POST', body: { fid: fileId }, signal })
+    checkMediaCancellation(signal)
     const value = payload.data && payload.data.download_url
     if (typeof value !== 'string' || (auth.accessToken && value.includes(auth.accessToken))
       || (auth.refreshToken && value.includes(auth.refreshToken)) || !isAllowedQuarkUrl(value)) {
@@ -1163,19 +1231,22 @@ async function requestDownload(client, storageId, fileId, {
   cdnHeaderTimeoutMs = MEDIA_CDN_HEADER_TIMEOUT_MS,
   diagnostics,
 } = {}) {
+  checkMediaCancellation(signal)
   const headers = new Headers({ Accept: '*/*', 'Accept-Encoding': 'identity' })
   if (range) headers.set('Range', range)
   if (ifRange) headers.set('If-Range', ifRange)
-  let source = await getDownloadSource(client, storageId, fileId, env, now, refresh, diagnostics)
+  let source = await getDownloadSource(client, storageId, fileId, env, now, refresh, diagnostics, signal)
+  checkMediaCancellation(signal)
   headers.set('Cookie', mediaCookie(client.auth, env))
   let response = await fetchQuarkCdn(source.url, { headers, signal, fetchImpl, headerTimeoutMs: cdnHeaderTimeoutMs, diagnostics })
   if (response.status === 401 || response.status === 403) {
     await response.body?.cancel().catch(() => {})
+    checkMediaCancellation(signal)
     for (const [key, value] of downloadUrlCache) if (value.url === source.url) downloadUrlCache.delete(key)
     diagnostics?.emit('cdn_retry', { reason: 'cdn_unauthorized', status: response.status })
     const beforeUrl = source.url
     const beforeAuth = client.auth
-    source = await getDownloadSource(client, storageId, fileId, env, now, true, diagnostics)
+    source = await getDownloadSource(client, storageId, fileId, env, now, true, diagnostics, signal)
     diagnostics?.emit('cdn_retry', { reason: 'cdn_unauthorized', urlChanged: beforeUrl !== source.url,
       authChanged: authChanged(beforeAuth, client.auth) })
     const retryHeaders = new Headers(headers)
@@ -1504,11 +1575,13 @@ export function createMediaGatewayWorker({
           })
           probe.check()
         }
+        const scope = probe || createMediaRequestScope(request.signal)
         const runMedia = async () => {
           // Storage reads are shared between callers. Stop this caller's wait,
           // without cancelling a read needed by another request.
-          const storage = await resolveStorageForTicket(claims, env, fetchImpl, now)
-          probe?.check()
+          scope.check()
+          const storage = await scope.wait(resolveStorageForTicket(claims, env, fetchImpl, now))
+          scope.check()
           if (env.MEDIA_GATEWAY_DIAGNOSTIC_FILE_HASH) {
             const fileHash = await logFileHash(secret, claims.storageId, claims.fileId)
             diagnostics = createMediaDiagnostics({ env, requestId, fileHash, claims, method: request.method,
@@ -1516,9 +1589,9 @@ export function createMediaGatewayWorker({
             diagnostics?.emit('request_start', { ...(requestRange ? { range: requestRange } : {}),
               ifRangePresent: request.headers.has('if-range') })
           }
-          const mediaFetch = probe ? probe.fetch(fetchImpl) : fetchImpl
+          const mediaFetch = scope.fetch(fetchImpl)
           const client = createQuarkClient(claims.storageId, storage.auth, { env, fetchImpl: mediaFetch,
-            storageFetchImpl: fetchImpl, now, sleep, diagnostics, probe,
+            storageFetchImpl: fetchImpl, now, sleep, diagnostics, scope,
             waitUntil: executionContext?.waitUntil?.bind(executionContext) })
           const resolved = await getItemRecord(client, claims.fileId)
           const item = resolved.item
@@ -1593,7 +1666,7 @@ export function createMediaGatewayWorker({
           const body = countStream(upstream.body, count => { bytesStreamed += count }, finalize)
           return new Response(body, { status, headers })
         }
-        const response = await (probe ? probe.wait(runMedia()) : runMedia())
+        const response = await scope.wait(runMedia())
         if (probe) {
           probe.dispose()
           await finishLog()
