@@ -593,6 +593,71 @@ await test('already cancelled Node request never starts a preview or original', 
   } finally { await closeServer(server) }
 })
 
+await test('Node metadata cancellation starts no media work and reaches the provider lookup', async () => {
+  const controller = new AbortController(), started = Promise.withResolvers()
+  let reads = 0, media = 0, metadataSignal
+  const provider = {
+    getItem: async (id, { signal }) => {
+      reads += 1; metadataSignal = signal; started.resolve()
+      return new Promise((resolve, reject) => signal.addEventListener('abort', () => reject(new Error('private metadata cancellation')), { once: true }))
+    },
+    getFileResponse: async () => { media += 1; throw new Error('must not start') },
+  }
+  const { server, baseUrl, logs } = await startServer({ provider })
+  try {
+    const pending = fetch(scopedUrl(`${baseUrl}/v1/media?ticket=${encodeURIComponent(ticket())}`), { signal: controller.signal })
+    await started.promise
+    controller.abort()
+    const response = await pending
+    assert.equal(response.status, 499)
+    assert.equal((await response.json()).error, 'media_request_cancelled')
+    assert.equal(metadataSignal.aborted, true)
+    assert.equal(reads, 1)
+    assert.equal(media, 0)
+    assert.equal(JSON.stringify(logs).includes('private'), false)
+  } finally { await closeServer(server) }
+})
+
+await test('Node precanceled metadata request stops before storage or file resolution', async () => {
+  const controller = new AbortController()
+  controller.abort()
+  let storageReads = 0
+  const { server, baseUrl } = await startServer({ resolveStorage: async () => { storageReads += 1; throw new Error('must not resolve') } })
+  try {
+    const response = await fetch(scopedUrl(`${baseUrl}/v1/media?ticket=${encodeURIComponent(ticket())}`), { signal: controller.signal })
+    assert.equal(response.status, 499)
+    assert.equal(storageReads, 0)
+  } finally { await closeServer(server) }
+})
+
+await test('Node synthetic HEAD omits If-Range for originals and raster fallback, explicit Range preserves it', async () => {
+  for (const purpose of ['video', 'preview']) {
+    const validators = []
+    const provider = {
+      getItem: async id => createItem({ id, name: purpose === 'preview' ? 'photo.jpg' : 'sample.mp4', extension: purpose === 'preview' ? 'jpg' : 'mp4' }),
+      getPreview: async () => new Response('unavailable', { status: 412 }),
+      getFileResponse: async (id, { range, ifRange }) => {
+        validators.push(ifRange || null)
+        if (ifRange) return new Response(new Uint8Array([1, 2, 3]), { headers: { 'Content-Type': purpose === 'preview' ? 'image/jpeg' : 'video/mp4', 'Content-Length': '3' } })
+        const response = partialResponse(range)
+        if (purpose === 'preview') response.headers.set('Content-Type', 'image/jpeg')
+        return response
+      },
+    }
+    const { server, baseUrl } = await startServer({ provider })
+    try {
+      const url = scopedUrl(`${baseUrl}/v1/media?ticket=${encodeURIComponent(ticket({ purpose, variant: 'preview' }))}`)
+      const head = await fetch(url, { method: 'HEAD', headers: { 'If-Range': '"stale"' } })
+      assert.equal(head.status, 200)
+      assert.equal(head.headers.get('content-length'), '32212254720')
+      const explicit = await fetch(url, { headers: { Range: 'bytes=0-0', 'If-Range': '"stale"' } })
+      assert.equal(explicit.status, 200)
+      await explicit.body.cancel()
+      assert.deepEqual(validators, [null, '"stale"'])
+    } finally { await closeServer(server) }
+  }
+})
+
 await test('thumbnail 412 does not fall back to full original and HEAD probes one byte only', async () => {
   const fullRanges = []
   const provider = {

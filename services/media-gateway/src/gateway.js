@@ -292,7 +292,7 @@ async function resolveMediaResponse(provider, claims, item, { range, ifRange, si
       return { response: new Response(null, { status: 200, headers: { 'Content-Length': '0' } }) }
     }
     const headProbe = head && !range
-    const response = await provider.getFileResponse(claims.fileId, { range: range?.header || (headProbe ? 'bytes=0-0' : undefined), ifRange, signal })
+    const response = await provider.getFileResponse(claims.fileId, { range: range?.header || (headProbe ? 'bytes=0-0' : undefined), ifRange: headProbe ? undefined : ifRange, signal })
     return { response, headProbe }
   }
   const getPreview = claims.variant === 'thumbnail' ? provider.getThumbnail : provider.getPreview
@@ -310,7 +310,7 @@ async function resolveMediaResponse(provider, claims, item, { range, ifRange, si
   checkCancellation()
   if (claims.variant === 'preview' && isRasterImage(item) && typeof provider.getFileResponse === 'function') {
     const headProbe = head && !range
-    const response = await provider.getFileResponse(claims.fileId, { range: range?.header || (headProbe ? 'bytes=0-0' : undefined), ifRange, signal })
+    const response = await provider.getFileResponse(claims.fileId, { range: range?.header || (headProbe ? 'bytes=0-0' : undefined), ifRange: headProbe ? undefined : ifRange, signal })
     const type = contentTypeFor(response, item, 'preview')
     if ([200, 206].includes(response.status) && type) return { response, contentTypeOverride: type, headProbe }
     await cancelBody(response)
@@ -412,10 +412,17 @@ export function createMediaGatewayHandler({
       }
 
       stage = 'storage_resolve'
+      const signal = requestAbortSignal(req, res)
+      const checkCancellation = () => { if (signal.aborted) throw new StorageError('media_request_cancelled', 499) }
+      checkCancellation()
       const { instance, provider, auth } = await resolveStorageImpl(claims.storageId)
+      checkCancellation()
       if (instance?.provider !== 'quark' || !auth?.accessToken) throw new StorageError('media_storage_unavailable', 404)
       stage = 'file_identity'
-      const item = await provider.getItem(claims.fileId)
+      let item
+      try { item = await provider.getItem(claims.fileId, { signal }) }
+      catch (error) { checkCancellation(); throw error }
+      checkCancellation()
       const expectedParentId = claims.parentId === '0' ? '' : claims.parentId
       if (!item || item.isFolder || !quarkFidsMatch(item.id, claims.fileId) || !quarkFidsMatch(item.parentId, expectedParentId)) {
         throw new StorageError('file_not_found', 404)
@@ -429,7 +436,6 @@ export function createMediaGatewayHandler({
         const ifRange = req.headers['if-range']
         if (typeof ifRange !== 'string' || ifRange.length > 512 || /[\r\n]/.test(ifRange)) throw new MediaHttpError('range_not_satisfiable', 416)
       }
-      const signal = requestAbortSignal(req, res)
       stage = 'upstream'
       const ifRange = typeof req.headers['if-range'] === 'string' ? req.headers['if-range'] : undefined
       const resolved = await resolveMediaResponse(provider, claims, item, { range, ifRange, signal, head: req.method === 'HEAD' })

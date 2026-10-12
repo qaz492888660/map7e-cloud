@@ -1402,7 +1402,7 @@ async function resolveMediaResponse(client, claims, item, record, range, ifRange
   const actualRange = range ? range.header : headProbe ? 'bytes=0-0' : undefined
   const downloaded = await requestDownload(client, claims.storageId, claims.fileId, {
     range: actualRange,
-    ifRange,
+    ifRange: headProbe ? undefined : ifRange,
     signal: request.signal,
     ...context,
   })

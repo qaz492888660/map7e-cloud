@@ -732,6 +732,26 @@ test('Worker validates its synthetic HEAD Range probe before claiming range supp
   assert.equal(ignored.state.logs[0].status, 502)
 })
 
+test('Worker synthetic HEAD ignores If-Range while explicit Range preserves it', async () => {
+  const validators = []
+  const fixture = await createFixture({ cdnHandler: async (url, headers) => {
+    const validator = headers.get('if-range')
+    validators.push(validator)
+    return validator
+      ? new Response(new Uint8Array([1, 2, 3]), { headers: { 'Content-Type': 'video/mp4', 'Content-Length': '3' } })
+      : new Response(new Uint8Array([1]), { status: 206, headers: {
+        'Content-Type': 'video/mp4', 'Content-Length': '1', 'Content-Range': 'bytes 0-0/32212254720', 'Accept-Ranges': 'bytes',
+      } })
+  } })
+  const synthetic = await requestMedia(fixture, 'worker-ifrange-synthetic', { method: 'HEAD', ifRange: '"stale"' })
+  assert.equal(synthetic.status, 200)
+  assert.equal(synthetic.headers.get('content-length'), '32212254720')
+  const explicit = await requestMedia(fixture, 'worker-ifrange-explicit', { range: 'bytes=0-0', ifRange: '"stale"' })
+  assert.equal(explicit.status, 200)
+  await explicit.body.cancel()
+  assert.deepEqual(validators, [null, '"stale"'])
+})
+
 test('Worker cancels upstream bodies after GET or HEAD Range validation fails', async () => {
   const cases = [
     { status: 200, headers: {}, error: 'range_not_supported' },

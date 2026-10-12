@@ -22,6 +22,22 @@ test('already cancelled previews and original reads start no metadata, rotation,
   assert.equal(calls, 0)
 })
 
+test('getItem accepts caller cancellation before and during the Quark metadata read', async t => {
+  const parent = new AbortController(), started = Promise.withResolvers()
+  let reads = 0
+  t.mock.method(globalThis, 'fetch', async (url, init) => {
+    reads += 1; assert.equal(url.pathname, '/open/v1/file/info'); started.resolve()
+    return new Promise((resolve, reject) => init.signal.addEventListener('abort', () => reject(new Error('private metadata rejection')), { once: true }))
+  })
+  const provider = createQuarkProvider(instance, auth)
+  const pending = provider.getItem('photo', { signal: parent.signal })
+  await started.promise
+  parent.abort()
+  await assert.rejects(pending, cancelled)
+  await assert.rejects(provider.getItem('photo', { signal: parent.signal }), cancelled)
+  assert.equal(reads, 1)
+})
+
 test('preview and thumbnail propagate cancellation to pending CDN fetches without refetching metadata', async t => {
   for (const operation of ['getPreview', 'getThumbnail']) {
     let apiCalls = 0, cdnCalls = 0
