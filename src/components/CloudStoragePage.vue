@@ -1584,12 +1584,12 @@ async function openFile(file) {
   }
   if (file.type === 'video' || VIDEO_EXTENSIONS.includes(file.extension)) {
     previewMode.value = 'video'
-    // Unknown sizes are not proof that a video is <= 50 MB; never start a Range probe.
-    if (!Number.isFinite(file.sizeBytes) || file.sizeBytes < 0) {
+    // Quark requires a known size <= 50 MB before a Range probe; PikPak keeps its existing flow.
+    if (isQuarkMedia(file) && (!Number.isFinite(file.sizeBytes) || file.sizeBytes < 0)) {
       previewError.value = '无法确认视频大小，暂不支持在线播放（仅开放不超过 50 MB 的视频）。'
       return
     }
-    if (file.sizeBytes > MAX_INLINE_VIDEO_BYTES) {
+    if (isQuarkMedia(file) && file.sizeBytes > MAX_INLINE_VIDEO_BYTES) {
       previewError.value = '视频超过 50 MB，暂不支持在线播放。'
       return
     }

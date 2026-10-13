@@ -207,22 +207,65 @@ describe('CloudStoragePage directory loading', () => {
     expect(wrapper.find('.file-video-preview').attributes('src')).not.toContain('storage-preview')
   })
 
-  it('uses credentialed CORS for Quark video Range requests', async () => {
+  it.each([49_000_000, 50_000_000])('allows a %s-byte Quark video through the Range check with credentialed CORS', async (size) => {
     window.history.replaceState(null, '', '/?storageId=quark-main')
-    globalThis.fetch = mediaFetch([{ ...file('quark-video', 'quark.mp4'), extension: 'mp4', type: 'video', size: 50_000_000 }])
+    globalThis.fetch = mediaFetch([{ ...file('quark-video', 'quark.mp4'), extension: 'mp4', type: 'video', size }])
     wrapper = mount(CloudStoragePage, { attachTo: document.body })
     await waitFor(() => expect(wrapper.find('.ocean-data-note').text()).toContain('覆盖当前有权限读取的目录'))
     await wrapper.find('.ocean-nav--main .ocean-nav-item').trigger('click')
     await wrapper.find('button[aria-label="预览 quark.mp4"]').trigger('click')
     await waitFor(() => expect(wrapper.find('.file-video-preview').exists()).toBe(true))
     expect(wrapper.find('.file-video-preview').attributes('crossorigin')).toBe('use-credentials')
+    expect(globalThis.fetch.mock.calls.filter(([input]) => new URL(input, location.href).searchParams.get('check') === 'range')).toHaveLength(1)
+  })
+
+  it.each([
+    ['over 50 MB', 848086961],
+    ['unknown size', null],
+  ])('keeps PikPak video playback and downloads with %s behind the existing Range check', async (_label, size) => {
+    window.history.replaceState(null, '', '/?storageId=pikpak-main')
+    const ordinaryFetch = mediaFetch([{ ...file('pikpak-video', 'pikpak.mp4'), extension: 'mp4', type: 'video', size }])
+    let resolveRange
+    globalThis.fetch = vi.fn((input, options) => new URL(input, location.href).searchParams.get('check') === 'range'
+      ? new Promise(resolve => { resolveRange = resolve })
+      : ordinaryFetch(input, options))
+    wrapper = mount(CloudStoragePage, { attachTo: document.body })
+    await waitFor(() => expect(wrapper.find('.ocean-data-note').text()).toContain('覆盖当前有权限读取的目录'))
+    await wrapper.find('.ocean-nav--main .ocean-nav-item').trigger('click')
+    await wrapper.find('button[aria-label="预览 pikpak.mp4"]').trigger('click')
+    expect(wrapper.find('.file-video-preview').exists()).toBe(false)
+    expect(globalThis.fetch.mock.calls.filter(([input]) => new URL(input, location.href).searchParams.get('check') === 'range')).toHaveLength(1)
+    resolveRange(jsonResponse({ ok: true, rangeSupported: true }))
+    await waitFor(() => expect(wrapper.find('.file-video-preview').exists()).toBe(true))
+    const video = wrapper.find('.file-video-preview')
+    const source = new URL(video.attributes('src'), location.href)
+    expect(source.pathname).toBe('/api/storage-download')
+    expect(source.searchParams.get('storageId')).toBe('pikpak-main')
+    expect(source.searchParams.get('inline')).toBeNull()
+    expect(video.attributes('crossorigin')).toBeUndefined()
+    expect(wrapper.find('.preview-overlay a[download="pikpak.mp4"]').attributes('href')).toBe(source.pathname + source.search)
+  })
+
+  it.each([
+    ['authorization denied', 848086961, { statusCode: 401, body: { ok: false, error: 'authentication_required' } }, '获取网盘播放地址失败'],
+    ['Range unsupported', null, { ok: true, rangeSupported: false }, '未提供有效的 Range 分段读取'],
+  ])('keeps PikPak %s from starting a player', async (_label, size, rangeResult, message) => {
+    window.history.replaceState(null, '', '/?storageId=pikpak-main')
+    globalThis.fetch = mediaFetch([{ ...file('pikpak-video', 'pikpak.mp4'), extension: 'mp4', type: 'video', size }], rangeResult)
+    wrapper = mount(CloudStoragePage, { attachTo: document.body })
+    await waitFor(() => expect(wrapper.find('.ocean-data-note').text()).toContain('覆盖当前有权限读取的目录'))
+    await wrapper.find('.ocean-nav--main .ocean-nav-item').trigger('click')
+    await wrapper.find('button[aria-label="预览 pikpak.mp4"]').trigger('click')
+    await waitFor(() => expect(wrapper.find('.preview-overlay').text()).toContain(message))
+    expect(wrapper.find('.file-video-preview').exists()).toBe(false)
+    expect(globalThis.fetch.mock.calls.filter(([input]) => new URL(input, location.href).searchParams.get('check') === 'range')).toHaveLength(1)
   })
 
   it.each([
     ['slightly over 50 MB', 50_000_001, '视频超过 50 MB'],
     ['809 MB video', 809 * 1024 ** 2, '视频超过 50 MB'],
     ['unknown-size video', null, '无法确认视频大小'],
-  ])('blocks %s before any Range probe or video element', async (_label, size, message) => {
+  ])('blocks Quark %s before any Range probe or video element', async (_label, size, message) => {
     window.history.replaceState(null, '', '/?storageId=quark-main')
     const fetch = mediaFetch([{ ...file('blocked-video', 'blocked.mp4'), extension: 'mp4', type: 'video', size }])
     globalThis.fetch = fetch
