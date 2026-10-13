@@ -568,6 +568,54 @@ await test('download source preflight: preserves actual Quark size rejection wit
   assert.doesNotMatch(JSON.stringify(checked), /source-check-policy-access|source-check-policy-refresh|ticket=/)
 })
 
+await test('RAW preview cache check: preserves file/parent/Root Policy and returns no media credentials', async t => {
+  await writeConfig({ version: 1, defaultStorageId: 'quark-raw-cache', instances: [
+    { storageId: 'quark-raw-cache', provider: 'quark', displayName: 'Quark RAW cache', enabled: true, rootFolderId: 'raw-root' },
+    { storageId: 'quark-raw-no-auth', provider: 'quark', displayName: 'Quark missing auth', enabled: true },
+  ] })
+  await writeAuth('quark-raw-cache', { accessToken: 'raw-cache-test-access', deviceId: 'raw-cache-device' })
+  await setGlobalAccess('public')
+  const previousPassword = process.env.CLOUD_PASSWORD
+  process.env.CLOUD_PASSWORD = 'raw-cache-test-password'
+  t.after(async () => {
+    if (previousPassword === undefined) delete process.env.CLOUD_PASSWORD
+    else process.env.CLOUD_PASSWORD = previousPassword
+    await setFileMetadata(metadataId('quark-raw-cache', 'raw-cache-file'), { access: 'inherit' })
+  })
+  calls.length = 0
+  upstream = async url => {
+    assert.ok(url.pathname.endsWith('/file/info'), 'cache revalidation must not read CDN/source')
+    const id = url.searchParams.get('fid')
+    if (id === 'missing') return { status: 0, data: {} }
+    return { status: 0, data: { file_info: {
+      fid: id, pdir_fid: id === 'outside-file' ? 'outside-folder' : id === 'outside-folder' ? '0' : 'raw-root',
+      file_type: id === 'outside-folder' ? 0 : 2, file_name: 'camera.dng', file_ext: 'dng',
+    } } }
+  }
+  const request = async (id = 'raw-cache-file', parentId = 'raw-root') => {
+    const target = res()
+    await storagePreview({ method: 'GET', headers: {}, query: { storageId: 'quark-raw-cache', id, parentId, variant: 'preview', check: 'read' } }, target)
+    return target
+  }
+  const allowed = await request()
+  assert.equal(allowed.statusCode, 200)
+  assert.deepEqual(allowed.body, { ok: true })
+  assert.equal(allowed.headers['Cache-Control'], 'private, no-store')
+  assert.equal(allowed.headers.Vary, 'Cookie')
+  assert.equal(allowed.headers.Location, undefined)
+  assert.equal(JSON.stringify(allowed).includes('raw-cache-test-access'), false)
+  assert.equal((await request('raw-cache-file', 'wrong-parent')).statusCode, 404)
+  assert.equal((await request('outside-file', 'outside-folder')).statusCode, 404)
+  assert.equal((await request('missing')).statusCode, 404)
+  await setFileMetadata(metadataId('quark-raw-cache', 'raw-cache-file'), { access: 'locked' })
+  assert.equal((await request()).statusCode, 401)
+  assert.equal(calls.some(call => call.url.pathname.endsWith('/get_download_url')), false)
+  const noAuth = res()
+  await storagePreview({ method: 'GET', headers: {}, query: { storageId: 'quark-raw-no-auth', id: 'raw-cache-file', parentId: '', variant: 'preview', check: 'read' } }, noAuth)
+  assert.equal(noAuth.statusCode, 409)
+  assert.equal(noAuth.body.error, 'storage_authorization_required')
+})
+
 await test('download source preflight: retains file authorization and parent isolation before reading any source', async t => {
   await writeConfig({ version: 1, defaultStorageId: 'quark-main', instances: [
     { storageId: 'quark-main', provider: 'quark', displayName: 'Quark', enabled: true },
