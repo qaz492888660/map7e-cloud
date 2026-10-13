@@ -1,0 +1,10 @@
+{
+  "worker": "map7e-quark-media-gateway",
+  "version": "0.2.17",
+  "source_sha": "be27c424da4214faffc8fac77a8ae241a5eeb8be",
+  "compiled_worker_source_sha": "10122966975a584e8ffe78b6225b89306f47f630",
+  "file": "map7e-worker-0.2.17.js",
+  "bytes": 90605,
+  "sha256": "a7987e222b1821b08615d16e89a597dc09fda334f8cda64186a32ebe432d4938",
+  "status": "delivery-only; not a deployment"
+}
