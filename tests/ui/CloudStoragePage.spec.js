@@ -170,6 +170,68 @@ describe('CloudStoragePage directory loading', () => {
     expect(new URL(imageSrc, location.href).searchParams.get('inline')).toBe('1')
   })
 
+  it.each([
+    ['jpg', 'photo.jpg', 3, 'image'],
+    ['dng', 'camera.dng', 22_100_373, 'raw'],
+    ['mp4', 'small.mp4', 49_000_000, 'video'],
+    ['mp4', 'large.mp4', 50_000_001, 'limited'],
+    ['mp4', 'unknown.mp4', null, 'unknown'],
+  ])('defers %s media actions when directory data arrives before provider metadata (%s)', async (extension, name, size, mode) => {
+    window.history.replaceState(null, '', '/?storageId=quark-main')
+    const ordinaryFetch = mediaFetch([{ ...file('late-provider', name), extension, size, previewAvailable: mode === 'raw' }])
+    let resolveProviders
+    const pendingProviders = new Promise(resolve => { resolveProviders = resolve })
+    globalThis.fetch = vi.fn((input, options) => new URL(input, location.href).pathname === '/api/storage-providers'
+      ? pendingProviders : ordinaryFetch(input, options))
+    wrapper = mount(CloudStoragePage, { attachTo: document.body })
+    await waitFor(() => expect(wrapper.find('.ocean-data-note').text()).toContain('覆盖当前有权限读取的目录'))
+    if (mode === 'image' || mode === 'raw') {
+      await wrapper.find('.ocean-category-card[aria-label^="相册"]').trigger('click')
+      await wrapper.find(`button[aria-label="查看图片 ${name}"]`).trigger('click')
+      expect(wrapper.find('.photo-viewer').exists()).toBe(false)
+    }
+    await wrapper.find('.ocean-nav--main .ocean-nav-item').trigger('click')
+    await wrapper.find(`button[aria-label="预览 ${name}"]`).trigger('click')
+    expect(wrapper.find('.photo-viewer, .preview-overlay').exists()).toBe(false)
+    expect(wrapper.text()).toContain('网盘信息尚未加载')
+    await wrapper.find(`button[aria-label="文件操作：${name}"]`).trigger('click')
+    const click = new MouseEvent('click', { bubbles: true, cancelable: true })
+    wrapper.find(`a.sheet-action[download="${name}"]`).element.dispatchEvent(click)
+    expect(click.defaultPrevented).toBe(true)
+    expect(ordinaryFetch.mock.calls.some(([input]) => new URL(input, location.href).pathname === '/api/storage-download')).toBe(false)
+
+    resolveProviders(jsonResponse(providers))
+    await flushPromises()
+    await wrapper.find(`button[aria-label="预览 ${name}"]`).trigger('click')
+    await flushPromises()
+    expect(wrapper.text()).not.toContain('网盘信息尚未加载')
+    if (mode === 'image') expect(new URL(wrapper.find('.viewer-image').attributes('src'), location.href).searchParams.get('inline')).toBe('1')
+    if (mode === 'raw') expect(wrapper.find('.viewer-image').attributes('src')).toContain('/api/storage-preview?')
+    if (mode === 'video') expect(wrapper.find('.file-video-preview').attributes('crossorigin')).toBe('use-credentials')
+    if (mode === 'limited' || mode === 'unknown') {
+      expect(wrapper.find('.file-video-preview').exists()).toBe(false)
+      expect(wrapper.text()).toContain(mode === 'limited' ? '视频超过 50 MB' : '无法确认视频大小')
+    }
+    expect(ordinaryFetch.mock.calls.filter(([input]) => new URL(input, location.href).searchParams.get('check') === 'range')).toHaveLength(mode === 'video' ? 1 : 0)
+  })
+
+  it('keeps media actions blocked with a clear refresh prompt if provider discovery fails', async () => {
+    const ordinaryFetch = mediaFetch([{ ...file('unknown-provider', 'photo.jpg'), extension: 'jpg' }])
+    globalThis.fetch = vi.fn((input, options) => new URL(input, location.href).pathname === '/api/storage-providers'
+      ? Promise.reject(new Error('provider list unavailable')) : ordinaryFetch(input, options))
+    wrapper = mount(CloudStoragePage, { attachTo: document.body })
+    await waitFor(() => expect(wrapper.find('.ocean-data-note').text()).toContain('覆盖当前有权限读取的目录'))
+    await wrapper.find('.ocean-nav--main .ocean-nav-item').trigger('click')
+    await wrapper.find('button[aria-label="预览 photo.jpg"]').trigger('click')
+    expect(wrapper.find('.photo-viewer').exists()).toBe(false)
+    expect(wrapper.text()).toContain('请稍后重试或刷新页面')
+    await wrapper.find('button[aria-label="文件操作：photo.jpg"]').trigger('click')
+    const click = new MouseEvent('click', { bubbles: true, cancelable: true })
+    wrapper.find('a.sheet-action[download="photo.jpg"]').element.dispatchEvent(click)
+    expect(click.defaultPrevented).toBe(true)
+    expect(ordinaryFetch.mock.calls.some(([input]) => new URL(input, location.href).pathname === '/api/storage-download')).toBe(false)
+  })
+
   it('opens Quark PDFs inline while keeping the toolbar download as an attachment', async () => {
     const url = new URL(window.location.href)
     url.searchParams.set('storageId', 'quark-main')

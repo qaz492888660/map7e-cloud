@@ -314,6 +314,17 @@ function isQuarkMedia(file) {
   return storageProviders.value.find((storage) => storage.id === file?.storageId)?.provider === 'quark'
 }
 
+function mediaProviderReady(file) {
+  const message = '网盘信息尚未加载，暂不能预览或下载。请稍后重试或刷新页面。'
+  const provider = storageProviders.value.find((storage) => storage.id === file?.storageId)?.provider
+  if (provider !== 'quark' && provider !== 'pikpak') {
+    errorMessage.value = message
+    return false
+  }
+  if (errorMessage.value === message) errorMessage.value = ''
+  return true
+}
+
 function normalizePikPakItem(file, storageId = activeStorageId.value) {
   const isFolder = Boolean(file?.isFolder)
   const extension = String(file?.extension || extensionOf(file?.name))
@@ -1297,6 +1308,7 @@ async function loginCloud() {
 }
 
 function openPhotoViewer(file, items) {
+  if (!mediaProviderReady(file)) return
   viewerItems.value = items.map((item) => {
     const rawPreview = isRawImageFile(item)
     return {
@@ -1564,6 +1576,7 @@ function handleViewerTouchEnd(event) {
 }
 
 async function openFile(file) {
+  if (!mediaProviderReady(file)) return
   const generation = ++previewGeneration
   previewProbeController?.abort()
   previewProbeController = null
@@ -1678,6 +1691,11 @@ function closePreview() {
 }
 
 async function handleFileDownload(event, file) {
+  if (!mediaProviderReady(file)) {
+    event.preventDefault()
+    closeItemActions()
+    return
+  }
   if ((viewerImage.value?.path === file.path && viewerErrorCode.value === QUARK_FILE_SIZE_LIMIT)
     || (previewFile.value?.path === file.path && previewErrorCode.value === QUARK_FILE_SIZE_LIMIT)) {
     event.preventDefault()
