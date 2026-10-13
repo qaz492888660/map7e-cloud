@@ -694,7 +694,7 @@ async function cancelledDownloadFixture(id) {
 }
 function assertCancelledDownload(request, target) {
   assert.equal(target.statusCode, 499)
-  assert.deepEqual(target.body, { ok: false, error: 'storage_download_check_cancelled' })
+  assert.deepEqual(target.body, { ok: false, error: request.query.check === 'range' ? 'storage_range_probe_cancelled' : 'storage_download_check_cancelled' })
   assert.equal(target.headers.Location, undefined)
   assert.equal(request.listenerCount('aborted'), 0)
   assert.equal(target.listenerCount('close'), 0)
@@ -702,14 +702,66 @@ function assertCancelledDownload(request, target) {
 }
 
 await test('download cancellation: already closed checks start no Provider work', async () => {
-  for (const closed of ['request', 'response']) {
+  for (const check of ['download', 'range']) for (const closed of ['request', 'response']) {
     const { request, target } = await cancelledDownloadFixture(`cancel-before-${closed}`)
+    request.query.check = check
     if (closed === 'request') request.aborted = true
     else target.destroyed = true
     upstream = async () => { throw new Error('must not read upstream') }
     await storageDownload(request, target)
     assertCancelledDownload(request, target)
     assert.equal(calls.length, 0)
+  }
+})
+
+await test('preflight cancellation aborts pending item, ancestry and cold root lookups without retries or rotation', async () => {
+  for (const check of ['download', 'range']) for (const stage of ['item', 'ancestry', 'root']) for (const event of ['aborted', 'close']) {
+    const id = `cancel-metadata-${check}-${stage}-${event}`
+    const { request, target, info } = await cancelledDownloadFixture(id)
+    request.query.check = check
+    const parentId = stage === 'item' ? '' : `parent-${id}`
+    request.query.parentId = parentId
+    info.data.file_info.pdir_fid = parentId || '0'
+    const started = Promise.withResolvers()
+    let metadataSignal, pendingRequests = 0
+    upstream = async (url, options) => {
+      if (url.pathname.endsWith('/file/info') && url.searchParams.get('fid') === id && stage !== 'item') return info
+      if (stage === 'root' && url.pathname.endsWith('/file/info')) return { status: 0, data: { file_info: {
+        fid: parentId, pdir_fid: `opaque-root-${id}`, file_type: 0, file_name: 'folder',
+      } } }
+      assert.equal(url.pathname, stage === 'root' ? '/open/v1/file/list' : '/open/v1/file/info')
+      pendingRequests += 1
+      metadataSignal = options.signal
+      started.resolve()
+      return new Promise((resolve, reject) => options.signal.addEventListener('abort', () => reject(new Error('private metadata failure')), { once: true }))
+    }
+    const pending = storageDownload(request, target)
+    await started.promise
+    if (event === 'aborted') request.emit(event)
+    else target.emit(event)
+    await pending
+    assertCancelledDownload(request, target)
+    assert.equal(metadataSignal.aborted, true)
+    assert.equal(pendingRequests, 1)
+    assert.ok(calls.every(c => c.url.hostname === 'open-api-drive.quark.cn'))
+    assert.equal(calls.some(c => /get_download_url|rotate/.test(c.url.pathname)), false)
+  }
+})
+
+await test('preflight cancellation during metadata retry backoff never starts a second item read', async () => {
+  for (const check of ['download', 'range']) {
+    const { request, target } = await cancelledDownloadFixture(`cancel-metadata-backoff-${check}`)
+    request.query.check = check
+    let cancelTimer
+    upstream = async url => {
+      assert.equal(url.pathname, '/open/v1/file/info')
+      cancelTimer = setTimeout(() => request.emit('aborted'), 10)
+      throw new TypeError('private metadata transport failure')
+    }
+    await storageDownload(request, target)
+    clearTimeout(cancelTimer)
+    assertCancelledDownload(request, target)
+    assert.equal(calls.length, 1)
   }
 })
 
