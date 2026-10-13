@@ -386,6 +386,28 @@ test('PikPak missing download source logs structure only after parent and access
   } finally { console.warn = originalWarn }
 })
 
+test('PikPak attachment fallback validates each URL without weakening parent or file authorization', async () => {
+  process.env.PIKPAK_PAT = 'test-pikpak-token-signing-key'
+  process.env.CLOUD_PASSWORD = 'visitor-password'
+  process.env.UPSTASH_REDIS_REST_URL = 'https://redis.test'
+  process.env.UPSTASH_REDIS_REST_TOKEN = 'test-redis-token'
+  resetFixtures()
+  setGlobal('locked')
+  setFolder('public-folder', 'public')
+  pikpakItems.set('public-file', { id: 'public-file', kind: 'drive#file', parent_id: 'public-folder',
+    links: { 'application/octet-stream': { url: 'http://cdn.example/original' } }, web_content_link: 'https://cdn.example/original' })
+  let response = await invoke(downloadHandler, { query: { id: 'public-file', parentId: 'public-folder' } })
+  assert.equal(response.statusCode, 302)
+  assert.equal(response.headers.Location, 'https://cdn.example/original')
+  response = await invoke(downloadHandler, { query: { id: 'public-file', parentId: 'locked-folder' } })
+  assert.equal(response.statusCode, 404)
+  assert.equal(response.headers.Location, undefined)
+  setFile('public-file', 'locked')
+  response = await invoke(downloadHandler, { query: { id: 'public-file', parentId: 'public-folder' } })
+  assert.equal(response.statusCode, 401)
+  assert.equal(response.headers.Location, undefined)
+})
+
 test('admin writes require the separate administrator cookie and persist metadata', async () => {
   process.env.PIKPAK_PAT = 'test-pikpak-token-signing-key'
   process.env.CLOUD_PASSWORD = 'visitor-password'
