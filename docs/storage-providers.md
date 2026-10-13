@@ -10,9 +10,13 @@ use scoped metadata keys. The frontend enters one storage at a time.
 and unsupported operations return HTTP 501. Storage configuration and encrypted
 credentials use the existing Upstash pipeline, isolated under the existing Preview
 prefix. Account OAuth tokens never appear in descriptors, static assets or redirects.
-AES-256-GCM credentials are bound to storageId. Set a stable server-only
-STORAGE_ENCRYPTION_KEY if desired; existing deployments use PIKPAK_PAT as fallback.
-Changing the encryption secret requires reauthorization of additional instances.
+AES-256-GCM credentials are bound to storageId. Legacy deployments derive their
+data key from STORAGE_ENCRYPTION_KEY or, when absent, PIKPAK_PAT. Do not change
+either value while legacy ciphertext still depends on it. The
+[lossless key migration runbook](./storage-key-migration.md) separates the data key
+from PIKPAK_PAT without rewriting credentials or changing the deployed Worker.
+After activation STORAGE_ENCRYPTION_KEY wraps the existing data key; replacing
+that wrapping key without a verified recovery plan also makes it unreadable.
 The primary PAT remains environment-managed. No persistent filesystem is used.
 
 ## Quark integration boundary
