@@ -395,13 +395,33 @@ test('PikPak attachment fallback validates each URL without weakening parent or 
   setGlobal('locked')
   setFolder('public-folder', 'public')
   pikpakItems.set('public-file', { id: 'public-file', kind: 'drive#file', parent_id: 'public-folder',
-    links: { 'application/octet-stream': { url: 'http://cdn.example/original' } }, web_content_link: 'https://cdn.example/original' })
+    links: { 'application/octet-stream': { url: 'ftp://cdn.example/original' } }, web_content_link: 'https://cdn.example/original' })
   let response = await invoke(downloadHandler, { query: { id: 'public-file', parentId: 'public-folder' } })
   assert.equal(response.statusCode, 302)
   assert.equal(response.headers.Location, 'https://cdn.example/original')
   response = await invoke(downloadHandler, { query: { id: 'public-file', parentId: 'locked-folder' } })
   assert.equal(response.statusCode, 404)
   assert.equal(response.headers.Location, undefined)
+  setFile('public-file', 'locked')
+  response = await invoke(downloadHandler, { query: { id: 'public-file', parentId: 'public-folder' } })
+  assert.equal(response.statusCode, 401)
+  assert.equal(response.headers.Location, undefined)
+})
+
+test('PikPak attachment HTTP sources are redirected only as HTTPS after authorization', async () => {
+  process.env.PIKPAK_PAT = 'test-pikpak-token-signing-key'
+  process.env.CLOUD_PASSWORD = 'visitor-password'
+  process.env.UPSTASH_REDIS_REST_URL = 'https://redis.test'
+  process.env.UPSTASH_REDIS_REST_TOKEN = 'test-redis-token'
+  resetFixtures()
+  setGlobal('locked')
+  setFolder('public-folder', 'public')
+  pikpakItems.set('public-file', { id: 'public-file', kind: 'drive#file', parent_id: 'public-folder',
+    links: { 'application/octet-stream': { url: 'http://cdn.example/photo.png?signature=temporary' } },
+    web_content_link: 'http://cdn.example/photo.png?signature=temporary' })
+  let response = await invoke(downloadHandler, { query: { id: 'public-file', parentId: 'public-folder' } })
+  assert.equal(response.statusCode, 302)
+  assert.equal(response.headers.Location, 'https://cdn.example/photo.png?signature=temporary')
   setFile('public-file', 'locked')
   response = await invoke(downloadHandler, { query: { id: 'public-file', parentId: 'public-folder' } })
   assert.equal(response.statusCode, 401)
