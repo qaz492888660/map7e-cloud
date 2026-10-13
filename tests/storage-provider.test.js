@@ -773,6 +773,52 @@ await test('preflight cancellation during metadata retry backoff never starts a 
   }
 })
 
+await test('preflight cancellation aborts owned global, folder and file policy-store reads promptly', async () => {
+  const fixtureFetch = globalThis.fetch
+  try {
+    for (const check of ['download', 'range']) for (const stage of ['global', 'folder', 'file']) for (const event of ['aborted', 'close']) {
+      const id = `cancel-policy-${check}-${stage}-${event}`
+      const { request, target, info } = await cancelledDownloadFixture(id)
+      request.query.check = check
+      if (stage === 'folder') {
+        const parentId = `parent-${id}`
+        request.query.parentId = parentId
+        info.data.file_info.pdir_fid = parentId
+        await writeConfig({ version: 1, defaultStorageId: 'quark-main', instances: [
+          { storageId: 'quark-main', provider: 'quark', displayName: 'Quark', enabled: true, rootFolderId: parentId },
+        ] })
+      }
+      const begun = Promise.withResolvers()
+      let policySignal, policyReads = 0
+      globalThis.fetch = async (url, options = {}) => {
+        if (String(url).startsWith('https://redis.test')) {
+          const commands = JSON.parse(options.body)
+          const matches = commands.some(([op, key]) => op === 'GET' && (stage === 'global'
+            ? key === 'map7e-cloud:global-access:v1' : key.includes(`:${stage}:v1:`)))
+          if (matches) {
+            policySignal = options.signal
+            policyReads += 1
+            begun.resolve()
+            return new Promise((resolve, reject) => options.signal.addEventListener('abort', () => reject(new Error('private Redis transport failure')), { once: true }))
+          }
+        }
+        return fixtureFetch(url, options)
+      }
+      upstream = async url => { assert.equal(url.pathname, '/open/v1/file/info'); return info }
+      const pending = storageDownload(request, target)
+      await begun.promise
+      if (event === 'aborted') request.emit(event)
+      else target.emit(event)
+      await settlesPromptly(pending)
+      assertCancelledDownload(request, target)
+      assert.equal(policySignal.aborted, true)
+      assert.equal(policyReads, 1)
+      assert.equal(calls.some(call => /get_download_url|rotate/.test(call.url.pathname) || call.url.hostname === 'media.map7e.com'), false)
+      globalThis.fetch = fixtureFetch
+    }
+  } finally { globalThis.fetch = fixtureFetch }
+})
+
 await test('download cancellation: pending source reads abort without retry or credential rotation', async () => {
   for (const event of ['aborted', 'close']) {
     const { request, target, info } = await cancelledDownloadFixture(`cancel-source-${event}`)
