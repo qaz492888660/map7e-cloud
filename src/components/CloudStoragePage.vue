@@ -1,10 +1,14 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import CloudCategoryIcon from './CloudCategoryIcon.vue'
+import { QUARK_FILE_SIZE_LIMIT, quarkDownloadLimitMessage } from '../../lib/storage/quark-download-limit.js'
+import { loadRawEmbeddedPreview } from '../media/raw-preview-client.js'
 
 const BLOG_VIDEO_URL = 'https://blog.map7e.com/videos/underwater.mp4'
 const TEXT_EXTENSIONS = ['txt', 'md', 'markdown', 'json', 'csv', 'xml', 'yaml', 'yml', 'log', 'ini']
 const RAW_IMAGE_EXTENSIONS = ['dng', 'cr2', 'cr3', 'nef', 'arw', 'rw2', 'orf', 'raf', 'pef']
+// User-facing playback cap: 50 decimal MB, below Quark's 50 MiB upstream ceiling.
+const MAX_INLINE_VIDEO_BYTES = 50_000_000
 const IMAGE_EXTENSIONS = ['jpg', 'jpeg', 'png', 'webp', 'gif', 'avif', 'svg', ...RAW_IMAGE_EXTENSIONS]
 const BROWSER_PREVIEW_IMAGE_EXTENSIONS = new Set(['jpg', 'jpeg', 'png', 'webp', 'gif', 'avif', 'svg'])
 const VIDEO_EXTENSIONS = ['mp4', 'webm', 'mov', 'm4v']
@@ -82,11 +86,27 @@ const viewerIndex = ref(-1)
 const viewerScale = ref(1)
 const viewerDimensions = ref('')
 const viewerError = ref('')
+const viewerErrorCode = ref('')
+const viewerLoading = ref(false)
+const viewerNotice = ref('')
+const viewerLowResolution = ref(false)
+const viewerPan = ref({ x: 0, y: 0 })
+const viewerStage = ref(null)
+const viewerMediaEvidence = ref([])
+let viewerGeneration = 0
+let viewerRawController = null
+let viewerLoadTimer = null
+let viewerObjectUrl = null
+let viewerDrag = null
+const rawPreviewCache = new Map()
 const previewFile = ref(null)
 const previewMode = ref('')
 const previewText = ref('')
 const previewLoading = ref(false)
 const previewError = ref('')
+const previewErrorCode = ref('')
+let previewGeneration = 0
+let previewProbeController = null
 const selectedAction = ref(null)
 const managementDialog = ref('')
 const managementItem = ref(null)
@@ -280,6 +300,29 @@ function formatDate(value) {
   if (!value) return ''
   const text = String(value)
   return /^\d{4}-\d{2}-\d{2}/.test(text) ? text.slice(0, 10) : ''
+}
+
+function inlineMediaPath(file) {
+  const provider = storageProviders.value.find((storage) => storage.id === file?.storageId)?.provider
+  if (provider !== 'quark' || !file?.path) return file?.path || ''
+  const url = new URL(file.path, window.location.origin)
+  url.searchParams.set('inline', '1')
+  return url.pathname + url.search
+}
+
+function isQuarkMedia(file) {
+  return storageProviders.value.find((storage) => storage.id === file?.storageId)?.provider === 'quark'
+}
+
+function mediaProviderReady(file) {
+  const message = '网盘信息尚未加载，暂不能预览或下载。请稍后重试或刷新页面。'
+  const provider = storageProviders.value.find((storage) => storage.id === file?.storageId)?.provider
+  if (provider !== 'quark' && provider !== 'pikpak') {
+    errorMessage.value = message
+    return false
+  }
+  if (errorMessage.value === message) errorMessage.value = ''
+  return true
 }
 
 function normalizePikPakItem(file, storageId = activeStorageId.value) {
@@ -715,6 +758,7 @@ async function switchStorage(event) {
   rootFolders.value = []; rootFiles.value = []; folderMap.value = {}; directoryMetadata.value = {}; manifestUpdatedAt.value = ''
   quotaError.value = ''
   closePhotoViewer(); closePreview(); selectedAction.value = null; managementDialog.value = ''; goHome()
+  rawPreviewCache.clear()
   const url = new URL(location.href); url.searchParams.set('storageId', activeStorageId.value); url.searchParams.delete('folderId'); history.replaceState(null, '', url)
   const generation = storageLoadGeneration
   void loadStorageAbout(activeStorageId.value, generation)
@@ -1264,51 +1308,219 @@ async function loginCloud() {
 }
 
 function openPhotoViewer(file, items) {
+  if (!mediaProviderReady(file)) return
   viewerItems.value = items.map((item) => {
     const rawPreview = isRawImageFile(item)
     return {
       ...item,
       rawPreview,
-      viewerSource: rawPreview ? (item.previewPath || '') : (isBrowserPreviewImage(item) ? item.path : ''),
+      viewerSource: rawPreview ? (item.previewPath || '') : (isBrowserPreviewImage(item) ? inlineMediaPath(item) : ''),
     }
   })
   viewerIndex.value = Math.max(0, viewerItems.value.findIndex((item) => item.path === file.path))
+  prepareViewerImage()
+}
+
+function resetViewerTransform() {
   viewerScale.value = 1
+  viewerPan.value = { x: 0, y: 0 }
+  viewerDrag = null
+  touchOrigin = null
+}
+
+function cancelViewerLoad() {
+  viewerGeneration++
+  viewerRawController?.abort()
+  viewerRawController = null
+  clearTimeout(viewerLoadTimer)
+  if (viewerObjectUrl) URL.revokeObjectURL(viewerObjectUrl)
+  viewerObjectUrl = null
+}
+
+function prepareViewerImage() {
+  cancelViewerLoad()
+  resetViewerTransform()
   viewerDimensions.value = ''
   viewerError.value = ''
+  viewerErrorCode.value = ''
+  viewerNotice.value = ''
+  viewerLowResolution.value = false
+  viewerMediaEvidence.value = []
+  viewerLoading.value = Boolean(viewerImage.value?.viewerSource)
+  const generation = viewerGeneration
+  if (viewerImage.value?.rawPreview && !viewerImage.value.viewerSource) void enhanceRawPreview(viewerImage.value)
+  else viewerLoadTimer = setTimeout(() => {
+    if (generation !== viewerGeneration) return
+    viewerLoading.value = false
+    viewerError.value = '图片加载超时，请关闭后重试或下载原文件。'
+  }, 30000)
+}
+
+function canExtractRawPreview(file) {
+  return isQuarkMedia(file) && Number.isSafeInteger(file?.sizeBytes) && file.sizeBytes >= 8 && file.sizeBytes <= 50 * 1024 ** 2
+}
+
+async function enhanceRawPreview(file) {
+  if (file.rawAttempted) return
+  file.rawAttempted = true
+  // The current authorized gateway has a tested RAW source path for Quark.
+  // Other Providers retain their own rendered preview without speculative reads.
+  if (!canExtractRawPreview(file)) return
+  const generation = viewerGeneration
+  const controller = new AbortController()
+  viewerRawController = controller
+  viewerLoading.value = true
+  clearTimeout(viewerLoadTimer)
+  const cacheKey = [file.path, file.modifiedAt || '', file.sizeBytes].join('|')
+  const current = () => generation === viewerGeneration && viewerImage.value?.path === file.path
+  try {
+    let result = rawPreviewCache.get(cacheKey)
+    if (result && Date.now() - result.cachedAt < 5 * 60 * 1000) {
+      const checkUrl = new URL('/api/storage-preview', window.location.origin)
+      const source = new URL(file.path, window.location.origin)
+      for (const key of ['storageId', 'id', 'parentId']) checkUrl.searchParams.set(key, source.searchParams.get(key) || '')
+      checkUrl.searchParams.set('check', 'read')
+      checkUrl.searchParams.set('variant', 'preview')
+      const timeout = setTimeout(() => controller.abort(), 15000)
+      try {
+        const response = await fetch(checkUrl.pathname + checkUrl.search, { cache: 'no-store', signal: controller.signal })
+        const body = await response.json().catch(() => ({}))
+        if (!response.ok || body.ok !== true) {
+          rawPreviewCache.delete(cacheKey)
+          throw new Error(response.status === 401 || response.status === 403 || response.status === 404 || response.status === 409 ? 'raw_preview_authorization_failed' : 'raw_preview_unavailable')
+        }
+      } finally { clearTimeout(timeout) }
+    } else {
+      rawPreviewCache.delete(cacheKey)
+      result = await loadRawEmbeddedPreview(file, { signal: controller.signal })
+      if (!current()) return
+      rawPreviewCache.set(cacheKey, { ...result, cachedAt: Date.now() })
+      let bytes = [...rawPreviewCache.values()].reduce((total, item) => total + item.buffer.byteLength, 0)
+      while (rawPreviewCache.size > 6 || bytes > 24 * 1024 ** 2) {
+        const key = rawPreviewCache.keys().next().value
+        bytes -= rawPreviewCache.get(key).buffer.byteLength
+        rawPreviewCache.delete(key)
+      }
+    }
+    if (!current() || controller.signal.aborted) return
+    const natural = viewerDimensions.value.split(' × ').map(Number)
+    if (natural.length === 2 && result.width * result.height <= natural[0] * natural[1]) {
+      viewerNotice.value = '已显示可获得的最大预览；此 RAW 未包含更清晰的 JPEG。'
+      viewerLoading.value = false
+      return
+    }
+    viewerObjectUrl = URL.createObjectURL(new Blob([result.buffer], { type: 'image/jpeg' }))
+    file.viewerSource = viewerObjectUrl
+    file.embeddedPreview = true
+    viewerMediaEvidence.value = result.evidence || []
+    viewerError.value = ''
+    viewerNotice.value = 'RAW 内嵌 JPEG 预览'
+    // A corrupt/unsupported JPEG must still terminate loading.
+    viewerLoadTimer = setTimeout(() => {
+      if (!current()) return
+      viewerLoading.value = false
+      viewerError.value = '内嵌预览无法显示，可以下载原文件查看。'
+    }, 15000)
+  } catch (error) {
+    if (!current()) return
+    if (viewerErrorCode.value === QUARK_FILE_SIZE_LIMIT) return
+    viewerLoading.value = false
+    if (error.message === 'raw_preview_authorization_failed') {
+      viewerError.value = '文件授权已失效或不允许访问，请重新进入有权限的目录。'
+      viewerDimensions.value = ''
+    } else {
+      viewerNotice.value = error.message === 'raw_preview_size_limit'
+        ? '此 RAW 超出本地预览处理范围；可下载原文件查看。'
+        : '暂未取得更高清的 RAW 预览；可下载原文件查看。'
+      if (!file.viewerSource) viewerError.value = '该 RAW 格式暂无可用预览。'
+    }
+  } finally {
+    if (current()) viewerRawController = null
+  }
 }
 
 function closePhotoViewer() {
+  cancelViewerLoad()
   viewerIndex.value = -1
   viewerItems.value = []
   viewerScale.value = 1
   viewerDimensions.value = ''
   viewerError.value = ''
+  viewerErrorCode.value = ''
+  viewerLoading.value = false
+  resetViewerTransform()
 }
 
 function movePhoto(direction) {
   if (viewerItems.value.length < 2) return
   const length = viewerItems.value.length
   viewerIndex.value = (viewerIndex.value + direction + length) % length
-  viewerScale.value = 1
-  viewerDimensions.value = ''
-  viewerError.value = ''
+  // Object URLs are scoped to the displayed photo, cached bytes are reauthorized.
+  const file = viewerImage.value
+  if (file.rawPreview) { file.viewerSource = file.previewPath || ''; file.rawAttempted = false; file.embeddedPreview = false }
+  prepareViewerImage()
 }
 
 function handleViewerImageLoad(event) {
+  if (viewerErrorCode.value === QUARK_FILE_SIZE_LIMIT) return
   const image = event.target
+  if (image.getAttribute('src') !== viewerImage.value?.viewerSource) return
+  clearTimeout(viewerLoadTimer)
   viewerDimensions.value = image.naturalWidth + ' × ' + image.naturalHeight
   viewerError.value = ''
+  viewerLowResolution.value = Math.max(image.naturalWidth, image.naturalHeight) < 1024
+  viewerLoading.value = false
+  if (viewerImage.value?.rawPreview && !viewerImage.value.embeddedPreview && Math.max(image.naturalWidth, image.naturalHeight) < 1600) {
+    void enhanceRawPreview(viewerImage.value)
+  }
 }
 
 function handleViewerImageError() {
+  if (viewerErrorCode.value === QUARK_FILE_SIZE_LIMIT) return
+  clearTimeout(viewerLoadTimer)
+  viewerLoading.value = false
+  if (viewerImage.value?.rawPreview && canExtractRawPreview(viewerImage.value) && !viewerImage.value.rawAttempted) {
+    void enhanceRawPreview(viewerImage.value)
+    return
+  }
   viewerError.value = viewerImage.value?.rawPreview
     ? 'RAW 预览图暂时无法加载，请稍后重试或下载原文件。'
     : '图片暂时无法加载。'
 }
 
 function toggleZoom() {
-  viewerScale.value = viewerScale.value > 1 ? 1 : 2
+  if (viewerScale.value > 1) resetViewerTransform()
+  else setViewerScale(2)
+}
+
+function clampViewerPan(x, y) {
+  const image = viewerStage.value?.querySelector('.viewer-image')
+  if (!image || viewerScale.value <= 1) return { x: 0, y: 0 }
+  const limitX = Math.max(0, (image.clientWidth * viewerScale.value - viewerStage.value.clientWidth) / 2)
+  const limitY = Math.max(0, (image.clientHeight * viewerScale.value - viewerStage.value.clientHeight) / 2)
+  return { x: Math.max(-limitX, Math.min(limitX, x)), y: Math.max(-limitY, Math.min(limitY, y)) }
+}
+
+function setViewerScale(value) {
+  viewerScale.value = Math.min(8, Math.max(1, value))
+  viewerPan.value = clampViewerPan(viewerPan.value.x, viewerPan.value.y)
+}
+
+function handleViewerWheel(event) {
+  if (viewerError.value || viewerLoading.value) return
+  event.preventDefault()
+  setViewerScale(viewerScale.value * (event.deltaY < 0 ? 1.2 : 1 / 1.2))
+}
+
+function startViewerDrag(event) {
+  if (event.button !== 0 || viewerScale.value <= 1) return
+  event.preventDefault()
+  viewerDrag = { x: event.clientX, y: event.clientY, panX: viewerPan.value.x, panY: viewerPan.value.y }
+}
+
+function moveViewerDrag(event) {
+  if (!viewerDrag) return
+  viewerPan.value = clampViewerPan(viewerDrag.panX + event.clientX - viewerDrag.x, viewerDrag.panY + event.clientY - viewerDrag.y)
 }
 
 function distanceBetweenTouches(touches) {
@@ -1323,6 +1535,7 @@ function handleViewerTouchStart(event) {
       pinch: true,
       distance: distanceBetweenTouches(event.touches),
       scale: viewerScale.value,
+      pan: { ...viewerPan.value },
     }
     return
   }
@@ -1332,6 +1545,7 @@ function handleViewerTouchStart(event) {
       x: event.touches[0].clientX,
       y: event.touches[0].clientY,
       scale: viewerScale.value,
+      pan: { ...viewerPan.value },
     }
   }
 }
@@ -1340,7 +1554,10 @@ function handleViewerTouchMove(event) {
   if (event.touches.length >= 2 && touchOrigin?.pinch) {
     event.preventDefault()
     const nextScale = touchOrigin.scale * distanceBetweenTouches(event.touches) / Math.max(1, touchOrigin.distance)
-    viewerScale.value = Math.min(4, Math.max(1, nextScale))
+    setViewerScale(nextScale)
+  } else if (event.touches.length === 1 && touchOrigin && !touchOrigin.pinch && viewerScale.value > 1) {
+    event.preventDefault()
+    viewerPan.value = clampViewerPan(touchOrigin.pan.x + event.touches[0].clientX - touchOrigin.x, touchOrigin.pan.y + event.touches[0].clientY - touchOrigin.y)
   }
 }
 
@@ -1348,6 +1565,10 @@ function handleViewerTouchEnd(event) {
   if (!touchOrigin) return
   const origin = touchOrigin
   touchOrigin = null
+  if (event.touches?.length === 1 && viewerScale.value > 1) {
+    handleViewerTouchStart(event)
+    return
+  }
   if (origin.pinch || event.changedTouches.length === 0 || origin.scale > 1.05) return
   const dx = event.changedTouches[0].clientX - origin.x
   const dy = event.changedTouches[0].clientY - origin.y
@@ -1355,14 +1576,20 @@ function handleViewerTouchEnd(event) {
 }
 
 async function openFile(file) {
+  if (!mediaProviderReady(file)) return
+  const generation = ++previewGeneration
+  previewProbeController?.abort()
+  previewProbeController = null
+  const isCurrentPreview = () => generation === previewGeneration && previewFile.value?.path === file.path
   if (isImageFile(file)) {
     openPhotoViewer(file, [file])
     return
   }
 
-  previewFile.value = file
+  previewFile.value = { ...file, inlinePath: inlineMediaPath(file) }
   previewText.value = ''
   previewError.value = ''
+  previewErrorCode.value = ''
   previewLoading.value = false
   if (file.extension === 'pdf') {
     previewMode.value = 'pdf'
@@ -1370,16 +1597,33 @@ async function openFile(file) {
   }
   if (file.type === 'video' || VIDEO_EXTENSIONS.includes(file.extension)) {
     previewMode.value = 'video'
+    // Quark requires a known size <= 50 MB before a Range probe; PikPak keeps its existing flow.
+    if (isQuarkMedia(file) && (!Number.isFinite(file.sizeBytes) || file.sizeBytes < 0)) {
+      previewError.value = '无法确认视频大小，暂不支持在线播放（仅开放不超过 50 MB 的视频）。'
+      return
+    }
+    if (isQuarkMedia(file) && file.sizeBytes > MAX_INLINE_VIDEO_BYTES) {
+      previewError.value = '视频超过 50 MB，暂不支持在线播放。'
+      return
+    }
     previewLoading.value = true
+    const controller = new AbortController()
+    previewProbeController = controller
     try {
       const checkUrl = new URL(file.path, window.location.origin)
       checkUrl.searchParams.set('check', 'range')
-      const response = await fetch(checkUrl.pathname + checkUrl.search, { cache: 'no-store' })
+      const response = await fetch(checkUrl.pathname + checkUrl.search, { cache: 'no-store', signal: controller.signal })
       let data = {}
       try { data = await response.json() } catch { data = {} }
+      if (!isCurrentPreview()) return
       if (!response.ok || data.ok !== true) {
-        if (data.error === 'storage_range_probe_failed') {
+        previewErrorCode.value = data.error || ''
+        if (data.error === QUARK_FILE_SIZE_LIMIT) {
+          previewError.value = quarkDownloadLimitMessage(data.limitBytes)
+        } else if (data.error === 'storage_range_probe_failed') {
           previewError.value = '网络连接失败，无法确认视频能否分段播放。请稍后重试或下载原文件。'
+        } else if (data.error === 'storage_range_probe_timeout') {
+          previewError.value = '视频分段读取检查超时。请稍后重试。'
         } else {
           previewError.value = '获取网盘播放地址失败。请稍后重试或下载原文件。'
         }
@@ -1387,9 +1631,13 @@ async function openFile(file) {
         previewError.value = '当前网盘未提供有效的 Range 分段读取，无法可靠播放大视频。你可以下载原文件。'
       }
     } catch {
+      if (!isCurrentPreview()) return
       previewError.value = '网络连接失败，无法确认视频播放地址。请稍后重试或下载原文件。'
     } finally {
-      previewLoading.value = false
+      if (isCurrentPreview()) {
+        previewLoading.value = false
+        if (previewProbeController === controller) previewProbeController = null
+      }
     }
     return
   }
@@ -1400,6 +1648,7 @@ async function openFile(file) {
       const response = await fetch(file.path)
       if (!response.ok) throw new Error('文件暂时无法预览。')
       const text = await response.text()
+      if (!isCurrentPreview()) return
       if (text.length > 600000) throw new Error('文件内容较大，请下载后查看。')
       if (file.extension === 'json') {
         try {
@@ -1411,9 +1660,10 @@ async function openFile(file) {
         previewText.value = text
       }
     } catch (error) {
+      if (!isCurrentPreview()) return
       previewError.value = error instanceof Error ? error.message : '文件暂时无法预览。'
     } finally {
-      previewLoading.value = false
+      if (isCurrentPreview()) previewLoading.value = false
     }
     return
   }
@@ -1429,10 +1679,63 @@ function handleVideoError(event) {
 }
 
 function closePreview() {
+  previewGeneration += 1
+  previewProbeController?.abort()
+  previewProbeController = null
+  previewLoading.value = false
   previewFile.value = null
   previewMode.value = ''
   previewText.value = ''
   previewError.value = ''
+  previewErrorCode.value = ''
+}
+
+async function handleFileDownload(event, file) {
+  if (!mediaProviderReady(file)) {
+    event.preventDefault()
+    closeItemActions()
+    return
+  }
+  if ((viewerImage.value?.path === file.path && viewerErrorCode.value === QUARK_FILE_SIZE_LIMIT)
+    || (previewFile.value?.path === file.path && previewErrorCode.value === QUARK_FILE_SIZE_LIMIT)) {
+    event.preventDefault()
+    closeItemActions()
+    return
+  }
+  // Preserve ordinary small-file downloads. Larger or unknown Quark files
+  // need an actual upstream check; file size alone never rejects a download.
+  if (!isQuarkMedia(file) || (Number.isFinite(file.sizeBytes) && file.sizeBytes <= 50 * 1024 ** 2)) {
+    closeItemActions()
+    return
+  }
+  event.preventDefault()
+  try {
+    const checkUrl = new URL(file.path, window.location.origin)
+    checkUrl.searchParams.set('check', 'download')
+    const response = await fetch(checkUrl.pathname + checkUrl.search, { cache: 'no-store' })
+    const data = await response.json().catch(() => ({}))
+    if (!response.ok || data.ok !== true) {
+      const message = data.error === QUARK_FILE_SIZE_LIMIT
+        ? quarkDownloadLimitMessage(data.limitBytes)
+        : '获取网盘下载地址失败，请稍后重试。'
+      if (viewerImage.value?.path === file.path) {
+        viewerError.value = message
+        viewerErrorCode.value = data.error || ''
+      }
+      if (previewFile.value?.path === file.path) {
+        previewError.value = message
+        previewErrorCode.value = data.error || ''
+      }
+      errorMessage.value = message
+      closeItemActions()
+      return
+    }
+    closeItemActions()
+    window.location.assign(file.path)
+  } catch {
+    errorMessage.value = '网络连接失败，无法获取下载地址。请稍后重试。'
+    closeItemActions()
+  }
 }
 
 function handleKeydown(event) {
@@ -1455,6 +1758,10 @@ function handleKeydown(event) {
 
 watch(modalOpen, (open) => {
   if (typeof document !== 'undefined') document.body.classList.toggle('modal-open', open)
+})
+
+watch(authRequired, (required) => {
+  if (required) { closePhotoViewer(); rawPreviewCache.clear() }
 })
 
 function scheduleBackgroundVideo() {
@@ -1498,6 +1805,8 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
+  cancelViewerLoad()
+  rawPreviewCache.clear()
   window.removeEventListener('keydown', handleKeydown)
   document.body.classList.remove('modal-open')
 })
@@ -1980,7 +2289,7 @@ onBeforeUnmount(() => {
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6" /></svg>
             </button>
             <span class="viewer-counter">{{ photoCounter }}</span>
-            <a class="viewer-icon-button" :href="viewerImage.path" :download="viewerImage.name" :aria-label="'下载原图 ' + viewerImage.name">
+            <a v-if="viewerErrorCode !== QUARK_FILE_SIZE_LIMIT" class="viewer-icon-button" :href="viewerImage.path" :download="viewerImage.name" :aria-label="'下载原图 ' + viewerImage.name" @click="handleFileDownload($event, viewerImage)">
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.5v11m0 0 4-4m-4 4-4-4M5 17v3h14v-3" /></svg>
             </a>
           </header>
@@ -1988,26 +2297,27 @@ onBeforeUnmount(() => {
           <button v-if="viewerItems.length > 1" class="viewer-arrow viewer-arrow--left" type="button" aria-label="上一张" @click="movePhoto(-1)">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6" /></svg>
           </button>
-          <div class="viewer-stage" @touchstart="handleViewerTouchStart" @touchmove="handleViewerTouchMove" @touchend="handleViewerTouchEnd">
-            <div v-if="viewerImage.rawPreview && !viewerImage.viewerSource" class="preview-message">
+          <div ref="viewerStage" class="viewer-stage" :class="{ 'viewer-stage--zoomed': viewerScale > 1 }" :data-media-evidence="viewerMediaEvidence.length ? JSON.stringify(viewerMediaEvidence) : undefined" @touchstart="handleViewerTouchStart" @touchmove="handleViewerTouchMove" @touchend="handleViewerTouchEnd" @touchcancel="touchOrigin = null" @wheel="handleViewerWheel" @mousedown="startViewerDrag" @mousemove="moveViewerDrag" @mouseup="viewerDrag = null" @mouseleave="viewerDrag = null" @dblclick="toggleZoom">
+            <div v-if="viewerError" class="preview-message">
+              <strong>{{ viewerError }}</strong>
+              <a v-if="viewerErrorCode !== QUARK_FILE_SIZE_LIMIT" class="primary-download" :href="viewerImage.path" :download="viewerImage.name" @click="handleFileDownload($event, viewerImage)">下载原文件</a>
+            </div>
+            <div v-else-if="viewerImage.rawPreview && !viewerImage.viewerSource && !viewerLoading" class="preview-message">
               <strong>该 RAW 格式暂无可用预览</strong>
               <span>可以下载原文件后查看。</span>
-              <a class="primary-download" :href="viewerImage.path" :download="viewerImage.name">下载原文件</a>
-            </div>
-            <div v-else-if="viewerError" class="preview-message">
-              <strong>{{ viewerError }}</strong>
-              <a class="primary-download" :href="viewerImage.path" :download="viewerImage.name">下载原文件</a>
+              <a class="primary-download" :href="viewerImage.path" :download="viewerImage.name" @click="handleFileDownload($event, viewerImage)">下载原文件</a>
             </div>
             <img
-              v-else
+              v-else-if="viewerImage.viewerSource"
               :key="viewerImage.path"
               class="viewer-image"
               :src="viewerImage.viewerSource"
               :alt="viewerImage.name"
-              :style="{ transform: 'scale(' + viewerScale + ')' }"
+              :style="{ transform: 'translate(' + viewerPan.x + 'px, ' + viewerPan.y + 'px) scale(' + viewerScale + ')' }"
               @load="handleViewerImageLoad"
               @error="handleViewerImageError"
             />
+            <span v-if="viewerLoading" class="viewer-loading" role="status">{{ viewerImage.rawPreview ? '正在读取清晰预览…' : '正在加载图片…' }}</span>
           </div>
           <button v-if="viewerItems.length > 1" class="viewer-arrow viewer-arrow--right" type="button" aria-label="下一张" @click="movePhoto(1)">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6" /></svg>
@@ -2018,14 +2328,17 @@ onBeforeUnmount(() => {
               <strong class="viewer-filename">{{ viewerImage.name }}</strong>
               <span class="viewer-metadata">
                 <span v-if="viewerDimensions">{{ viewerDimensions }}</span>
-                <span v-if="viewerImage.rawPreview">RAW 预览</span>
+                <span v-if="viewerImage.rawPreview">{{ viewerNotice || 'RAW 预览' }}</span>
+                <span v-if="viewerLowResolution && !viewerLoading" class="viewer-quality-note">低清预览 · 放大不会增加细节</span>
                 <span v-if="viewerImage.sizeBytes !== null">{{ fileSizeLabel(viewerImage) }}</span>
                 <span v-if="dateLabel(viewerImage.date)">{{ viewerImage.date }}</span>
               </span>
             </div>
-            <button class="zoom-button" type="button" :aria-label="viewerScale > 1 ? '缩小图片' : '放大图片'" @click="toggleZoom">
-              <span>{{ viewerScale > 1 ? '适合屏幕' : '放大' }}</span>
-            </button>
+            <div class="viewer-zoom-controls">
+              <button class="zoom-button" type="button" aria-label="缩小图片" :disabled="viewerScale <= 1 || viewerLoading || !!viewerError" @click="setViewerScale(viewerScale / 1.5)">−</button>
+              <button class="zoom-button" type="button" aria-label="图片适合屏幕" @click="resetViewerTransform">{{ viewerScale === 1 ? '适屏' : Math.round(viewerScale * 100) + '%' }}</button>
+              <button class="zoom-button" type="button" aria-label="放大图片" :disabled="viewerScale >= 8 || viewerLoading || !!viewerError" @click="setViewerScale(viewerScale * 1.5)">＋</button>
+            </div>
           </footer>
         </div>
       </div>
@@ -2039,22 +2352,22 @@ onBeforeUnmount(() => {
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6" /></svg>
             </button>
             <div class="preview-heading"><strong>{{ previewFile.name }}</strong><span>{{ fileTypeLabel(previewFile) }} · {{ fileSizeLabel(previewFile) }}</span></div>
-            <a class="viewer-icon-button" :href="previewFile.path" :download="previewFile.name" :aria-label="'下载 ' + previewFile.name">
+            <a v-if="previewErrorCode !== QUARK_FILE_SIZE_LIMIT" class="viewer-icon-button" :href="previewFile.path" :download="previewFile.name" :aria-label="'下载 ' + previewFile.name" @click="handleFileDownload($event, previewFile)">
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.5v11m0 0 4-4m-4 4-4-4M5 17v3h14v-3" /></svg>
             </a>
           </header>
           <div v-if="previewLoading" class="preview-message">{{ previewMode === 'video' ? '正在检查视频流…' : '正在打开文件…' }}</div>
           <div v-else-if="previewError" class="preview-message">
             <strong>{{ previewError }}</strong>
-            <a class="primary-download" :href="previewFile.path" :download="previewFile.name">下载原文件</a>
+            <a v-if="previewErrorCode !== QUARK_FILE_SIZE_LIMIT" class="primary-download" :href="previewFile.path" :download="previewFile.name" @click="handleFileDownload($event, previewFile)">下载原文件</a>
           </div>
-          <iframe v-else-if="previewMode === 'pdf'" class="pdf-preview" :src="previewFile.path" :title="previewFile.name" />
-          <video v-else-if="previewMode === 'video'" class="file-video-preview" :src="previewFile.path" controls playsinline preload="metadata" @error="handleVideoError" />
+          <iframe v-else-if="previewMode === 'pdf'" class="pdf-preview" :src="previewFile.inlinePath || previewFile.path" :title="previewFile.name" />
+          <video v-else-if="previewMode === 'video'" class="file-video-preview" :src="previewFile.inlinePath || previewFile.path" :crossorigin="isQuarkMedia(previewFile) ? 'use-credentials' : undefined" controls playsinline preload="metadata" @error="handleVideoError" />
           <pre v-else-if="previewMode === 'text'" class="text-preview">{{ previewText }}</pre>
           <div v-else class="preview-message">
             <strong>这个格式暂不支持站内预览</strong>
             <span>你可以下载原文件后查看。</span>
-            <a class="primary-download" :href="previewFile.path" :download="previewFile.name">下载原文件</a>
+            <a class="primary-download" :href="previewFile.path" :download="previewFile.name" @click="handleFileDownload($event, previewFile)">下载原文件</a>
           </div>
         </div>
       </div>
@@ -2069,7 +2382,7 @@ onBeforeUnmount(() => {
           <button class="sheet-action" type="button" @click="chooseItemAction('open')">
             {{ selectedAction.item.isFolder ? '打开' : (selectedAction.source === 'albums' ? '查看' : '预览') }}
           </button>
-          <a v-if="!selectedAction.item.isFolder" class="sheet-action" :href="selectedAction.item.path" :download="selectedAction.item.name" @click="closeItemActions">下载</a>
+          <a v-if="!selectedAction.item.isFolder" class="sheet-action" :href="selectedAction.item.path" :download="selectedAction.item.name" @click="handleFileDownload($event, selectedAction.item)">下载</a>
           <button v-if="selectedAction.writable && activeCapabilities.rename" class="sheet-action" type="button" @click="chooseItemAction('rename')">重命名</button>
           <button v-if="selectedAction.writable && activeCapabilities.trash" class="sheet-action sheet-action--danger" type="button" @click="chooseItemAction('trash')">删除</button>
           <button class="sheet-cancel" type="button" @click="closeItemActions">取消</button>
@@ -3470,6 +3783,7 @@ main {
 }
 
 .viewer-stage {
+  position: relative;
   display: grid;
   min-height: 0;
   flex: 1;
@@ -3479,14 +3793,22 @@ main {
   touch-action: none;
 }
 
+.viewer-stage--zoomed { cursor: grab; }
+.viewer-stage--zoomed:active { cursor: grabbing; }
+.viewer-loading { position: absolute; bottom: 24px; padding: 9px 14px; border-radius: 18px; background: rgba(8, 25, 39, 0.88); color: #d9edf7; font-size: 12px; pointer-events: none; }
+.viewer-zoom-controls { display: flex; flex-shrink: 0; gap: 6px; }
+.viewer-quality-note { color: #e7c98e; }
+.zoom-button:disabled { opacity: 0.45; cursor: default; }
+
 .viewer-image {
+  width: auto;
+  height: auto;
   display: block;
   max-width: 100%;
   max-height: calc(100vh - 172px);
   max-height: calc(100dvh - 172px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px));
   object-fit: contain;
   transform-origin: center;
-  transition: transform 160ms ease-out;
   user-select: none;
   -webkit-user-drag: none;
 }
@@ -3853,7 +4175,10 @@ main {
 
   .viewer-details {
     gap: 10px;
+    flex-wrap: wrap;
   }
+
+  .viewer-zoom-controls { margin-left: auto; }
 
   .viewer-filename {
     max-width: 66vw;

@@ -358,6 +358,76 @@ test('direct downloads check the actual parent path and do not disclose a URL wh
   assert.equal(response.headers.Location, 'https://cdn.example/root.txt')
 })
 
+test('PikPak missing download source logs structure only after parent and access checks', async () => {
+  process.env.PIKPAK_PAT = 'test-pikpak-token-signing-key'
+  process.env.CLOUD_PASSWORD = 'visitor-password'
+  process.env.UPSTASH_REDIS_REST_URL = 'https://redis.test'
+  process.env.UPSTASH_REDIS_REST_TOKEN = 'test-redis-token'
+  resetFixtures()
+  setGlobal('locked')
+  setFolder('public-folder', 'public')
+  pikpakItems.set('public-file', { id: 'public-file', name: 'private-name', kind: 'drive#file', parent_id: 'public-folder',
+    links: { 'text/plain': { url: 'https://cdn.example/file?signature=private-signature' } } })
+  const originalWarn = console.warn, records = []
+  console.warn = value => records.push(value)
+  try {
+    let response = await invoke(downloadHandler, { query: { id: 'public-file', parentId: 'public-folder' } })
+    assert.equal(response.statusCode, 502)
+    assert.deepEqual(response.body, { ok: false, error: 'download_link_unavailable' })
+    assert.equal(JSON.parse(records[0]).reason, 'source_missing')
+    assert.deepEqual(JSON.parse(records[0]).linkTypes, ['text/plain'])
+    assert.doesNotMatch(records.join(''), /private|https|public-file|public-folder|test-pikpak-token/)
+    response = await invoke(downloadHandler, { query: { id: 'public-file', parentId: 'locked-folder' } })
+    assert.equal(response.statusCode, 404)
+    setFolder('public-folder', 'locked')
+    response = await invoke(downloadHandler, { query: { id: 'public-file', parentId: 'public-folder' } })
+    assert.equal(response.statusCode, 401)
+    assert.equal(records.length, 1, 'unauthorized or mismatched files produce no source diagnostics')
+  } finally { console.warn = originalWarn }
+})
+
+test('PikPak attachment fallback validates each URL without weakening parent or file authorization', async () => {
+  process.env.PIKPAK_PAT = 'test-pikpak-token-signing-key'
+  process.env.CLOUD_PASSWORD = 'visitor-password'
+  process.env.UPSTASH_REDIS_REST_URL = 'https://redis.test'
+  process.env.UPSTASH_REDIS_REST_TOKEN = 'test-redis-token'
+  resetFixtures()
+  setGlobal('locked')
+  setFolder('public-folder', 'public')
+  pikpakItems.set('public-file', { id: 'public-file', kind: 'drive#file', parent_id: 'public-folder',
+    links: { 'application/octet-stream': { url: 'ftp://cdn.example/original' } }, web_content_link: 'https://cdn.example/original' })
+  let response = await invoke(downloadHandler, { query: { id: 'public-file', parentId: 'public-folder' } })
+  assert.equal(response.statusCode, 302)
+  assert.equal(response.headers.Location, 'https://cdn.example/original')
+  response = await invoke(downloadHandler, { query: { id: 'public-file', parentId: 'locked-folder' } })
+  assert.equal(response.statusCode, 404)
+  assert.equal(response.headers.Location, undefined)
+  setFile('public-file', 'locked')
+  response = await invoke(downloadHandler, { query: { id: 'public-file', parentId: 'public-folder' } })
+  assert.equal(response.statusCode, 401)
+  assert.equal(response.headers.Location, undefined)
+})
+
+test('PikPak attachment HTTP sources are redirected only as HTTPS after authorization', async () => {
+  process.env.PIKPAK_PAT = 'test-pikpak-token-signing-key'
+  process.env.CLOUD_PASSWORD = 'visitor-password'
+  process.env.UPSTASH_REDIS_REST_URL = 'https://redis.test'
+  process.env.UPSTASH_REDIS_REST_TOKEN = 'test-redis-token'
+  resetFixtures()
+  setGlobal('locked')
+  setFolder('public-folder', 'public')
+  pikpakItems.set('public-file', { id: 'public-file', kind: 'drive#file', parent_id: 'public-folder',
+    links: { 'application/octet-stream': { url: 'http://cdn.example/photo.png?signature=temporary' } },
+    web_content_link: 'http://cdn.example/photo.png?signature=temporary' })
+  let response = await invoke(downloadHandler, { query: { id: 'public-file', parentId: 'public-folder' } })
+  assert.equal(response.statusCode, 302)
+  assert.equal(response.headers.Location, 'https://cdn.example/photo.png?signature=temporary')
+  setFile('public-file', 'locked')
+  response = await invoke(downloadHandler, { query: { id: 'public-file', parentId: 'public-folder' } })
+  assert.equal(response.statusCode, 401)
+  assert.equal(response.headers.Location, undefined)
+})
+
 test('admin writes require the separate administrator cookie and persist metadata', async () => {
   process.env.PIKPAK_PAT = 'test-pikpak-token-signing-key'
   process.env.CLOUD_PASSWORD = 'visitor-password'
