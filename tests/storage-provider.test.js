@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import crypto from 'node:crypto'
 import dns from 'node:dns/promises'
 import https from 'node:https'
-import { EventEmitter } from 'node:events'
+import { EventEmitter, getEventListeners } from 'node:events'
 import { Readable, Writable } from 'node:stream'
 import { seal, unseal, metadataId, writeAuth, readAuth, readConfig, writeConfig, withLock, clearStorageCachesForTests } from '../lib/storage/store.js'
 import { storageDescriptors, resolveStorage } from '../lib/storage/registry.js'
@@ -692,6 +692,14 @@ async function cancelledDownloadFixture(id) {
   const info = { status: 0, data: { file_info: { fid: id, pdir_fid: '0', file_type: 1, file_name: 'cancel.jpg' } } }
   return { request, target, info }
 }
+async function settlesPromptly(pending) {
+  let timer
+  try {
+    return await Promise.race([pending, new Promise((resolve, reject) => {
+      timer = setTimeout(() => reject(new Error('cancelled caller is still waiting for shared rotation')), 250)
+    })])
+  } finally { clearTimeout(timer) }
+}
 function assertCancelledDownload(request, target) {
   assert.equal(target.statusCode, 499)
   assert.deepEqual(target.body, { ok: false, error: request.query.check === 'range' ? 'storage_range_probe_cancelled' : 'storage_download_check_cancelled' })
@@ -844,9 +852,14 @@ await test('download cancellation: an already started rotation persists before s
   await started.promise
   request.emit('aborted')
   assert.equal(rotationSignal.aborted, false, 'rotation keeps its independent transport lifetime')
-  reply.resolve({ status: 0, data: { access_token: 'cancel-check-next-access', refresh_token: 'cancel-check-next-refresh', expires_in: 3600 } })
-  await pending
+  await settlesPromptly(pending)
   assertCancelledDownload(request, target)
+  assert.equal((await readAuth('quark-main', { fresh: true })).accessToken, 'cancel-check-access')
+  reply.resolve({ status: 0, data: { access_token: 'cancel-check-next-access', refresh_token: 'cancel-check-next-refresh', expires_in: 3600 } })
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    if ((await readAuth('quark-main', { fresh: true })).accessToken === 'cancel-check-next-access') break
+    await new Promise(resolve => setImmediate(resolve))
+  }
   const stored = await readAuth('quark-main', { fresh: true })
   assert.equal(stored.accessToken, 'cancel-check-next-access')
   assert.equal(stored.refreshToken, 'cancel-check-next-refresh')
@@ -1361,6 +1374,91 @@ await test('concurrent Quark providers wait for the winning token refresh instea
   assert.deepEqual(a, { total: 100, used: 25, free: 75 })
   assert.deepEqual(b, { total: 100, used: 25, free: 75 })
   assert.equal(rotateCount, 1)
+})
+
+await test('Quark callers cancel promptly during expiry and 401 rotation while other callers keep the shared refresh', async () => {
+  for (const trigger of ['expiry', '401']) {
+    const storageId = `quark-rotation-${trigger}`
+    const initial = { accessToken: 'rotation-old', refreshToken: 'rotation-refresh', deviceId: 'device', ...(trigger === 'expiry' ? { accessExpiresAt: 1 } : {}) }
+    await writeAuth(storageId, initial)
+    const provider = createQuarkProvider({ storageId }, initial)
+    const parent = new AbortController(), begun = Promise.withResolvers(), reply = Promise.withResolvers()
+    let rotations = 0, rotationSignal
+    calls.length = 0
+    upstream = async (url, options) => {
+      if (url.pathname.endsWith('/rotate')) {
+        rotations += 1
+        rotationSignal = options.signal
+        begun.resolve()
+        return reply.promise
+      }
+      assert.equal(url.pathname, '/open/v1/file/info')
+      if (trigger === '401' && url.searchParams.get('access_token') === initial.accessToken) return response({ status: -1 }, 401)
+      return { status: 0, data: { file_info: { fid: url.searchParams.get('fid'), pdir_fid: '0', file_type: 1, file_name: 'photo.jpg' } } }
+    }
+    const cancelled = provider.getItem('cancelled-item', { signal: parent.signal })
+    await begun.promise
+    parent.abort()
+    await assert.rejects(settlesPromptly(cancelled), error => error.code === 'quark_request_cancelled' && error.status === 499)
+    assert.equal(getEventListeners(parent.signal, 'abort').length, 0)
+    assert.equal(rotationSignal.aborted, false)
+    assert.equal((await readAuth(storageId, { fresh: true })).accessToken, initial.accessToken)
+    const remaining = provider.getItem('remaining-item')
+    reply.resolve({ status: 0, data: { access_token: 'rotation-new', refresh_token: 'rotation-next-refresh', expires_in: 7200 } })
+    assert.equal((await remaining).id, 'remaining-item')
+    assert.equal(rotations, 1)
+    assert.equal((await readAuth(storageId, { fresh: true })).refreshToken, 'rotation-next-refresh')
+    assert.equal(calls.filter(call => call.url.searchParams.get('fid') === 'cancelled-item').length, trigger === 'expiry' ? 0 : 1)
+  }
+})
+
+await test('Quark caller cancels promptly during refresh-lock polling without stopping adoption of the winner', async () => {
+  const storageId = 'quark-cancel-lock'
+  const initial = { accessToken: 'lock-old', refreshToken: 'lock-refresh', deviceId: 'device', accessExpiresAt: 1 }
+  await writeAuth(storageId, initial)
+  let releaseLock
+  const held = withLock(`refresh-${storageId}`, () => new Promise(resolve => { releaseLock = resolve }))
+  await new Promise(resolve => setImmediate(resolve))
+  const polling = Promise.withResolvers(), resume = Promise.withResolvers(), parent = new AbortController()
+  const provider = createQuarkProvider({ storageId }, initial, { sleep: async () => { polling.resolve(); await resume.promise } })
+  calls.length = 0
+  upstream = async url => {
+    assert.equal(url.pathname, '/open/v1/file/info')
+    return { status: 0, data: { file_info: { fid: url.searchParams.get('fid'), pdir_fid: '0', file_type: 1, file_name: 'photo.jpg' } } }
+  }
+  const cancelled = provider.getItem('cancelled-lock-item', { signal: parent.signal })
+  await polling.promise
+  parent.abort()
+  await assert.rejects(settlesPromptly(cancelled), error => error.code === 'quark_request_cancelled')
+  assert.equal(getEventListeners(parent.signal, 'abort').length, 0)
+  assert.equal(calls.length, 0)
+  const remaining = provider.getItem('remaining-lock-item')
+  await writeAuth(storageId, { ...initial, accessToken: 'lock-winner', refreshToken: 'lock-next-refresh', accessExpiresAt: Date.now() + 7_200_000 })
+  releaseLock()
+  await held
+  resume.resolve()
+  assert.equal((await remaining).id, 'remaining-lock-item')
+  assert.equal(calls.length, 1)
+  assert.equal((await readAuth(storageId, { fresh: true })).accessToken, 'lock-winner')
+})
+
+await test('a detached Quark rotation rejection is consumed without resuming the cancelled caller', async () => {
+  const storageId = 'quark-cancel-failed-rotation'
+  const initial = { accessToken: 'failed-old', refreshToken: 'failed-refresh', deviceId: 'device', accessExpiresAt: 1 }
+  await writeAuth(storageId, initial)
+  const begun = Promise.withResolvers(), reply = Promise.withResolvers(), parent = new AbortController()
+  const provider = createQuarkProvider({ storageId }, initial)
+  calls.length = 0
+  upstream = async url => { assert.ok(url.pathname.endsWith('/rotate')); begun.resolve(); return reply.promise }
+  const cancelled = provider.getItem('failed-item', { signal: parent.signal })
+  await begun.promise
+  parent.abort()
+  await assert.rejects(settlesPromptly(cancelled), error => error.code === 'quark_request_cancelled')
+  reply.resolve(response({ status: -1 }, 500))
+  await new Promise(resolve => setImmediate(resolve))
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal((await readAuth(storageId, { fresh: true })).accessToken, initial.accessToken)
+  assert.equal(calls.length, 1)
 })
 
 await test('Quark refresh lock waiter reads a rotation that completes after more than 20 polls', async () => {
