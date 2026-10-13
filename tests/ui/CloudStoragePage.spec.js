@@ -187,8 +187,8 @@ describe('CloudStoragePage directory loading', () => {
     expect(new URL(download.attributes('href'), location.href).searchParams.get('inline')).toBeNull()
   })
 
-  it('keeps a 30 GB video on the direct download URL after a successful Range check', async () => {
-    const fetch = mediaFetch([{ ...file('huge-video', 'archive.mp4'), extension: 'mp4', type: 'video', size: 30 * 1024 ** 3 }])
+  it('keeps a 50 MB video on the direct download URL after a successful Range check', async () => {
+    const fetch = mediaFetch([{ ...file('huge-video', 'archive.mp4'), extension: 'mp4', type: 'video', size: 50_000_000 }])
     globalThis.fetch = fetch
     wrapper = mount(CloudStoragePage, { attachTo: document.body })
     await waitFor(() => expect(wrapper.find('.ocean-data-note').text()).toContain('覆盖当前有权限读取的目录'))
@@ -209,13 +209,30 @@ describe('CloudStoragePage directory loading', () => {
 
   it('uses credentialed CORS for Quark video Range requests', async () => {
     window.history.replaceState(null, '', '/?storageId=quark-main')
-    globalThis.fetch = mediaFetch([{ ...file('quark-video', 'quark.mp4'), extension: 'mp4', type: 'video', size: 809 * 1024 ** 2 }])
+    globalThis.fetch = mediaFetch([{ ...file('quark-video', 'quark.mp4'), extension: 'mp4', type: 'video', size: 50_000_000 }])
     wrapper = mount(CloudStoragePage, { attachTo: document.body })
     await waitFor(() => expect(wrapper.find('.ocean-data-note').text()).toContain('覆盖当前有权限读取的目录'))
     await wrapper.find('.ocean-nav--main .ocean-nav-item').trigger('click')
     await wrapper.find('button[aria-label="预览 quark.mp4"]').trigger('click')
     await waitFor(() => expect(wrapper.find('.file-video-preview').exists()).toBe(true))
     expect(wrapper.find('.file-video-preview').attributes('crossorigin')).toBe('use-credentials')
+  })
+
+  it.each([
+    ['slightly over 50 MB', 50_000_001, '视频超过 50 MB'],
+    ['809 MB video', 809 * 1024 ** 2, '视频超过 50 MB'],
+    ['unknown-size video', null, '无法确认视频大小'],
+  ])('blocks %s before any Range probe or video element', async (_label, size, message) => {
+    window.history.replaceState(null, '', '/?storageId=quark-main')
+    const fetch = mediaFetch([{ ...file('blocked-video', 'blocked.mp4'), extension: 'mp4', type: 'video', size }])
+    globalThis.fetch = fetch
+    wrapper = mount(CloudStoragePage, { attachTo: document.body })
+    await waitFor(() => expect(wrapper.find('.ocean-data-note').text()).toContain('覆盖当前有权限读取的目录'))
+    await wrapper.find('.ocean-nav--main .ocean-nav-item').trigger('click')
+    await wrapper.find('button[aria-label="预览 blocked.mp4"]').trigger('click')
+    expect(wrapper.find('.preview-overlay').text()).toContain(message)
+    expect(wrapper.find('.file-video-preview').exists()).toBe(false)
+    expect(fetch.mock.calls.filter(([input]) => new URL(input, location.href).searchParams.get('check') === 'range')).toHaveLength(0)
   })
 
   async function openDeferredVideos() {
@@ -297,7 +314,7 @@ describe('CloudStoragePage directory loading', () => {
   })
 
   it('shows the Provider Range limitation and keeps the original download available', async () => {
-    globalThis.fetch = mediaFetch([{ ...file('no-range', 'large.mp4'), extension: 'mp4', type: 'video', size: 30 * 1024 ** 3 }], {
+    globalThis.fetch = mediaFetch([{ ...file('no-range', 'large.mp4'), extension: 'mp4', type: 'video', size: 49_000_000 }], {
       ok: true, rangeSupported: false, status: 200, acceptRanges: null, contentRange: null,
     })
     wrapper = mount(CloudStoragePage, { attachTo: document.body })
@@ -311,7 +328,7 @@ describe('CloudStoragePage directory loading', () => {
 
   it('shows the explicit Quark 50 MiB policy without offering a failing playback or download retry', async () => {
     window.history.replaceState(null, '', '/?storageId=quark-main')
-    const fetch = mediaFetch([{ ...file('limited-video', '07(1).mp4'), extension: 'mp4', type: 'video', size: 848086961 }], {
+    const fetch = mediaFetch([{ ...file('limited-video', '07(1).mp4'), extension: 'mp4', type: 'video', size: 49_000_000 }], {
       statusCode: 422, body: { ok: false, error: 'quark_file_size_limit', limitBytes: 52428800 },
     })
     globalThis.fetch = fetch

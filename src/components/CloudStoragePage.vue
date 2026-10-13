@@ -6,6 +6,8 @@ import { QUARK_FILE_SIZE_LIMIT, quarkDownloadLimitMessage } from '../../lib/stor
 const BLOG_VIDEO_URL = 'https://blog.map7e.com/videos/underwater.mp4'
 const TEXT_EXTENSIONS = ['txt', 'md', 'markdown', 'json', 'csv', 'xml', 'yaml', 'yml', 'log', 'ini']
 const RAW_IMAGE_EXTENSIONS = ['dng', 'cr2', 'cr3', 'nef', 'arw', 'rw2', 'orf', 'raf', 'pef']
+// User-facing playback cap: 50 decimal MB, below Quark's 50 MiB upstream ceiling.
+const MAX_INLINE_VIDEO_BYTES = 50_000_000
 const IMAGE_EXTENSIONS = ['jpg', 'jpeg', 'png', 'webp', 'gif', 'avif', 'svg', ...RAW_IMAGE_EXTENSIONS]
 const BROWSER_PREVIEW_IMAGE_EXTENSIONS = new Set(['jpg', 'jpeg', 'png', 'webp', 'gif', 'avif', 'svg'])
 const VIDEO_EXTENSIONS = ['mp4', 'webm', 'mov', 'm4v']
@@ -1397,6 +1399,15 @@ async function openFile(file) {
   }
   if (file.type === 'video' || VIDEO_EXTENSIONS.includes(file.extension)) {
     previewMode.value = 'video'
+    // Unknown sizes are not proof that a video is <= 50 MB; never start a Range probe.
+    if (!Number.isFinite(file.sizeBytes) || file.sizeBytes < 0) {
+      previewError.value = '无法确认视频大小，暂不支持在线播放（仅开放不超过 50 MB 的视频）。'
+      return
+    }
+    if (file.sizeBytes > MAX_INLINE_VIDEO_BYTES) {
+      previewError.value = '视频超过 50 MB，暂不支持在线播放。'
+      return
+    }
     previewLoading.value = true
     const controller = new AbortController()
     previewProbeController = controller
